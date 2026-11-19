@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: ml-platform
+spec:
+  selector:
+    app: mlflow
+  ports:
+  - port: 5000
+    targetPort: 5000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: ml-platform
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: &id001
+      app: mlflow
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: mlflow
+        image: ml-infra/mlflow:3.18.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - --host
+        - 0.0.0.0
+        - --port
+        - '5000'
+        - --workers
+        - '1'
+        - --allowed-hosts
+        - mlflow,mlflow:*,mlflow.ml-platform*,localhost*,127.0.0.1*
+        - --backend-store-uri
+        - postgresql+psycopg2://mlflow:$(DB_PASSWORD)@postgres:5432/mlflow
+        - --serve-artifacts
+        - --artifacts-destination
+        - s3://mlflow/artifacts
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tracking-credentials
+              key: database-password
+        - &id002
+          name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: tracking-credentials
+              key: s3-id
+        - &id003
+          name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tracking-credentials
+              key: s3-secret
+        - &id004
+          name: MLFLOW_S3_ENDPOINT_URL
+          value: http://objects:10000
+        - &id005
+          name: AWS_DEFAULT_REGION
+          value: us-east-1
+        ports:
+        - containerPort: 5000
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 2Gi
+        readinessProbe:
+          tcpSocket:
+            port: 5000
+          periodSeconds: 5
+      initContainers:
+      - name: create-bucket
+        image: ml-infra/mlflow:3.18.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - -c
+        - "import boto3, os\ns3 = boto3.client(\"s3\", endpoint_url=os.environ[\"\
+          MLFLOW_S3_ENDPOINT_URL\"])\nif \"mlflow\" not in [b[\"Name\"] for b in s3.list_buckets()[\"\
+          Buckets\"]]:\n    s3.create_bucket(Bucket=\"mlflow\")\n"
+        env:
+        - *id002
+        - *id003
+        - *id004
+        - *id005

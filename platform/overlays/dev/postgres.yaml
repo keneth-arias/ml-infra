@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres
+  namespace: ml-platform
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: microk8s-hostpath
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ml-platform
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ml-platform
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: &id001
+      app: postgres
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: postgres
+        image: postgres:17.7-bookworm
+        imagePullPolicy: IfNotPresent
+        args: []
+        env:
+        - name: POSTGRES_USER
+          value: mlflow
+        - name: POSTGRES_DB
+          value: mlflow
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tracking-credentials
+              key: database-password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/db
+        ports:
+        - containerPort: 5432
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 2Gi
+        readinessProbe:
+          tcpSocket:
+            port: 5432
+          periodSeconds: 5
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: postgres
