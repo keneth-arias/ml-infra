@@ -49,8 +49,7 @@ import the image from `bm`, passing absolute paths to the two source checkouts.
 bootstrap/microk8s/import-qwen.sh /path/to/OpenTSLM /path/to/airaware
 ```
 
-The task mounts `airaware/inputs` and `airaware/runs` from the existing checkpoints
-claim. Stage the verified TimeF release under `airaware/inputs/timef`, the exact
+The task mounts `airaware/inputs` and `airaware/runs` from the `training/airaware-checkpoints` claim. Stage the verified TimeF release under `airaware/inputs/timef`, the exact
 Qwen snapshot under `airaware/inputs/qwen/weights`, and the training and validation
 arrays as `train.npz` and `validation.npz`. Use AirAware's
 `tools/timenet-smoke/export_qwen_windows.py` to generate the arrays. On the staging
@@ -79,10 +78,17 @@ holds the trainable adapters, projector, readout and head plus the optimizer
 state. The pinned base snapshot is required at restore time. Resume with the
 same image tag, model mode, seed, head, batch and schedule used at launch.
 
-The current profile uses the original claim for its recovery drill. The
-`workloads/sky/airaware-storage.yaml` manifest reserves 64 GiB with a separate
-retention policy for longer work. Schedule migration when the trainer is idle.
-Copy the selected inputs and complete generations into the new volume, verify
-their hashes, and run a restore before changing the task's claim reference.
+The Flux overlay declares a 64 GiB hostpath claim with a Retain policy.
+For a new volume, create the input and run directories before the first launch.
+To bring forward the earlier drill from `training/checkpoints`, use the one-shot
+migration job after stopping writers. It copies inputs and complete generations,
+then checks every checkpoint file against its manifest. Keep the original
+volume until a restore from the new claim has succeeded.
+
+```bash
+kubectl create -f workloads/smoke/airaware-migrate.yaml
+kubectl logs -n training job/airaware-checkpoint-migration
+```
+
 Hostpath uses the node's shared filesystem. Monitor actual bytes on the node
 and keep a verified copy outside the node for disaster recovery.

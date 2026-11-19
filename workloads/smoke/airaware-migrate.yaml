@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airaware-checkpoint-migration
+  namespace: training
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: copy
+          image: ml-infra/training:qwen-7835d32fb478-r2
+          imagePullPolicy: Never
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              test ! -e /new/airaware
+              cp -a /old/airaware /new/airaware
+              cd /new/airaware/inputs
+              sha256sum -c SHA256SUMS
+              cd qwen
+              sha256sum -c SHA256SUMS
+              /opt/conda/bin/python - <<'PY'
+              from pathlib import Path
+              from opentslm.forecast_checkpoint import files, read_manifest
+              roots = list(Path("/new/airaware/runs").glob("*/step-????????"))
+              assert roots
+              for root in sorted(roots):
+                  manifest = read_manifest(root)
+                  if not manifest or files(root) != manifest["files"]:
+                      raise RuntimeError(f"Invalid copy for {root}")
+                  print(f"Verified {root.parent.name}/{root.name}", flush=True)
+              PY
+          resources:
+            requests:
+              cpu: "2"
+              memory: 256Mi
+          volumeMounts:
+            - name: old
+              mountPath: /old
+              readOnly: true
+            - name: new
+              mountPath: /new
+      volumes:
+        - name: old
+          persistentVolumeClaim:
+            claimName: checkpoints
+        - name: new
+          persistentVolumeClaim:
+            claimName: airaware-checkpoints

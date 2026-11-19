@@ -27,7 +27,7 @@ config:
         volumes:
           - name: storage
             persistentVolumeClaim:
-              claimName: checkpoints
+              claimName: airaware-checkpoints
           - name: shm
             emptyDir:
               medium: Memory
