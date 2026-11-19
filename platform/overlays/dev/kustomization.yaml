@@ -7,5 +7,6 @@ resources:
 - objects.yaml
 - postgres.yaml
 - training.yaml
+- airaware-storage.yaml
 - sky-access.yaml
 - credentials.sops.yaml

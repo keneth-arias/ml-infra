@@ -38,3 +38,57 @@ PostgreSQL stores run metadata and VersityGW stores proxied artifacts. The three
 ## Nebius
 
 The [Terraform setup](bootstrap/nebius/README.md) uses the registered service-account key for the cloud API and a distinct S3 key for state. The production GPU SKU, node counts, budget and state bucket must be selected before provisioning. See [the plan](tasks/plan.md) and [acceptance checklist](tasks/todo.md).
+
+## AirAware Qwen training
+
+Use the pinned Qwen trainer revision referenced by the SkyPilot task. Install
+CPython 3.13.13 with the host's uv for the TimeNet reader environment. Build and
+import the image from `bm`, passing absolute paths to the two source checkouts.
+
+```bash
+bootstrap/microk8s/import-qwen.sh /path/to/OpenTSLM /path/to/airaware
+```
+
+The task mounts `airaware/inputs` and `airaware/runs` from the `training/airaware-checkpoints` claim. Stage the verified TimeF release under `airaware/inputs/timef`, the exact
+Qwen snapshot under `airaware/inputs/qwen/weights`, and the training and validation
+arrays as `train.npz` and `validation.npz`. Use AirAware's
+`tools/timenet-smoke/export_qwen_windows.py` to generate the arrays. On the staging
+filesystem, run `sha256sum weights/* >SHA256SUMS` in `qwen`, then run
+`sha256sum train.npz validation.npz timef/manifest.json qwen/SHA256SUMS >SHA256SUMS`
+in `inputs`. Create the sibling `runs` directory before launching. The pod
+verifies the manifest and dataset using the pinned SDK before starting training.
+
+```bash
+export KUBECONFIG="$HOME/.config/ml-infra/kubeconfig"
+sky launch -y -c airaware-part workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env STOP_STEP=2
+sky down -y airaware-part
+sky launch -y -c airaware-resume workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env RESUME=1
+sky down -y airaware-resume
+```
+
+Use the same `RUN_ID` and `SCHEDULE_STEPS` when resuming. Use a fresh `RUN_ID`
+for the continuous control or each independent experiment. `TRAIN_MODE=ddp`
+runs the replicated comparison. For `TRAIN_MODE=single`, override the request
+with `--gpus rtx5070ti:1`. To compare forecast heads, use another run ID and
+`HEAD=persistence`. MLflow records each attempt, including checkpoint metadata.
+
+For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`
+or `TRAIN_MODE=single`. Use a new `RUN_ID` for the adapter run. Its checkpoint
+holds the trainable adapters, projector, readout and head plus the optimizer
+state. The pinned base snapshot is required at restore time. Resume with the
+same image tag, model mode, seed, head, batch and schedule used at launch.
+
+The Flux overlay declares a 64 GiB hostpath claim with a Retain policy.
+For a new volume, create the input and run directories before the first launch.
+To bring forward the earlier drill from `training/checkpoints`, use the one-shot
+migration job after stopping writers. It copies inputs and complete generations,
+then checks every checkpoint file against its manifest. Keep the original
+volume until a restore from the new claim has succeeded.
+
+```bash
+kubectl create -f workloads/smoke/airaware-migrate.yaml
+kubectl logs -n training job/airaware-checkpoint-migration
+```
+
+Hostpath uses the node's shared filesystem. Monitor actual bytes on the node
+and keep a verified copy outside the node for disaster recovery.

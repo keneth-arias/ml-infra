@@ -1,0 +1,12 @@
+FROM ghcr.io/astral-sh/uv:0.11.20 AS uv
+FROM ml-infra/training:dev2
+COPY --from=uv /uv /usr/local/bin/uv
+RUN /opt/conda/bin/pip install --no-cache-dir 'transformers==5.5.4' && /opt/conda/bin/pip check
+COPY --from=forecast /src /opt/forecast/src
+COPY --from=forecast /scripts/train_qwen_forecast.py /opt/forecast/train_qwen_forecast.py
+COPY --from=reader / /opt/reader
+COPY --from=reader-python / /opt/reader-python
+RUN uv sync --project /opt/reader --locked --python /opt/reader-python/bin/python3.13
+ARG FORECAST_SOURCE_REVISION
+ENV FORECAST_SOURCE_REVISION=${FORECAST_SOURCE_REVISION} HF_HUB_OFFLINE=1 PYTHONPATH=/opt/forecast/src
+COPY runtime/airaware.py /opt/ml-infra/airaware.py
