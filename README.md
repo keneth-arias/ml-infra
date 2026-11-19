@@ -101,6 +101,10 @@ export PYTHONPATH=/opt/forecast/src
   --output /checkpoints/heads-01-direct/validation-predictions.npz
 ```
 
+For the full model comparison, set `AIRAWARE_MODEL_STATE=1` when calling `workloads/sky/launch-airaware.sh`. The launcher renders the pinned task with the retained `training/airaware-model-state` claim at `/checkpoints`. Its 64 GiB budget is dedicated to new model states. Frozen inputs still come from the read-only mount on `airaware-checkpoints`. Use the same setting to resume or restore these runs. The default profile continues to find existing qualification checkpoints at their original paths. Both claims use local storage on bm.
+
+To use the model volume with a separate `sky exec` task, render the same profile with `uv run --script workloads/sky/model-state.py workloads/sky/airaware.yaml`. The claim binds on first use. At global batch 16 each full state occupies about 6.52 GiB. Keeping two completed generations plus one in progress per head needs about 39.1 GiB for two heads. Monitor actual usage and free bytes before starting other writers.
+
 For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`
 or `TRAIN_MODE=single`. Use a new `RUN_ID` for the adapter run. Its checkpoint
 holds the trainable adapters, projector, readout and head plus the optimizer

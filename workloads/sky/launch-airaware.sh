@@ -17,5 +17,11 @@ case "$mode" in
   *) echo "Unsupported training mode: $mode" >&2; exit 2 ;;
 esac
 task="$(dirname "$0")/airaware.yaml"
-exec sky launch "$task" "${resources[@]}" "$@" --cluster "$cluster" --gpus "rtx5070ti:$cards" \
+if [[ "${AIRAWARE_MODEL_STATE:-0}" == 1 ]]; then
+  rendered=$(mktemp --suffix=.yaml)
+  trap 'rm -f -- "$rendered"' EXIT
+  uv run --script "$(dirname "$0")/model-state.py" "$task" > "$rendered"
+  task=$rendered
+fi
+sky launch "$task" "${resources[@]}" "$@" --cluster "$cluster" --gpus "rtx5070ti:$cards" \
   --env "TRAIN_MODE=$mode" --env "RUN_ID=$run_id"

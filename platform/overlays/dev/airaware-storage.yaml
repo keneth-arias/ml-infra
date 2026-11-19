@@ -18,3 +18,16 @@ spec:
   resources:
     requests:
       storage: 64Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airaware-model-state
+  namespace: training
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: airaware-hostpath-retain
+  resources:
+    requests:
+      storage: 64Gi
