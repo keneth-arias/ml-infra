@@ -14,7 +14,18 @@ sky down -y my-lora
 
 The dedicated kubeconfig targets `dev-bm` and scopes submission to `training`. The task uses a pod without a Kubernetes API identity. Tear down the SkyPilot cluster after the run to release its GPU reservation. Use your usual MicroK8s admin context in a separate shell for platform operations.
 
-On the server, MLflow is at `http://127.0.0.1:5000` and SkyPilot at `http://127.0.0.1:46580`. From a workstation, forward the ports through your usual SSH connection to this host. Both endpoints are loopback-only. PostgreSQL stores run metadata and VersityGW stores proxied artifacts. The three PVCs are local to this node. The local checkpoints and encrypted tracking credentials need off-host backups for disaster recovery.
+## Workstation access
+
+| Network | MLflow | SkyPilot dashboard |
+|---|---|---|
+| LAN (192.168.50.0/24) | http://192.168.50.172:5000/ | https://192.168.50.172:46580/dashboard/ |
+| Tailnet | http://bm.degu-fir.ts.net:5000/ | https://bm.degu-fir.ts.net:46580/dashboard/ |
+
+MLflow permits tracking reads and writes from reachable LAN clients and permitted tailnet peers without a password. Tailnet traffic travels through Tailscale. SkyPilot requires HTTPS Basic authentication on both network routes. Use the shared operator login `skyadmin` only for people allowed to launch or cancel jobs. The owner can retrieve its password over SSH with `ssh kymai@bm.degu-fir.ts.net 'cat ~/.config/ml-infra/sky-lan-password'`. For direct LAN HTTPS, import the [public SkyPilot LAN CA certificate](bootstrap/microk8s/sky-lan-ca.crt) into the workstation trust store. The tailnet URL uses a publicly trusted certificate.
+
+The `ml-access.service` user unit runs Caddy with the checked-in `bootstrap/microk8s/Caddyfile` installed in `~/.config/ml-infra/`. Its private environment file `sky-proxy.env` supplies the bcrypt hash as `SKY_PASSWORD_HASH`. Keep the server's DHCP reservation at 192.168.50.172 for these URLs. Tailscale Serve forwards TCP port 5000 to loopback port 5000 and terminates HTTPS on port 46580 at the authenticated loopback proxy on port 46680. Tailnet grants control which peers can connect.
+
+PostgreSQL stores run metadata and VersityGW stores proxied artifacts. The three PVCs are local to this node. The local checkpoints and encrypted tracking credentials need off-host backups for disaster recovery.
 
 ## Operate and recover
 

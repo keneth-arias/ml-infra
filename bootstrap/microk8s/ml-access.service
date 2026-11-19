@@ -1,0 +1,15 @@
+[Unit]
+Description=LAN and authenticated tailnet access for training services
+After=network-online.target mlflow-ui.service skypilot-local.service
+
+[Service]
+EnvironmentFile=%h/.config/ml-infra/sky-proxy.env
+Environment=XDG_DATA_HOME=%h/.local/share/ml-infra-access
+ExecStart=%h/.local/bin/caddy run --config %h/.config/ml-infra/Caddyfile --adapter caddyfile
+UMask=0077
+NoNewPrivileges=yes
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

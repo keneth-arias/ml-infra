@@ -1,0 +1,50 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	servers {
+		protocols h1 h2
+	}
+}
+
+(lan_only) {
+	@outside not remote_ip 192.168.50.0/24
+	respond @outside 403
+}
+
+(sky_login) {
+	basic_auth {
+		skyadmin {$SKY_PASSWORD_HASH}
+	}
+	reverse_proxy 127.0.0.1:46580 {
+		header_up -Authorization
+		header_up X-Forwarded-Proto https
+		header_up -X-Auth-Request-User
+		header_up -X-Auth-Request-Email
+		header_up -X-Forwarded-User
+		header_up -X-Forwarded-Email
+	}
+}
+
+http://:5000 {
+	bind 192.168.50.172
+	route {
+		import lan_only
+		reverse_proxy 127.0.0.1:5000
+	}
+}
+
+https://192.168.50.172:46580 {
+	bind 192.168.50.172
+	tls internal
+	route {
+		import lan_only
+		import sky_login
+	}
+}
+
+# Tailscale Serve terminates HTTPS and forwards to this loopback listener.
+http://:46680 {
+	bind 127.0.0.1
+	import sky_login
+}
