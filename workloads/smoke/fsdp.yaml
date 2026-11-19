@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lora-fsdp-smoke
+  namespace: training
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+      - name: trainer
+        image: ml-infra/training:dev1
+        imagePullPolicy: Never
+        command:
+        - /opt/conda/bin/accelerate
+        args:
+        - launch
+        - --use_fsdp
+        - --fsdp_version
+        - '1'
+        - --fsdp_auto_wrap_policy
+        - TRANSFORMER_BASED_WRAP
+        - --fsdp_transformer_layer_cls_to_wrap
+        - LlamaDecoderLayer
+        - --fsdp_sharding_strategy
+        - FULL_SHARD
+        - --fsdp_use_orig_params
+        - 'true'
+        - --fsdp_state_dict_type
+        - SHARDED_STATE_DICT
+        - --num_machines
+        - '1'
+        - --num_processes
+        - '2'
+        - --mixed_precision
+        - bf16
+        - /opt/ml-infra/train.py
+        - --checkpoint
+        - /checkpoints/fsdp-smoke
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: http://mlflow.ml-platform.svc:5000
+        - name: OMP_NUM_THREADS
+          value: '2'
+        resources:
+          requests:
+            cpu: '4'
+            memory: 4Gi
+          limits:
+            memory: 12Gi
+            nvidia.com/gpu: 2
+        volumeMounts:
+        - name: checkpoints
+          mountPath: /checkpoints
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: checkpoints
+        persistentVolumeClaim:
+          claimName: checkpoints
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

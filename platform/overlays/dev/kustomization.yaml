@@ -8,3 +8,4 @@ resources:
 - postgres.yaml
 - training.yaml
 - sky-access.yaml
+- credentials.sops.yaml
