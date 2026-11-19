@@ -2,6 +2,12 @@
 
 Build a private infra repo named `ml-infra` beside the workload repos. Use the existing MicroK8s server for development and target Nebius Managed Service for Kubernetes (MK8s) for production. MK8s lets SkyPilot target Kubernetes in both environments and lets Flux reconcile the same platform definitions. No cloud resources are required for the first local milestones.
 
+## AirAware Qwen milestone
+
+The first application training baseline is complete. AirAware used a frozen TimeF release with 512 training windows and 128 chronological validation windows. The four-update pilot consumed 16 training windows. The single-GPU, replicated DDP and sharded FSDP2 runs used the same global batch. The interrupted FSDP2 run restored step 2 on a fresh pod and reproduced steps 3–4, including the inspected tensors and validation MAE. Hybrid LoRA also resumed. Eight checkpoint generations were verified on the retained 64 GiB claim. [OpenTSLM trainer](https://github.com/keneth-arias/OpenTSLM/pull/3) · [AirAware run evidence](https://github.com/keneth-arias/airaware/blob/main/metadata/qwen-cluster-drill.json) · [SkyPilot integration](https://github.com/keneth-arias/ml-infra/pull/1)
+
+On the 128 validation windows, persistence achieved MAE 10.0107 µg/m³, direct Qwen 13.5589, and Qwen with a persistence correction 9.8225. Keep this as a short infrastructure and model pilot. AirAware issue #28 owns the budgeted chronological evaluation by station and horizon. For the infra repo, promote the tested workload to a private registry digest, check the digest on bm, then restore a checkpoint and MLflow run from independent storage. Take that same workload, data revision and evaluation configuration into the first costed Nebius plan. [AirAware evaluation](https://github.com/keneth-arias/airaware/issues/28)
+
 ## Starting point on bm
 
 Read-only inventory on 2026-11-19 found one MicroK8s v1.35.6 node on the 1.35/stable snap channel, Calico, DNS, 32 logical CPUs, 59 GiB host RAM and about 901 GiB free on the mounted root filesystem. Linux sees two RTX 5070 Ti GPUs with 16,303 MiB each, compute capability 12.0 and NVIDIA driver 615.71.09. The GPUs communicate across a PCIe host bridge. Kubernetes currently exposes no allocatable GPUs or StorageClasses. Only the default system namespaces exist. The NVIDIA, storage and RBAC add-ons are disabled. An impersonation check allowed the default namespace's default service account to read Secrets cluster-wide. Resolve that before introducing registry, tracking or cloud credentials.

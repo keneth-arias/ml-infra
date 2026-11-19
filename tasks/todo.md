@@ -25,3 +25,10 @@ Local foundation checkpoint follows slices 1–5. Developer acceptance follows s
 On 2026-11-19 the node advertised two RTX 5070 Ti GPUs with RBAC enforced. Flux reconciled the private repo with its read-only deploy key and decrypted the dev tracking credentials. PostgreSQL, VersityGW and MLflow became ready. A single-GPU BF16 LoRA run exported and reloaded an adapter. Two-rank NCCL, DDP and FSDP ran on both cards. A fresh pod resumed the FSDP checkpoint and logged its next two steps. SkyPilot submitted a two-GPU run and cancelled a separate test job. Images were imported directly into MicroK8s. Publishing the runtime for cloud promotion and restoring off-host backups remain open.
 
 The Nebius CLI and a Terraform data-source plan authenticated to the production project and read its default subnet in eu-south1. The project had zero MK8s clusters and the supplied Object Storage credentials listed zero buckets. The state bucket, production cluster sizing and cloud qualification remain open.
+
+
+## AirAware Qwen handoff
+
+- [x] Establish the application baseline and fresh-pod checkpoint recovery on the RTX 5070 Ti cluster. OpenTSLM #1–3, AirAware #89–90 and ml-infra #1 are merged into their respective main branches. [Recorded runs and input hashes](https://github.com/keneth-arias/airaware/blob/main/metadata/qwen-cluster-drill.json)
+- [ ] Restore the AirAware checkpoint and MLflow metadata/artifacts from independent storage. The verified migration between local PVCs exercises same-host recovery.
+- [ ] Select the production GPU configuration and spend limit for one qualification run. [Model evaluation scope](https://github.com/keneth-arias/airaware/issues/28)
