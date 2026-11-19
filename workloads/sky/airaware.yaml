@@ -1,0 +1,50 @@
+name: airaware-qwen
+num_nodes: 1
+resources:
+  infra: k8s/dev-bm
+  accelerators: rtx5070ti:2
+  cpus: 6
+  memory: 16
+  image_id: docker:ml-infra/training:qwen-10c5fdfa1cca-r2
+config:
+  kubernetes:
+    remote_identity: NONE
+    pod_config:
+      spec:
+        containers:
+          - name: ray-node
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+              - name: storage
+                mountPath: /inputs
+                subPath: airaware/inputs
+                readOnly: true
+              - name: storage
+                mountPath: /checkpoints
+                subPath: airaware/runs
+              - name: shm
+                mountPath: /dev/shm
+        volumes:
+          - name: storage
+            persistentVolumeClaim:
+              claimName: checkpoints
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
+envs:
+  MLFLOW_TRACKING_URI: http://mlflow.ml-platform.svc:5000
+  OMP_NUM_THREADS: "2"
+  RUN_ID:
+  TRAIN_MODE: fsdp
+  HEAD: direct
+  PRECISION: fp32
+  STOP_STEP: "4"
+  SCHEDULE_STEPS: "4"
+  SAVE_SECONDS: "900"
+  RESUME: "0"
+run: |
+  set -eu
+  set -- --mode "$TRAIN_MODE" --head "$HEAD" --precision "$PRECISION" --stop-step "$STOP_STEP" --schedule-steps "$SCHEDULE_STEPS" --save-seconds "$SAVE_SECONDS"
+  if [ "$RESUME" = "1" ]; then set -- "$@" --resume; fi
+  /opt/conda/bin/python /opt/ml-infra/airaware.py "${RUN_ID:?Provide RUN_ID}" "$@"

@@ -38,3 +38,37 @@ PostgreSQL stores run metadata and VersityGW stores proxied artifacts. The three
 ## Nebius
 
 The [Terraform setup](bootstrap/nebius/README.md) uses the registered service-account key for the cloud API and a distinct S3 key for state. The production GPU SKU, node counts, budget and state bucket must be selected before provisioning. See [the plan](tasks/plan.md) and [acceptance checklist](tasks/todo.md).
+
+## AirAware Qwen training
+
+Use the pinned Qwen trainer revision referenced by the SkyPilot task. Install
+CPython 3.13.13 with the host's uv for the TimeNet reader environment. Build and
+import the image from `bm`, passing absolute paths to the two source checkouts.
+
+```bash
+bootstrap/microk8s/import-qwen.sh /path/to/OpenTSLM /path/to/airaware
+```
+
+The task mounts `airaware/inputs` and `airaware/runs` from the existing checkpoints
+claim. Stage the verified TimeF release under `airaware/inputs/timef`, the exact
+Qwen snapshot under `airaware/inputs/qwen/weights`, and the training and validation
+arrays as `train.npz` and `validation.npz`. Use AirAware's
+`tools/timenet-smoke/export_qwen_windows.py` to generate the arrays. On the staging
+filesystem, run `sha256sum weights/* >SHA256SUMS` in `qwen`, then run
+`sha256sum train.npz validation.npz timef/manifest.json qwen/SHA256SUMS >SHA256SUMS`
+in `inputs`. Create the sibling `runs` directory before launching. The pod
+verifies the manifest and dataset using the pinned SDK before starting training.
+
+```bash
+export KUBECONFIG="$HOME/.config/ml-infra/kubeconfig"
+sky launch -y -c airaware-part workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env STOP_STEP=2
+sky down -y airaware-part
+sky launch -y -c airaware-resume workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env RESUME=1
+sky down -y airaware-resume
+```
+
+Use the same `RUN_ID` and `SCHEDULE_STEPS` when resuming. Use a fresh `RUN_ID`
+for the continuous control or each independent experiment. `TRAIN_MODE=ddp`
+runs the replicated comparison. For `TRAIN_MODE=single`, override the request
+with `--gpus rtx5070ti:1`. To compare forecast heads, use another run ID and
+`HEAD=persistence`. MLflow records each attempt, including checkpoint metadata.
