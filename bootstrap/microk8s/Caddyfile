@@ -15,6 +15,7 @@
 (sky_login) {
 	basic_auth {
 		skyadmin {$SKY_PASSWORD_HASH}
+		cristopher {$SKY_CRISTOPHER_PASSWORD_HASH}
 	}
 	reverse_proxy 127.0.0.1:46580 {
 		header_up -Authorization
