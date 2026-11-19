@@ -1,0 +1,27 @@
+name: lora-smoke
+resources:
+  infra: k8s/dev-bm
+  accelerators: rtx5070ti:2
+  cpus: 4
+  memory: 12
+  image_id: docker:ml-infra/training:dev2
+config:
+  kubernetes:
+    remote_identity: NONE
+    pod_config:
+      spec:
+        containers:
+          - name: ray-node
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+              - name: checkpoints
+                mountPath: /checkpoints
+        volumes:
+          - name: checkpoints
+            persistentVolumeClaim:
+              claimName: checkpoints
+envs:
+  MLFLOW_TRACKING_URI: http://mlflow.ml-platform.svc:5000
+  OMP_NUM_THREADS: "2"
+run: |
+  /opt/conda/bin/accelerate launch --multi_gpu --num_processes 2 --num_machines 1 --mixed_precision bf16 /opt/ml-infra/train.py --checkpoint /checkpoints/sky-${SKYPILOT_TASK_ID}

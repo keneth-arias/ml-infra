@@ -4,9 +4,9 @@ Each row is a proposed implementation slice. Complete the verification on the ta
 
 | Done | Slice and likely paths | Depends on | Acceptance and verification |
 |---|---|---|---|
-| [ ] | 1. Establish dev access and RBAC in `bootstrap/microk8s` | Existing node | Verify admin recovery access, enable RBAC and repeat the impersonated default-SA check for cluster-wide Secrets. It must return no. Confirm DNS and Calico stay healthy. |
-| [ ] | 2. Expose and qualify GPUs in `bootstrap/microk8s`, `workloads/smoke` | 1 | Node reports two allocatable GPUs. A pod requesting both executes CUDA on each device and completes a two-rank NCCL all-reduce with the expected sum. |
-| [ ] | 3. Bootstrap GitOps in `clusters/dev-bm`, `platform/overlays/dev` | 1 | Pin Flux, run preflight, bootstrap private repo access and SOPS. Reconcile a harmless namespace label, introduce drift and verify Flux restores it. |
+| [x] | 1. Establish dev access and RBAC in `bootstrap/microk8s` | Existing node | Verify admin recovery access, enable RBAC and repeat the impersonated default-SA check for cluster-wide Secrets. It must return no. Confirm DNS and Calico stay healthy. |
+| [x] | 2. Expose and qualify GPUs in `bootstrap/microk8s`, `workloads/smoke` | 1 | Node reports two allocatable GPUs. A pod requesting both executes CUDA on each device and completes a two-rank NCCL all-reduce with the expected sum. |
+| [x] | 3. Bootstrap GitOps in `clusters/dev-bm`, `platform/overlays/dev` | 1 | Pin Flux, run preflight, bootstrap private repo access and SOPS. Reconcile a harmless namespace label, introduce drift and verify Flux restores it. |
 | [ ] | 4. Add render and schema checks in `ci` | 3 | CI renders configured clusters and rejects an invalid manifest and a floating production image reference. Verify server-side dry-run in dev after CRD installation. |
 | [ ] | 5. Establish storage in `bootstrap/microk8s`, `platform/overlays/dev` | 3 | Verify local PVC persistence across pod replacement, object put/get and an off-host backup. Document capacity and restore paths. |
 | [ ] | 6. Bring up MLflow in `platform/base`, `platform/overlays/dev` | 4, 5 | Log a run and artifact from a client pod. Restore PostgreSQL and objects into a fresh namespace and retrieve the same run and artifact checksum. |
@@ -19,3 +19,9 @@ Each row is a proposed implementation slice. Complete the verification on the ta
 | [ ] | 11. Qualify the first cloud workload using `workloads/sky` | 9, 10c | Run the same digest on one GPU node. Verify metrics, adapter reload, checkpoint restore, fixed-input comparison and resource release. Gate any multi-node rollout on its own rendezvous, NCCL and recovery test. |
 
 Local foundation checkpoint follows slices 1–5. Developer acceptance follows slice 9, when a SkyPilot submission exercises the full local path. Production acceptance follows the cloud qualification for the intended node count.
+
+## Deployment record on bm
+
+On 2026-11-19 the node advertised two RTX 5070 Ti GPUs with RBAC enforced. Flux reconciled the private repo with its read-only deploy key and decrypted the dev tracking credentials. PostgreSQL, VersityGW and MLflow became ready. A single-GPU BF16 LoRA run exported and reloaded an adapter. Two-rank NCCL, DDP and FSDP ran on both cards. A fresh pod resumed the FSDP checkpoint and logged its next two steps. SkyPilot submitted a two-GPU run and cancelled a separate test job. Images were imported directly into MicroK8s. Publishing the runtime for cloud promotion and restoring off-host backups remain open.
+
+The Nebius CLI and a Terraform data-source plan authenticated to the production project and read its default subnet in eu-south1. The project had zero MK8s clusters and the supplied Object Storage credentials listed zero buckets. The state bucket, production cluster sizing and cloud qualification remain open.

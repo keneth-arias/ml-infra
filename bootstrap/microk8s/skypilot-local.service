@@ -1,0 +1,13 @@
+[Unit]
+Description=Local SkyPilot API for the MicroK8s training namespace
+After=network-online.target
+
+[Service]
+Environment=KUBECONFIG=%h/.config/ml-infra/kubeconfig
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=%h/.local/bin/sky api start --host 127.0.0.1 --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

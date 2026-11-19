@@ -13,7 +13,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: trainer
-        image: ml-infra/training:dev1
+        image: ml-infra/training:dev2
         imagePullPolicy: Never
         command:
         - /opt/conda/bin/accelerate

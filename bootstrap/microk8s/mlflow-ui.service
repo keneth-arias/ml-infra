@@ -1,0 +1,11 @@
+[Unit]
+Description=Local MLflow tracking UI
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/kubectl --context=microk8s -n ml-platform port-forward --address=127.0.0.1 service/mlflow 5000:5000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

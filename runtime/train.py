@@ -1,12 +1,14 @@
 """Offline dual-rank LoRA fixture. Run with accelerate launch."""
 import argparse
+import tempfile
+import time
 from pathlib import Path
 
 import mlflow
 import torch
 import torch.distributed as dist
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import DistributedType, set_seed
 from peft import LoraConfig, get_peft_model
 from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -33,6 +35,8 @@ value = torch.tensor(acc.process_index + 1, device=acc.device)
 if acc.num_processes > 1:
     dist.all_reduce(value)
 assert value.item() == acc.num_processes * (acc.num_processes + 1) // 2
+torch.cuda.synchronize()
+started = time.monotonic()
 for step in range(2):
     tokens = torch.randint(0, 256, (2, 32), device=acc.device)
     loss = model(input_ids=tokens, labels=tokens).loss
@@ -42,13 +46,31 @@ for step in range(2):
     optimizer.zero_grad()
     if acc.is_main_process:
         mlflow.log_metric("loss", loss.item(), step=step + (2 if args.resume else 0))
+torch.cuda.synchronize()
+elapsed = time.monotonic() - started
+if acc.is_main_process:
+    mlflow.log_metrics({
+        "training_tokens_per_second": 2 * tokens.numel() * acc.num_processes / elapsed,
+        "peak_gpu_memory_mib_rank0": torch.cuda.max_memory_allocated() / 2**20,
+    })
 acc.save_state(str(checkpoint))
 if acc.is_main_process:
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
+        if acc.distributed_type != DistributedType.FSDP:
+            module = acc.unwrap_model(model)
+            module.eval()
+            with torch.inference_mode():
+                expected = module(input_ids=tokens).logits
+                adapter_dir = Path(tmp) / "adapter"
+                module.save_pretrained(adapter_dir)
+                module.load_adapter(str(adapter_dir), adapter_name="roundtrip")
+                module.set_adapter("roundtrip")
+                torch.testing.assert_close(module(input_ids=tokens).logits, expected)
+            mlflow.log_artifacts(str(adapter_dir), artifact_path="adapter")
         report = Path(tmp) / "result.txt"
         report.write_text(f"world_size={acc.num_processes} all_reduce={value.item()} resumed={args.resume}\n")
         mlflow.log_artifact(str(report))
     print(f"MLFLOW_RUN_ID={mlflow.active_run().info.run_id}", flush=True)
     mlflow.end_run()
 acc.wait_for_everyone()
+acc.end_training()
