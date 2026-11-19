@@ -5,7 +5,7 @@ resources:
   accelerators: rtx5070ti:2
   cpus: 6
   memory: 16
-  image_id: docker:ghcr.io/keneth-arias/ml-infra-qwen@sha256:549f56bc614674399df79345941a44a7ebfa6182492ea61aa653c62711accea1
+  image_id: docker:ghcr.io/keneth-arias/ml-infra-qwen@sha256:32b27ab5bc82060bde95e565348dd7fd54b004015cc2dddd7df0747653fbe1d9
 config:
   kubernetes:
     remote_identity: NONE
@@ -45,9 +45,35 @@ envs:
   RESUME: "0"
   LORA: "0"
   BATCH: "4"
+  INPUT_VERSION: pilot
+  VALIDATE_AT: checkpoint
 run: |
   set -eu
-  set -- --mode "$TRAIN_MODE" --head "$HEAD" --precision "$PRECISION" --stop-step "$STOP_STEP" --schedule-steps "$SCHEDULE_STEPS" --save-seconds "$SAVE_SECONDS" --batch "$BATCH"
-  if [ "$LORA" = "1" ]; then set -- "$@" --lora; fi
-  if [ "$RESUME" = "1" ]; then set -- "$@" --resume; fi
-  /opt/conda/bin/python /opt/ml-infra/airaware.py "${RUN_ID:?Provide RUN_ID}" "$@"
+  train() {
+    run_id=$1
+    set -- --mode "$2" --head "$3" --precision "$PRECISION" --stop-step "$STOP_STEP" --schedule-steps "$SCHEDULE_STEPS" --save-seconds "$SAVE_SECONDS" --batch "$BATCH" --input-version "$INPUT_VERSION" --validate-at "$VALIDATE_AT"
+    if [ "$LORA" = "1" ]; then set -- "$@" --lora; fi
+    if [ "$RESUME" = "1" ]; then set -- "$@" --resume; fi
+    /opt/conda/bin/python /opt/ml-infra/airaware.py "$run_id" "$@"
+  }
+  : "${RUN_ID:?Provide RUN_ID}"
+  if [ "$TRAIN_MODE" != "pair" ]; then
+    train "$RUN_ID" "$TRAIN_MODE" "$HEAD"
+    exit
+  fi
+  devices=${CUDA_VISIBLE_DEVICES:-0,1}
+  first=${devices%%,*}
+  second=${devices#*,}
+  case "$second" in *,*|'') echo "Pair training needs exactly two visible GPUs" >&2; exit 2 ;; esac
+  if [ -z "$first" ] || [ "$first" = "$second" ]; then
+    echo "Pair training needs distinct GPUs" >&2
+    exit 2
+  fi
+  CUDA_VISIBLE_DEVICES="$first" train "$RUN_ID-direct" single direct &
+  direct_pid=$!
+  CUDA_VISIBLE_DEVICES="$second" train "$RUN_ID-persistence" single persistence &
+  residual_pid=$!
+  status=0
+  wait "$direct_pid" || status=$?
+  wait "$residual_pid" || status=$?
+  exit "$status"
