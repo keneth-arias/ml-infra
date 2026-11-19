@@ -41,13 +41,15 @@ The [Terraform setup](bootstrap/nebius/README.md) uses the registered service-ac
 
 ## AirAware Qwen training
 
-Use the pinned Qwen trainer revision referenced by the SkyPilot task. Install
-CPython 3.13.13 with the host's uv for the TimeNet reader environment. Build and
-import the image from `bm`, passing absolute paths to the two source checkouts.
+The SkyPilot task selects the AirAware runtime by its private GHCR manifest digest. It contains the OpenTSLM trainer and the AirAware TimeF reader. Weights, datasets and checkpoints are mounted at run time. On a new cluster, configure registry access for the training namespace with a package-read credential and use the image reference in `workloads/sky/airaware.yaml`. On bm, MicroK8s also caches this digest locally.
+
+To develop a new image, check out the desired OpenTSLM and AirAware commits, install CPython 3.13.13 with uv and run:
 
 ```bash
 bootstrap/microk8s/import-qwen.sh /path/to/OpenTSLM /path/to/airaware
 ```
+
+The script makes a local build tagged with both source SHAs. Publishing and updating the digest in the SkyPilot task are separate release steps. The initial release uses OpenTSLM `7835d32fb478` and AirAware `6807cd6e7c47`.
 
 The task mounts `airaware/inputs` and `airaware/runs` from the `training/airaware-checkpoints` claim. Stage the verified TimeF release under `airaware/inputs/timef`, the exact
 Qwen snapshot under `airaware/inputs/qwen/weights`, and the training and validation
@@ -76,7 +78,7 @@ For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`
 or `TRAIN_MODE=single`. Use a new `RUN_ID` for the adapter run. Its checkpoint
 holds the trainable adapters, projector, readout and head plus the optimizer
 state. The pinned base snapshot is required at restore time. Resume with the
-same image tag, model mode, seed, head, batch and schedule used at launch.
+same image digest, model mode, seed, head, batch and schedule used at launch.
 
 The Flux overlay declares a 64 GiB hostpath claim with a Retain policy.
 For a new volume, create the input and run directories before the first launch.

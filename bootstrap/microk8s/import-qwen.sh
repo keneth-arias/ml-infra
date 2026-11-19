@@ -16,11 +16,13 @@ trap 'rm -rf -- "$context"' EXIT
 mkdir "$context/reader" "$context/forecast"
 git -C "$forecast" archive "$revision" src scripts/train_qwen_forecast.py |
   tar -x -C "$context/forecast"
-for file in pyproject.toml uv.lock qwen_window.py senamhi_timef.py export_senamhi.py; do
-  cp "$airaware/tools/timenet-smoke/$file" "$context/reader/"
-done
-image="ml-infra/training:qwen-${revision:0:12}-r2"
-docker build --build-arg FORECAST_SOURCE_REVISION="$revision" \
+reader_revision=$(git -C "$airaware" rev-parse HEAD)
+git -C "$airaware" archive "$reader_revision:tools/timenet-smoke" \
+  pyproject.toml uv.lock qwen_window.py senamhi_timef.py export_senamhi.py | tar -x -C "$context/reader"
+base=ml-infra/training:qwen-base
+docker build -t "$base" runtime
+image="ml-infra/training:qwen-${revision:0:12}-${reader_revision:0:12}-r3"
+docker build --build-arg TRAINING_BASE="$base" --build-arg FORECAST_SOURCE_REVISION="$revision" \
   --build-context "forecast=$context/forecast" --build-context "reader=$context/reader" \
   --build-context "reader-python=$python_root" \
   -t "$image" -f runtime/Dockerfile.qwen .

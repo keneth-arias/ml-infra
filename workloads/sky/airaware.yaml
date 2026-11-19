@@ -5,7 +5,7 @@ resources:
   accelerators: rtx5070ti:2
   cpus: 6
   memory: 16
-  image_id: docker:ml-infra/training:qwen-7835d32fb478-r2
+  image_id: docker:ghcr.io/keneth-arias/ml-infra-qwen@sha256:549f56bc614674399df79345941a44a7ebfa6182492ea61aa653c62711accea1
 config:
   kubernetes:
     remote_identity: NONE
