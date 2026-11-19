@@ -91,6 +91,16 @@ SkyPilot rejects concurrent pods mounting this ReadWriteOnce claim. The paired t
 
 The first local timing used 60 FP32 updates per head, global batch 4, seed 27 and the same 240 training windows in identical order. The interval from the first MLflow run start to the last finish was 45.657 s for the pair. The two successive DDP runs used 62.527 s in total across their MLflow intervals. Each interval includes model loading and the final checkpoint write. Cluster provisioning and input verification precede the interval. Peak sampled container memory during the pair was 31.69 GiB including file cache. These measurements qualify the scheduling path for the repeated performance comparison in AirAware issue #28.
 
+To export forecasts in a SkyPilot job, set the package path explicitly in the task's `run` script. SkyPilot configures its own Python path for Ray workers.
+
+```bash
+export PYTHONPATH=/opt/forecast/src
+/opt/conda/bin/python -m opentslm.forecast_inference \
+  --checkpoint /checkpoints/heads-01-direct/step-00000060 --weights /inputs/qwen/weights \
+  --data /inputs/windows/lima-pm25-qwen-v1/validation.npz \
+  --output /checkpoints/heads-01-direct/validation-predictions.npz
+```
+
 For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`
 or `TRAIN_MODE=single`. Use a new `RUN_ID` for the adapter run. Its checkpoint
 holds the trainable adapters, projector, readout and head plus the optimizer
