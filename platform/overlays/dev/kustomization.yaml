@@ -7,3 +7,4 @@ resources:
 - objects.yaml
 - postgres.yaml
 - training.yaml
+- sky-access.yaml

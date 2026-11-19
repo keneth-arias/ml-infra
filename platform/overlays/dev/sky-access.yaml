@@ -1,0 +1,110 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: sky-submit
+  namespace: training
+  labels:
+    parent: skypilot
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: sky-submit-role
+  namespace: training
+  labels:
+    parent: skypilot
+rules:
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: sky-submit-rb
+  namespace: training
+  labels:
+    parent: skypilot
+subjects:
+- kind: ServiceAccount
+  name: sky-submit
+roleRef:
+  kind: Role
+  name: sky-submit-role
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: sky-submit-cluster-role
+  labels:
+    parent: skypilot
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - node.k8s.io
+  resources:
+  - runtimeclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingressclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - clusterrolebindings
+  - roles
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - namespaces
+  resourceNames:
+  - kube-system
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sky-submit-cluster-role-binding
+  labels:
+    parent: skypilot
+subjects:
+- kind: ServiceAccount
+  name: sky-submit
+  namespace: training
+roleRef:
+  kind: ClusterRole
+  name: sky-submit-cluster-role
+  apiGroup: rbac.authorization.k8s.io
