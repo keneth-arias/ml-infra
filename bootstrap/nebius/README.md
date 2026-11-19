@@ -1,0 +1,37 @@
+# Nebius managed training cluster
+
+This root manages one MK8s control plane and two fixed-size worker groups. It consumes an existing project, subnet and S3 state bucket. Both worker groups use private addresses. Arrange egress for nodes pulling images and private network reachability for the operator and Flux bootstrap. Confirm the selected GPU image and device support for the target SKU before scheduling training. Pool counts and disk sizes in the example are illustrative.
+
+## Credentials and plan
+
+Run from this directory. Set `NEBIUS_SA_ID` and `NEBIUS_AUTHORIZED_KEY_ID` to the IDs supplied by IAM. The command wrapper points the provider at the protected private key in `~/.config/ml-infra/nebius-private.pem` and maps the workspace's owner-only S3 credential file into the subprocess environment. Override the paths with `NEBIUS_PRIVATE_KEY_FILE` or `ML_INFRA_ENV_FILE`. Keep these files on the runner.
+
+1. Copy `terraform.tfvars.example` to `terraform.tfvars` and enter the project, subnet, Kubernetes version and regional pool settings. Confirm available GPU quota and price. Copy `backend.tfbackend.example` to `prod.tfbackend` and enter the private, versioned state bucket and regional endpoint.
+2. Configure a named CLI profile using the same registered key. The final command below queries the cluster list.
+
+   ```bash
+   ./with-credentials sh -ec 'nebius profile create ml-prod --service-account-id "${NEBIUS_SA_ID:?}" --public-key-id "${NEBIUS_AUTHORIZED_KEY_ID:?}" --private-key-file-path "$NEBIUS_PRIVATE_KEY_FILE" --parent-id "${NEBIUS_PROJECT_ID:?}"'
+   nebius --profile ml-prod mk8s cluster list
+   ```
+
+   Set `NEBIUS_PROJECT_ID` to the same project as `terraform.tfvars` before creating the profile.
+
+3. Initialize the backend, check the configuration and produce a plan for review.
+
+   ```bash
+   umask 077
+   ./with-credentials terraform init -reconfigure -backend-config=prod.tfbackend
+   terraform validate
+   ./with-credentials terraform plan -out=mk8s.tfplan
+   terraform show mk8s.tfplan
+   ```
+
+4. After approving the reviewed plan and its cost, run `./with-credentials terraform apply mk8s.tfplan`. From a runner with subnet reachability, retrieve credentials into a dedicated kubeconfig before bootstrapping Flux.
+
+   ```bash
+   cluster_id=$(./with-credentials terraform output -raw cluster_id)
+   nebius --profile ml-prod mk8s cluster get-credentials --id "$cluster_id" --internal --context-name prod-nebius --kubeconfig "$HOME/.kube/nebius-prod"
+   kubectl --kubeconfig "$HOME/.kube/nebius-prod" get nodes
+   ```
+
+For offline verification, use `terraform init -backend=false`, `terraform fmt -check` and `terraform validate`. The resource layout follows the [Nebius training example](https://github.com/nebius/nebius-solution-library/tree/194faa5249939d7345f6db7f5bf60ccd2f3a6b2c/k8s-training).

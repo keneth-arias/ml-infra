@@ -1,0 +1,7 @@
+project_id         = "REPLACE_WITH_PROJECT_ID"
+subnet_id          = "REPLACE_WITH_SUBNET_ID"
+kubernetes_version = "REPLACE_WITH_SUPPORTED_VERSION"
+node_pools = {
+  cpu = { platform = "REPLACE", preset = "REPLACE", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
+  gpu = { platform = "REPLACE", preset = "REPLACE", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
+}

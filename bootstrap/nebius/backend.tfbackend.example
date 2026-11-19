@@ -1,0 +1,3 @@
+bucket    = "REPLACE_WITH_EXISTING_STATE_BUCKET"
+region    = "REPLACE_WITH_REGION"
+endpoints = { s3 = "https://storage.REPLACE_WITH_REGION.nebius.cloud" }

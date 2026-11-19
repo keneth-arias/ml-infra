@@ -1,0 +1,11 @@
+.env
+.env.*
+*.pem
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfbackend
+*.tfplan
+crash*.log
