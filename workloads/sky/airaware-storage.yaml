@@ -1,0 +1,20 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: airaware-hostpath-retain
+provisioner: microk8s.io/hostpath
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airaware-checkpoints
+  namespace: training
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: airaware-hostpath-retain
+  resources:
+    requests:
+      storage: 64Gi

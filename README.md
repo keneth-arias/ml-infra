@@ -72,3 +72,17 @@ for the continuous control or each independent experiment. `TRAIN_MODE=ddp`
 runs the replicated comparison. For `TRAIN_MODE=single`, override the request
 with `--gpus rtx5070ti:1`. To compare forecast heads, use another run ID and
 `HEAD=persistence`. MLflow records each attempt, including checkpoint metadata.
+
+For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`
+or `TRAIN_MODE=single`. Use a new `RUN_ID` for the adapter run. Its checkpoint
+holds the trainable adapters, projector, readout and head plus the optimizer
+state. The pinned base snapshot is required at restore time. Resume with the
+same image tag, model mode, seed, head, batch and schedule used at launch.
+
+The current profile uses the original claim for its recovery drill. The
+`workloads/sky/airaware-storage.yaml` manifest reserves 64 GiB with a separate
+retention policy for longer work. Schedule migration when the trainer is idle.
+Copy the selected inputs and complete generations into the new volume, verify
+their hashes, and run a restore before changing the task's claim reference.
+Hostpath uses the node's shared filesystem. Monitor actual bytes on the node
+and keep a verified copy outside the node for disaster recovery.
