@@ -117,3 +117,13 @@ class ProfileTest(unittest.TestCase):
                 task["config"]["kubernetes"]["set_pod_resource_limits"], False
             )
             self.assertGreater(task["resources"]["memory"], 0)
+
+    def test_episode_image_does_not_stage_or_invoke_the_capped_worker(self):
+        repo = Path(__file__).resolve().parents[1]
+        for path in (
+            "bootstrap/microk8s/build-episodes.sh",
+            "runtime/Dockerfile.episodes",
+            "runtime/episode_job.py",
+        ):
+            with self.subTest(path=path):
+                self.assertNotIn("gpu_worker.py", (repo / path).read_text())

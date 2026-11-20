@@ -153,11 +153,12 @@ input view, scaler, channels, forecast hours and window IDs.
 
 ### Lima candidate heads
 
-Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of ml-infra, OpenTSLM and AirAware. For uncapped GPU allocation, use a fresh pod and an episode image built from ml-infra commit `7d9818c` or a descendant. Images that launch training through gpu_worker.py retain their 16 GB allocator cap. Import the image to MicroK8s with the same digest referenced in the profile. For new paired point controls, use the OpenTSLM revision recorded in [local qualification](tasks/lima-qualification.md). The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
+Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of ml-infra, OpenTSLM and AirAware. For uncapped GPU allocation, use a fresh pod and an episode image built from ml-infra commit `7d9818c` or a descendant. Images that launch training through `gpu_worker.py` retain their 16 GB allocator cap. Import the image to MicroK8s with the same digest referenced in the profile. For new paired point controls, use the OpenTSLM revision recorded in [local qualification](tasks/lima-qualification.md). The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
 
 Use `workloads/sky/prepare-episode-smoke.py` with the synthetic AirAware fixture, the phase directory and the base weights manifest to generate each qualification bundle. The inference phase also takes the chosen checkpoint manifest. Each call prints the immutable bundle digest. Both entry points use the same command and one GPU.
 
 ```sh
+image=docker.io/ml-infra/airaware-episodes@sha256:5ca73291e6064ae8483286e2857cdffa627a30d8badaf4b34f9616fa110d0d84
 python3 workloads/sky/episode-profile.py sky fit quantile "$run" --image "$image" \
   --bundle-sha256 "$fit_sha" --step 2 --schedule 2 --batch 4 > "$run.yaml"
 sky launch -y -c "$run" "$run.yaml"
