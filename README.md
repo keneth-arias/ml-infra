@@ -150,3 +150,24 @@ Each process writes an attempt log under its own run directory in the model-stat
 After the final scheduled validation, it restores the selected checkpoint and writes
 `step-XXXXXXXX-validation.npz` in original units. The output identifies its checkpoint,
 input view, scaler, channels, forecast hours and window IDs.
+
+### Lima candidate heads
+
+Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of both repositories. Import the image to MicroK8s with the same digest referenced in the profile. The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
+
+Use `workloads/sky/prepare-episode-smoke.py` with the synthetic AirAware fixture, the phase directory and the base weights manifest to generate each qualification bundle. The inference phase also takes the chosen checkpoint manifest. Each call prints the immutable bundle digest. Both entry points use the same command and one GPU.
+
+```sh
+python3 workloads/sky/episode-profile.py sky fit quantile "$run" --image "$image" \
+  --bundle-sha256 "$fit_sha" --step 2 --schedule 2 --batch 4 > "$run.yaml"
+sky launch -y -c "$run" "$run.yaml"
+sky down -y "$run"
+python3 workloads/sky/episode-profile.py job infer quantile "$run" --image "$image" \
+  --bundle-sha256 "$infer_sha" --step 2 --batch 2 | kubectl create -f -
+```
+
+For a recovery exercise, first request step 1 of the two-step schedule and then render a fresh fit with step 2 and `--resume`. Use separate run directories to compare against an uninterrupted fit. The worker logs attempts, digests and peak GPU allocation to MLflow. Synthetic fits record training loss. Brier and interval coverage are evaluated separately against a scored observation bundle. On a reused SkyPilot pod the cgroup memory peak includes earlier jobs on that pod.
+
+To verify the mounted files before reserving a GPU, use `workloads/sky/launch-episode.sh` with the same arguments as the renderer. It runs a CPU-only Kubernetes preflight, then submits the requested Job or SkyPilot fit. Use `--attempt 2` for a fresh attempt, `--save-seconds` for checkpoint cadence and `--deadline-seconds` for the Kubernetes Job runtime ceiling. Inference writes one immutable prediction file per step. An interrupted tracker can recover a verified published result using the same run, input, image and step. Release a SkyPilot cluster with `sky down` after its job finishes.
+
+The [local qualification](tasks/lima-qualification.md) records the reference output, interruption drill, GPU allocation and MLflow attempts. To preserve a selected generation outside training rotation, run `python3 runtime/episode_release.py release.json RELEASE_SHA256 STEP_DIRECTORY RETAINED_DIRECTORY`. The release manifest names its mode, immutable image reference, checkpoint and base manifest digests and the digests of `policy.json`, `transform.json` and `calibration.json`. Episode releases also include `thresholds.json`. The command verifies the complete copy and publishes it under its release digest.
