@@ -167,3 +167,5 @@ python3 workloads/sky/episode-profile.py job infer quantile "$run" --image "$ima
 ```
 
 For a recovery exercise, first request step 1 of the two-step schedule and then render a fresh fit with step 2 and `--resume`. Use separate run directories to compare against an uninterrupted fit. The worker logs attempts, digests and peak GPU allocation to MLflow. Synthetic loss and Brier scores qualify the pipeline only.
+
+To verify the mounted files before reserving a GPU, use `workloads/sky/launch-episode.sh` with the same arguments as the renderer. It runs a CPU-only Kubernetes preflight, then submits the requested Job or SkyPilot fit. Use `--attempt 2` for a fresh attempt, `--save-seconds` for checkpoint cadence and `--deadline-seconds` for the Kubernetes Job runtime ceiling. Inference writes one immutable prediction file per step. An interrupted tracker can recover a verified published result using the same run, input, image and step. Release a SkyPilot cluster with `sky down` after its job finishes.

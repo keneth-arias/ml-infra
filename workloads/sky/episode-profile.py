@@ -65,7 +65,7 @@ def pod_spec(phase, run_id):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("format", choices=("job", "sky"))
+    p.add_argument("format", choices=("job", "sky", "preflight"))
     p.add_argument("phase", choices=("fit", "infer"))
     p.add_argument("head", choices=("direct", "quantile", "episode"))
     p.add_argument("run_id")
@@ -75,6 +75,9 @@ def main():
     p.add_argument("--schedule", type=int)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=27)
+    p.add_argument("--attempt", type=int, default=1)
+    p.add_argument("--save-seconds", type=int, default=900)
+    p.add_argument("--deadline-seconds", type=int, default=14400)
     p.add_argument("--resume", action="store_true")
     a = p.parse_args()
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,40}[a-z0-9]", a.run_id):
@@ -85,6 +88,9 @@ def main():
         p.error("Immutable image and bundle digests are required")
     if (
         a.step < 1
+        or a.attempt < 1
+        or a.save_seconds < 0
+        or a.deadline_seconds < 1
         or a.batch < 1
         or (a.phase == "fit" and (a.schedule is None or a.step > a.schedule))
     ):
@@ -107,6 +113,7 @@ def main():
         "--batch",
         str(a.batch),
     ]
+    cmd += ["--attempt", str(a.attempt), "--save-seconds", str(a.save_seconds)]
     if a.schedule is not None:
         cmd.extend(["--schedule", str(a.schedule)])
     if a.resume:
@@ -118,25 +125,39 @@ def main():
         "HF_HUB_OFFLINE": "1",
     }
     spec = pod_spec(a.phase, a.run_id)
-    if a.format == "job":
+    if a.format != "sky":
         c = spec["containers"][0]
         c.update(
             image=a.image,
             command=cmd,
             env=[{"name": k, "value": v} for k, v in env.items()],
         )
-        c["resources"]["limits"]["nvidia.com/gpu"] = 1
-        c["resources"]["requests"].update({"nvidia.com/gpu": 1, "cpu": "2"})
+        c["resources"]["requests"]["cpu"] = "2"
+        if a.format == "preflight":
+            cmd.append("--preflight")
+            spec.pop("runtimeClassName")
+            c["volumeMounts"] = [m for m in c["volumeMounts"] if m.get("readOnly")]
+            mount_names = {m["name"] for m in c["volumeMounts"]}
+            spec["volumes"] = [v for v in spec["volumes"] if v["name"] in mount_names]
+        else:
+            c["resources"]["limits"]["nvidia.com/gpu"] = 1
+            c["resources"]["requests"]["nvidia.com/gpu"] = 1
         spec.update(restartPolicy="Never", automountServiceAccountToken=False)
         template = {"metadata": {"labels": {"app": "airaware-episodes"}}, "spec": spec}
         result = {
             "apiVersion": "batch/v1",
             "kind": "Job",
             "metadata": {
-                "name": f"{a.run_id}-{a.phase}-{a.step}",
+                "name": f"{a.run_id}-{a.phase}-{a.step}-"
+                + ("pre-" if a.format == "preflight" else "")
+                + str(a.attempt),
                 "namespace": "training",
             },
-            "spec": {"backoffLimit": 0, "template": template},
+            "spec": {
+                "backoffLimit": 0,
+                "activeDeadlineSeconds": a.deadline_seconds,
+                "template": template,
+            },
         }
     else:
         result = {
