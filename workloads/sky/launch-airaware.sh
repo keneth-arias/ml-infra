@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (( $# < 3 )); then
-  echo "Usage: $0 {single|ddp|fsdp|pair} CLUSTER RUN_ID [sky launch options]" >&2
+  echo "Usage: $0 {single|ddp|fsdp|pair|joint} CLUSTER RUN_ID [sky launch options]" >&2
   exit 2
 fi
 mode=$1
@@ -13,14 +13,14 @@ resources=()
 case "$mode" in
   single) cards=1 ;;
   ddp|fsdp) cards=2 ;;
-  pair) cards=2; resources=(--cpus 8 --memory 40) ;;
+  pair|joint) cards=2; resources=(--cpus 8 --memory 40) ;;
   *) echo "Unsupported training mode: $mode" >&2; exit 2 ;;
 esac
 task="$(dirname "$0")/airaware.yaml"
-if [[ "${AIRAWARE_MODEL_STATE:-0}" == 1 ]]; then
+if [[ "${AIRAWARE_MODEL_STATE:-0}" == 1 || "$mode" == joint ]]; then
   rendered=$(mktemp --suffix=.yaml)
   trap 'rm -f -- "$rendered"' EXIT
-  uv run --script "$(dirname "$0")/model-state.py" "$task" > "$rendered"
+  uv run --script "$(dirname "$0")/model-state.py" "$task" "$mode" > "$rendered"
   task=$rendered
 fi
 sky launch "$task" "${resources[@]}" "$@" --cluster "$cluster" --gpus "rtx5070ti:$cards" \

@@ -24,3 +24,15 @@ class ModelStorageTest(unittest.TestCase):
         self.assertEqual(claims[mounts["/checkpoints"]["name"]], "airaware-model-state")
         self.assertNotIn("subPath", mounts["/checkpoints"])
         self.assertEqual(yaml.safe_load(profile.read_text()), original)
+
+    def test_joint_pair_mounts_only_versioned_historical_inputs_and_base_weights(self):
+        profile=ROOT/"workloads/sky/airaware.yaml"
+        render=run_path(str(profile.with_name("model-state.py")))["model_task"]
+        task=render(profile, joint=True)
+        spec=task["config"]["kubernetes"]["pod_config"]["spec"]
+        mounts={m["mountPath"]:m for m in spec["containers"][0]["volumeMounts"]}
+        self.assertEqual(mounts["/inputs"]["subPath"],"airaware/joint-inputs")
+        self.assertEqual(mounts["/inputs/qwen"]["subPath"],"airaware/inputs/qwen")
+        self.assertTrue(all(mounts[k]["readOnly"] for k in ("/inputs","/inputs/qwen")))
+        self.assertIn("@sha256:",task["resources"]["image_id"])
+        self.assertEqual(task["envs"]["LORA"],"1")

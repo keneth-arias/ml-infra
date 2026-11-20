@@ -90,3 +90,21 @@ class WorkloadTest(unittest.TestCase):
                 self.assertEqual(args[0], device)
                 self.assertEqual(args[args.index("--mode") + 1], "single")
                 self.assertEqual(args[args.index("--head") + 1], head)
+
+    def test_joint_pair_assigns_identical_heads_and_distinct_views(self):
+        profile = Path(__file__).resolve().parents[1] / "workloads/sky/airaware.yaml"
+        command = dedent(profile.read_text().split("run: |\n")[-1])
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "runner"
+            fake.write_text('#!/bin/sh\nprintf "%s\\n" "$CUDA_VISIBLE_DEVICES" "$@" > "$LOGS/$1"\n')
+            fake.chmod(0o755)
+            command = command.replace("/opt/conda/bin/python /opt/ml-infra/airaware.py",str(fake))
+            env=dict(os.environ,TRAIN_MODE="joint",RUN_ID="trial",CUDA_VISIBLE_DEVICES="GPU-a,GPU-b",
+                     PRECISION="fp32",STOP_STEP="4",SCHEDULE_STEPS="4",SAVE_SECONDS="900",BATCH="16",
+                     INPUT_VERSION="lima-pm25-pm10-v1",VALIDATE_AT="final",LORA="1",RESUME="0",HEAD="direct",LOGS=tmp)
+            subprocess.run(["bash","-c",command],env=env,check=True)
+            for view,device in (("first","GPU-a"),("both","GPU-b")):
+                args=(Path(tmp)/f"trial-{view}").read_text().splitlines()
+                self.assertEqual(args[0],device)
+                self.assertEqual(args[args.index("--input-view")+1],view)
+                self.assertEqual(args[args.index("--head")+1],"direct")
