@@ -10,7 +10,7 @@ import subprocess
 import shutil
 import time
 from contextlib import contextmanager
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from pathlib import Path
 
 
@@ -36,6 +36,30 @@ def bundle(root, digest, phase, head):
         if path.is_symlink() or sha256(path) != spec["files"][name]:
             raise ValueError("Corrupt phase input")
     return spec
+
+
+def prepare_point_control(source, source_digest, output):
+    original = bundle(source, source_digest, "fit", "quantile")
+    if (
+        original.get("schema") != "forecast-input-v1"
+        or original.get("block") != "train"
+        or original.get("unit") != "ug/m3"
+        or not re.fullmatch("[0-9a-f]{64}", original.get("split_sha256", ""))
+    ):
+        raise ValueError("Expected a verified quantile training bundle")
+    if output.exists():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=output.parent) as tmp:
+        stage = Path(tmp) / "fit"
+        stage.mkdir()
+        shutil.copyfile(source / "data.npz", stage / "data.npz")
+        spec = {**original, "head": "direct", "point_control_of": source_digest}
+        (stage / "manifest.json").write_text(json.dumps(spec, sort_keys=True) + "\n")
+        digest = sha256(stage / "manifest.json")
+        bundle(stage, digest, "fit", "direct")
+        stage.rename(output)
+    return digest
 
 
 def bind_file(path, value):
@@ -143,10 +167,18 @@ def main():
     root, weights = Path("/bundle"), Path("/base/weights")
     spec = bundle(root, args.bundle_sha256, args.phase, args.head)
     verify_base(weights, spec["weights_manifest_sha256"])
+    matched = "point_control_of" in spec
+    if matched and (
+        args.phase != "fit"
+        or args.head != "direct"
+        or not re.fullmatch("[0-9a-f]{64}", spec["point_control_of"])
+    ):
+        raise ValueError("Invalid matched direct control")
+
     data = root / "data.npz"
     with np.load(data, allow_pickle=False) as archive:
         verify_fields(archive.files, args.phase, args.head)
-    if args.head in ("quantile", "episode"):
+    if matched or args.head in ("quantile", "episode"):
         from opentslm.forecast_inference import verify_candidate_input
 
         verify_candidate_input(
@@ -185,7 +217,7 @@ def main():
         "--batch",
         str(args.batch),
     ]
-    if args.head in ("quantile", "episode"):
+    if matched or args.head in ("quantile", "episode"):
         common += [
             "--input-manifest",
             str(root / "manifest.json"),
@@ -221,6 +253,8 @@ def main():
             str(args.schedule),
             *common,
         ]
+        if matched:
+            command.append("--matched-point")
         if args.resume:
             command.append("--resume")
         artifact = Path("/state") / step_name / "manifest.json"
@@ -256,6 +290,11 @@ def main():
                 "schedule": args.schedule,
                 "weights": spec["weights_manifest_sha256"],
             }
+            if matched:
+                expected.update(
+                    matched_point="complete_epoch_v1",
+                    input_manifest_sha256=args.bundle_sha256,
+                )
             if any(identity.get(k) != v for k, v in expected.items()):
                 raise ValueError("Published checkpoint does not match this fit")
         else:
@@ -313,6 +352,7 @@ def main():
                     "checkpoint_sha256",
                     "split_sha256",
                     "fixture_sha256",
+                    "point_control_of",
                     "schema",
                     "unit",
                 )

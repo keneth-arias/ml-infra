@@ -93,3 +93,34 @@ class BundleTest(unittest.TestCase):
             }
         )
         self.assertEqual(result, {"mae": 2.0, "width_h1": 9.0, "width_h2": 8.0})
+
+    def test_matched_fit_reuses_exact_quantile_input(self):
+        from episode_job import prepare_point_control
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "quantile"
+            source.mkdir()
+            (source / "data.npz").write_bytes(b"same ordered archive")
+            spec = {
+                "phase": "fit",
+                "head": "quantile",
+                "block": "train",
+                "schema": "forecast-input-v1",
+                "unit": "ug/m3",
+                "split_sha256": "1" * 64,
+                "weights_manifest_sha256": "2" * 64,
+                "files": {"data.npz": sha256(source / "data.npz")},
+            }
+            (source / "manifest.json").write_text(json.dumps(spec))
+            expected = sha256(source / "manifest.json")
+            with self.assertRaises(ValueError):
+                prepare_point_control(source, "0" * 64, root / "bad")
+            out = root / "control"
+            got = prepare_point_control(source, expected, out)
+            bound = bundle(out, got, "fit", "direct")
+            self.assertEqual(bound["point_control_of"], expected)
+            self.assertEqual(bound["files"], spec["files"])
+            self.assertEqual(
+                (out / "data.npz").read_bytes(), (source / "data.npz").read_bytes()
+            )
