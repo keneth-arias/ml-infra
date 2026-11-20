@@ -4,6 +4,8 @@ import runpy
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from episode_release import retain, sha
 from stage_holdout import stage
 
@@ -68,7 +70,11 @@ class HoldoutStageTest(unittest.TestCase):
             (cohort / "scoring").mkdir()
             (cohort / "scoring/observed.npz").write_bytes(b"held-out")
             data = infer / "data.npz"
-            data.write_bytes(b"history")
+            np.savez(
+                data,
+                window_id=np.asarray([], dtype=str),
+                history=np.empty((0, 24), dtype="f4"),
+            )
             bs = put(
                 infer / "manifest.json",
                 {
@@ -97,7 +103,23 @@ class HoldoutStageTest(unittest.TestCase):
 
             self.assertEqual(run()["status"], "empty")
             self.assertFalse(inputs.exists())
+            del rec["eligible_histories"]
+            with self.assertRaisesRegex(ValueError, "eligible_histories"):
+                run()
+            for invalid in (False, "0", 169, -1):
+                rec["eligible_histories"] = invalid
+                with self.assertRaisesRegex(ValueError, "eligible_histories"):
+                    run()
             rec["eligible_histories"] = 1
+            with self.assertRaisesRegex(ValueError, "rows disagree"):
+                run()
+            np.savez(
+                data, window_id=np.array(["w1"]), history=np.zeros((1, 24), dtype="f4")
+            )
+            spec = json.loads((infer / "manifest.json").read_bytes())
+            spec["files"]["data.npz"] = sha(data)
+            bs = put(infer / "manifest.json", spec)
+            rec["files"]["infer/manifest.json"] = bs
             plan = run()
             self.assertEqual(plan, run())
             launch = root / "launch.json"

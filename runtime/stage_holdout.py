@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["numpy==2.5.5"]
+# ///
 """Stage a history-only external test bundle for an already retained concentration release."""
 
 import argparse
@@ -7,6 +11,8 @@ import re
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import numpy as np
 
 from episode_job import bundle
 from episode_release import retain, sha
@@ -21,6 +27,18 @@ def stage(cohort, cohort_digest, inputs_root, state_root, run_id, release_digest
     if sha(receipt_path) != cohort_digest:
         raise ValueError("Cohort digest mismatch")
     receipt = json.loads(receipt_path.read_bytes())
+    if not isinstance(receipt, dict):
+        raise ValueError("Expected a JSON object for the cohort receipt")
+    count = receipt.get("eligible_histories")
+    if type(count) is not int or not 0 <= count <= 168:
+        raise ValueError(
+            "Cohort receipt requires an eligible_histories count from 0 to 168"
+        )
+    receipt_files = receipt.get("files")
+    if not isinstance(receipt_files, dict) or not isinstance(
+        receipt_files.get("infer/manifest.json"), str
+    ):
+        raise ValueError("Missing infer/manifest.json digest in cohort receipt")
     retained = state_root / "episodes/retained"
     release = retained / release_digest
     manifest = release / "release.json"
@@ -31,20 +49,20 @@ def stage(cohort, cohort_digest, inputs_root, state_root, run_id, release_digest
     seal_sha = spec["components"]["policy.json"]
     head = seal["head"]
     if (
-        receipt["version"] != "lima-cohorte-campo-marte-v1"
+        receipt.get("version") != "lima-cohorte-campo-marte-v1"
         or spec["mode"] != "concentration"
         or spec.get("purpose") != "retrospective_holdout_only"
         or seal["version"] != "lima-concentracion-prueba-congelada-v1"
         or seal["scope"] != "retrospective_concentration_only"
         or head not in ("direct", "quantile")
-        or receipt["seal_sha256"] != seal_sha
-        or receipt["protocol_sha256"] != seal["protocol_sha256"]
+        or receipt.get("seal_sha256") != seal_sha
+        or receipt.get("protocol_sha256") != seal["protocol_sha256"]
         or spec["image"] != seal["image"]
         or spec["base_manifest_sha256"] != seal["base_weights_sha256"]
         or spec["checkpoint_sha256"] != seal["checkpoint_sha256"]
     ):
         raise ValueError("Release is incompatible with the sealed external cohort")
-    digest = receipt["files"]["infer/manifest.json"]
+    digest = receipt_files["infer/manifest.json"]
     source = cohort / "infer"
     input_spec = bundle(source, digest, "infer", head)
     if (
@@ -56,7 +74,20 @@ def stage(cohort, cohort_digest, inputs_root, state_root, run_id, release_digest
         or input_spec["weights_manifest_sha256"] != seal["base_weights_sha256"]
     ):
         raise ValueError("Inference bundle belongs to another release")
-    if receipt["eligible_histories"] == 0:
+    with np.load(source / "data.npz", allow_pickle=False) as data:
+        if set(data.files) != {"window_id", "history"}:
+            raise ValueError("Expected a history-only concentration archive")
+        ids, history = data["window_id"], data["history"]
+        if (
+            ids.shape != (count,)
+            or ids.dtype.kind != "U"
+            or np.any(ids == "")
+            or len(np.unique(ids)) != count
+            or history.shape != (count, 24)
+            or not np.isfinite(history).all()
+        ):
+            raise ValueError("Inference rows disagree with the eligible cohort")
+    if count == 0:
         return {"status": "empty", "bundle_sha256": digest}
     # The inference Job mounts this subdirectory and its own output independently.
     target = inputs_root / "airaware/episodes" / run_id / "infer"

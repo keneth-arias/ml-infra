@@ -178,10 +178,12 @@ The [local qualification](tasks/lima-qualification.md) records the reference out
 AirAware's Campo de Marte test prepares a receipt for all scheduled origins, a history-only inference bundle and separate scoring observations. After the registered observation cutoff, run the staging command on bm with the published cohort and release digests. The two roots are the mounted roots of the `airaware-checkpoints` and `airaware-model-state` claims. Step 14838 and seed 27 belong to the frozen Lima comparison.
 
 ```bash
-python3 runtime/stage_holdout.py "$COHORT" "$INPUTS_ROOT" "$STATE_ROOT" "$RUN" \
+uv run --script runtime/stage_holdout.py "$COHORT" "$INPUTS_ROOT" "$STATE_ROOT" "$RUN" \
   --cohort-sha256 "$COHORT_SHA" --retained-release "$RELEASE_SHA" --step 14838 > "$LAUNCH"
 workloads/sky/launch-episode.sh job infer "$HEAD" "$RUN" --step 14838 --seed 27 \
   --image "$IMAGE" --bundle-sha256 "$BUNDLE_SHA" --retained-release "$RELEASE_SHA" --staged-launch "$LAUNCH"
 ```
 
 Use the head, image and bundle digest in the staging result. A result of `empty` goes directly to AirAware's inconclusive report. The `ready` path verifies the retained release and stages the inference bundle. The CPU preflight and GPU worker mount just the selected checkpoint generation read-only. The scoring archive stays with AirAware. The run output directory and its independent MLflow record bind the inference result used for scoring. [Test protocol](https://github.com/keneth-arias/airaware/pull/128)
+
+If an existing stage fails its digest check, preserve it for diagnosis. Stage the original signed-off inputs under a fresh run ID and use the new launch record for the retry.
