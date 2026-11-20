@@ -138,6 +138,20 @@ class BundleTest(unittest.TestCase):
             got = prepare_point_control(
                 source, expected, checkpoint, sha256(checkpoint), out
             )
+            with self.assertRaises(FileExistsError):
+                prepare_point_control(source, expected, checkpoint, sha256(checkpoint), out)
+            for key, value in (("block", "selection"), ("schema", "legacy"),
+                               ("unit", "ppm"), ("split_sha256", "unknown"),
+                               ("head", "direct"), ("phase", "infer")):
+                with self.subTest(key=key):
+                    altered = {**spec, key: value}
+                    manifest = source / "manifest.json"
+                    manifest.write_text(json.dumps(altered))
+                    with self.assertRaises(ValueError):
+                        prepare_point_control(source, sha256(manifest), checkpoint,
+                                              sha256(checkpoint), root / "rejected")
+                    self.assertFalse((root / "rejected").exists())
+            (source / "manifest.json").write_text(json.dumps(spec))
             bound = bundle(out, got, "fit", "direct")
             self.assertEqual(bound["point_control_of"], expected)
             self.assertEqual(bound["files"]["data.npz"], spec["files"]["data.npz"])
