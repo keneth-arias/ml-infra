@@ -12,3 +12,4 @@ resources:
 - credentials.sops.yaml
 - ../../../runtime
 - training-memory.yaml
+- airaware-worker-policy.yaml
