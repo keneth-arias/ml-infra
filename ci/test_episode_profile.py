@@ -30,6 +30,21 @@ class ProfileTest(unittest.TestCase):
             if phase == "infer":
                 self.assertTrue(mounts["/checkpoint"]["readOnly"])
 
+    def test_retained_generation_is_read_only_and_never_used_for_fit(self):
+        digest = "d" * 64
+        pod = profile["pod_spec"]("infer", "station-test", digest, 14838)
+        mounts = {m["mountPath"]: m for m in pod["containers"][0]["volumeMounts"]}
+        checkpoint = mounts["/checkpoint/step-00014838"]
+        self.assertTrue(checkpoint["readOnly"])
+        self.assertEqual(
+            checkpoint["subPath"], f"episodes/retained/{digest}/step-00014838"
+        )
+        self.assertEqual(mounts["/output"]["subPath"], "episodes/station-test/output")
+        self.assertNotIn("/checkpoint", mounts)
+        for phase, release in (("fit", digest), ("infer", "../bad")):
+            with self.assertRaises(ValueError):
+                profile["pod_spec"](phase, "station-test", release, 14838)
+
     def test_preflight_only_mounts_inputs_and_never_requests_gpu(self):
         script = (
             Path(__file__).resolve().parents[1] / "workloads/sky/episode-profile.py"

@@ -1,12 +1,48 @@
 """Render a one-GPU AirAware job for bm or a SkyPilot task with the same inputs."""
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
+from pathlib import Path
 
 
-def pod_spec(phase, run_id):
+def validate_staged_launch(
+    path, release_sha, bundle_sha, run_id, head, image, seed, step, batch
+):
+    launch = json.loads(path.read_bytes())
+
+    def checked(field, digest):
+        raw = launch[field].encode()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("Staged " + field + " digest differs")
+        return json.loads(raw)
+
+    release = checked("release_json", release_sha)
+    seal_sha = release["components"]["policy.json"]
+    seal = checked("seal_json", seal_sha)
+    ck = checked("checkpoint_manifest_json", release["checkpoint_sha256"])
+    spec = checked("input_manifest_json", bundle_sha)
+    if (
+        launch["status"] != "ready"
+        or launch["run_id"] != run_id
+        or release.get("purpose") != "retrospective_holdout_only"
+        or ("inference_batch" in release and release["inference_batch"] != batch)
+        or ck["step"] != step
+        or seal["seed"] != seed
+        or seal["head"] != head
+        or release["image"] != seal["image"]
+        or image != seal["image"]
+        or spec["head"] != head
+        or spec["seal_sha256"] != seal_sha
+        or spec["checkpoint_sha256"] != release["checkpoint_sha256"]
+        or spec["weights_manifest_sha256"] != release["base_manifest_sha256"]
+    ):
+        raise ValueError("Submission differs from the staged test release")
+
+
+def pod_spec(phase, run_id, retained_release=None, step=None):
     mounts = [
         {
             "name": "inputs",
@@ -21,14 +57,28 @@ def pod_spec(phase, run_id):
             "readOnly": True,
         },
     ]
-    mounts.append(
-        {
-            "name": "state",
-            "mountPath": "/state" if phase == "fit" else "/checkpoint",
-            "subPath": f"episodes/{run_id}/state",
-            "readOnly": phase == "infer",
-        }
-    )
+    checkpoint_mount = {
+        "name": "state",
+        "mountPath": "/state" if phase == "fit" else "/checkpoint",
+        "subPath": f"episodes/{run_id}/state",
+        "readOnly": phase == "infer",
+    }
+    if retained_release:
+        if (
+            phase != "infer"
+            or not re.fullmatch(r"[a-f0-9]{64}", retained_release)
+            or not step
+            or step < 1
+        ):
+            raise ValueError(
+                "Expected a retained release digest and step for inference"
+            )
+        generation = f"step-{step:08d}"
+        checkpoint_mount.update(
+            mountPath=f"/checkpoint/{generation}",
+            subPath=f"episodes/retained/{retained_release}/{generation}",
+        )
+    mounts.append(checkpoint_mount)
     if phase == "infer":
         mounts.append(
             {
@@ -76,7 +126,30 @@ def main():
     p.add_argument("--save-seconds", type=int, default=900)
     p.add_argument("--deadline-seconds", type=int, default=14400)
     p.add_argument("--resume", action="store_true")
+    p.add_argument(
+        "--retained-release",
+        help="Mount this verified release generation for inference",
+    )
+    p.add_argument(
+        "--staged-launch", type=Path, help="JSON emitted by stage_holdout.py"
+    )
     a = p.parse_args()
+    if bool(a.retained_release) != bool(a.staged_launch):
+        p.error(
+            "Retained inference requires the release digest and staged launch record"
+        )
+    if a.staged_launch:
+        validate_staged_launch(
+            a.staged_launch,
+            a.retained_release,
+            a.bundle_sha256,
+            a.run_id,
+            a.head,
+            a.image,
+            a.seed,
+            a.step,
+            a.batch,
+        )
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,40}[a-z0-9]", a.run_id):
         p.error("Invalid Kubernetes run name")
     if not re.fullmatch(
@@ -121,7 +194,7 @@ def main():
         "OMP_NUM_THREADS": "2",
         "HF_HUB_OFFLINE": "1",
     }
-    spec = pod_spec(a.phase, a.run_id)
+    spec = pod_spec(a.phase, a.run_id, a.retained_release, a.step)
     if a.format != "sky":
         c = spec["containers"][0]
         c.update(
