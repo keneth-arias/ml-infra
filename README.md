@@ -172,3 +172,16 @@ For a recovery exercise, first request step 1 of the two-step schedule and then 
 To verify the mounted files before reserving a GPU, use `workloads/sky/launch-episode.sh` with the same arguments as the renderer. It runs a CPU-only Kubernetes preflight, then submits the requested Job or SkyPilot fit. Use `--attempt 2` for a fresh attempt, `--save-seconds` for checkpoint cadence and `--deadline-seconds` for the Kubernetes Job runtime ceiling. Inference writes one immutable prediction file per step. An interrupted tracker can recover a verified published result using the same run, input, image and step. Release a SkyPilot cluster with `sky down` after its job finishes.
 
 The [local qualification](tasks/lima-qualification.md) records the reference output, interruption drill, GPU allocation and MLflow attempts. To preserve a selected generation outside training rotation, run `python3 runtime/episode_release.py release.json RELEASE_SHA256 STEP_DIRECTORY RETAINED_DIRECTORY`. The release manifest names its mode, immutable image reference, checkpoint and base manifest digests and the digests of `policy.json`, `transform.json` and `calibration.json`. Episode releases also include `thresholds.json`. The command verifies the complete copy and publishes it under its release digest.
+
+### Evaluate a retained concentration release
+
+AirAware's Campo de Marte test prepares a receipt for all scheduled origins, a history-only inference bundle and separate scoring observations. After the registered observation cutoff, run the staging command on bm with the published cohort and release digests. The two roots are the mounted roots of the `airaware-checkpoints` and `airaware-model-state` claims. Step 14838 and seed 27 belong to the frozen Lima comparison.
+
+```bash
+python3 runtime/stage_holdout.py "$COHORT" "$INPUTS_ROOT" "$STATE_ROOT" "$RUN" \
+  --cohort-sha256 "$COHORT_SHA" --retained-release "$RELEASE_SHA" --step 14838
+workloads/sky/launch-episode.sh job infer "$HEAD" "$RUN" --step 14838 --seed 27 \
+  --image "$IMAGE" --bundle-sha256 "$BUNDLE_SHA" --retained-release "$RELEASE_SHA"
+```
+
+Use the head, image and bundle digest in the staging result. A result of `empty` goes directly to AirAware's inconclusive report. The `ready` path verifies the retained release and stages the inference bundle. The CPU preflight and GPU worker mount just the selected checkpoint generation read-only. The scoring archive stays with AirAware. The run output directory and its independent MLflow record bind the inference result used for scoring. [Test protocol](https://github.com/keneth-arias/airaware/pull/128)

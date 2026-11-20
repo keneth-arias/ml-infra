@@ -6,7 +6,7 @@ import re
 import shlex
 
 
-def pod_spec(phase, run_id):
+def pod_spec(phase, run_id, retained_release=None, step=None):
     mounts = [
         {
             "name": "inputs",
@@ -29,6 +29,21 @@ def pod_spec(phase, run_id):
             "readOnly": phase == "infer",
         }
     )
+    if retained_release:
+        if (
+            phase != "infer"
+            or not re.fullmatch(r"[a-f0-9]{64}", retained_release)
+            or not step
+            or step < 1
+        ):
+            raise ValueError(
+                "Expected a retained release digest and step for inference"
+            )
+        generation = f"step-{step:08d}"
+        mounts[-1].update(
+            mountPath=f"/checkpoint/{generation}",
+            subPath=f"episodes/retained/{retained_release}/{generation}",
+        )
     if phase == "infer":
         mounts.append(
             {
@@ -76,6 +91,10 @@ def main():
     p.add_argument("--save-seconds", type=int, default=900)
     p.add_argument("--deadline-seconds", type=int, default=14400)
     p.add_argument("--resume", action="store_true")
+    p.add_argument(
+        "--retained-release",
+        help="Mount this verified release generation for inference",
+    )
     a = p.parse_args()
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,40}[a-z0-9]", a.run_id):
         p.error("Invalid Kubernetes run name")
@@ -121,7 +140,7 @@ def main():
         "OMP_NUM_THREADS": "2",
         "HF_HUB_OFFLINE": "1",
     }
-    spec = pod_spec(a.phase, a.run_id)
+    spec = pod_spec(a.phase, a.run_id, a.retained_release, a.step)
     if a.format != "sky":
         c = spec["containers"][0]
         c.update(
