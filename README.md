@@ -150,3 +150,20 @@ Each process writes an attempt log under its own run directory in the model-stat
 After the final scheduled validation, it restores the selected checkpoint and writes
 `step-XXXXXXXX-validation.npz` in original units. The output identifies its checkpoint,
 input view, scaler, channels, forecast hours and window IDs.
+
+### Lima candidate heads
+
+Build the image on bm with `bootstrap/microk8s/build-episodes.sh ../OpenTSLM ../airaware IMAGE_TAG`. The build takes committed revisions of both repositories. Import the image to MicroK8s with the same digest referenced in the profile. The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
+
+Use `workloads/sky/prepare-episode-smoke.py` with the synthetic AirAware fixture, the phase directory and the base weights manifest to generate each qualification bundle. The inference phase also takes the chosen checkpoint manifest. Each call prints the immutable bundle digest. Both entry points use the same command and one GPU.
+
+```sh
+python3 workloads/sky/episode-profile.py sky fit quantile "$run" --image "$image" \
+  --bundle-sha256 "$fit_sha" --step 2 --schedule 2 --batch 4 > "$run.yaml"
+sky launch -y -c "$run" "$run.yaml"
+sky down -y "$run"
+python3 workloads/sky/episode-profile.py job infer quantile "$run" --image "$image" \
+  --bundle-sha256 "$infer_sha" --step 2 --batch 2 | kubectl create -f -
+```
+
+For a recovery exercise, first request step 1 of the two-step schedule and then render a fresh fit with step 2 and `--resume`. Use separate run directories to compare against an uninterrupted fit. The worker logs attempts, digests and peak GPU allocation to MLflow. Synthetic loss and Brier scores qualify the pipeline only.

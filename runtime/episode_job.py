@@ -1,0 +1,185 @@
+"""Run a single stage of the Lima forecast comparison inside its scoped pod."""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+
+def sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def bundle(root, digest, phase, head):
+    manifest = root / "manifest.json"
+    if manifest.is_symlink() or sha256(manifest) != digest:
+        raise ValueError("Phase manifest checksum mismatch")
+    spec = json.loads(manifest.read_text())
+    if (spec["phase"], spec["head"]) != (phase, head):
+        raise ValueError("Bundle belongs to another phase or model")
+    expected = {"data.npz", "thresholds.json"} if head == "episode" else {"data.npz"}
+    if set(spec["files"]) != expected or {
+        p.name for p in root.iterdir()
+    } != expected | {"manifest.json"}:
+        raise ValueError("Unexpected phase inputs")
+    for name in expected:
+        path = root / name
+        if path.is_symlink() or sha256(path) != spec["files"][name]:
+            raise ValueError("Corrupt phase input")
+    return spec
+
+
+def main():
+    import mlflow
+    import numpy as np
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("phase", choices=("fit", "infer"))
+    parser.add_argument("head", choices=("direct", "quantile", "episode"))
+    parser.add_argument("--bundle-sha256", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--step", type=int, required=True)
+    parser.add_argument("--schedule", type=int)
+    parser.add_argument("--seed", type=int, default=27)
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", args.run_id) or args.step < 1:
+        parser.error("Invalid run ID or step")
+    root, weights = Path("/bundle"), Path("/base/weights")
+    spec = bundle(root, args.bundle_sha256, args.phase, args.head)
+    sums = weights.parent / "SHA256SUMS"
+    if sha256(sums) != spec["weights_manifest_sha256"]:
+        raise ValueError("Base weights manifest mismatch")
+    subprocess.run(
+        ["sha256sum", "--check", "--strict", "--status", sums.name],
+        cwd=weights.parent,
+        check=True,
+    )
+    data = root / "data.npz"
+    fields = {"window_id", "history"}
+    if args.head == "episode":
+        fields.update(("station_key", "threshold_ug_m3", "thresholds_sha256"))
+    if args.phase == "fit":
+        fields.add("event" if args.head == "episode" else "targets")
+    with np.load(data, allow_pickle=False) as archive:
+        if set(archive.files) != fields:
+            raise ValueError("Fields outside phase schema")
+    worker = "/opt/airaware/gpu_worker.py"
+    common = [
+        "--head",
+        args.head,
+        "--weights",
+        str(weights),
+        "--data",
+        str(data),
+        "--batch",
+        str(args.batch),
+    ]
+    if args.head in ("quantile", "episode"):
+        common += [
+            "--input-manifest",
+            str(root / "manifest.json"),
+            "--input-manifest-sha256",
+            args.bundle_sha256,
+        ]
+    if args.head == "episode":
+        common += ["--thresholds-sha256", spec["thresholds_sha256"]]
+    step_name = f"step-{args.step:08d}"
+    if args.phase == "fit":
+        if args.schedule is None or not args.step <= args.schedule:
+            parser.error("Specify a fixed schedule covering the requested step")
+        command = [
+            "/opt/conda/bin/torchrun",
+            "--standalone",
+            "--nproc-per-node=1",
+            worker,
+            "/opt/forecast/train_qwen_forecast.py",
+            "--mode",
+            "single",
+            "--lora",
+            "--validate-at",
+            "final",
+            "--run-dir",
+            "/state",
+            "--seed",
+            str(args.seed),
+            "--stop-step",
+            str(args.step),
+            "--schedule-steps",
+            str(args.schedule),
+            *common,
+        ]
+        if args.resume:
+            command.append("--resume")
+        artifact = Path("/state") / step_name / "manifest.json"
+    else:
+        checkpoint = Path("/checkpoint") / step_name
+        if sha256(checkpoint / "manifest.json") != spec["checkpoint_sha256"]:
+            raise ValueError("Selected checkpoint digest differs")
+        artifact = Path("/output") / "predictions.npz"
+        command = [
+            "/opt/conda/bin/python",
+            worker,
+            "-m",
+            "opentslm.forecast_inference",
+            "--checkpoint",
+            str(checkpoint),
+            "--require-history-only",
+            "--output",
+            str(artifact),
+            *common,
+        ]
+    mlflow.set_experiment("airaware-pm25")
+    with mlflow.start_run(run_name=f"{args.run_id}-{args.phase}"):
+        mlflow.log_params(
+            {
+                **vars(args),
+                "trainer_sha": os.environ["FORECAST_SOURCE_REVISION"],
+                "airaware_sha": os.environ["AIRAWARE_SOURCE_REVISION"],
+                "image": os.environ["EPISODE_IMAGE"],
+                "lora_rank": 4,
+                "lora_alpha": 8,
+                "weights_manifest_sha256": spec["weights_manifest_sha256"],
+            }
+        )
+        mlflow.set_tags(
+            {
+                k: spec[k]
+                for k in ("thresholds_sha256", "checkpoint_sha256", "split_sha256")
+                if k in spec
+            }
+        )
+        env = {**os.environ, "PYTHONPATH": "/opt/forecast/src"}
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, text=True, env=env
+        ) as proc:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and "peak_bytes_per_rank" in event:
+                    mlflow.log_metric(
+                        "peak_gpu_allocated_bytes",
+                        max(v[0] for v in event["peak_bytes_per_rank"]),
+                        step=event["step"],
+                    )
+                if isinstance(event, dict) and "loss" in event:
+                    mlflow.log_metrics(
+                        {k: float(event[k]) for k in ("loss", "windows_per_second")},
+                        step=event["step"],
+                    )
+            if proc.wait():
+                raise subprocess.CalledProcessError(proc.returncode, command)
+        mlflow.log_artifact(str(artifact))
+        mlflow.set_tag("artifact_sha256", sha256(artifact))
+
+
+if __name__ == "__main__":
+    main()
