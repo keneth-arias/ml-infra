@@ -114,13 +114,22 @@ class HoldoutStageTest(unittest.TestCase):
             rec["eligible_histories"] = 1
             with self.assertRaisesRegex(ValueError, "rows disagree"):
                 run()
-            np.savez(
-                data, window_id=np.array(["w1"]), history=np.zeros((1, 24), dtype="f4")
-            )
             spec = json.loads((infer / "manifest.json").read_bytes())
-            spec["files"]["data.npz"] = sha(data)
-            bs = put(infer / "manifest.json", spec)
-            rec["files"]["infer/manifest.json"] = bs
+
+            def history_of(value):
+                np.savez(data, window_id=np.array(["w1"]), history=np.full((1, 24), value))
+                spec["files"]["data.npz"] = sha(data)
+                digest = put(infer / "manifest.json", spec)
+                rec["files"]["infer/manifest.json"] = digest
+                return digest
+
+            for malformed in (1e39, -1e39, 2j, "1.0"):
+                with self.subTest(value=malformed):
+                    history_of(malformed)
+                    with self.assertRaisesRegex(ValueError, "FP32"):
+                        run()
+                    self.assertFalse(inputs.exists())
+            bs = history_of(np.float32(0))
             plan = run()
             self.assertEqual(plan, run())
             launch = root / "launch.json"

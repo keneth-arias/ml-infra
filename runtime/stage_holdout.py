@@ -78,13 +78,20 @@ def stage(cohort, cohort_digest, inputs_root, state_root, run_id, release_digest
         if set(data.files) != {"window_id", "history"}:
             raise ValueError("Expected a history-only concentration archive")
         ids, history = data["window_id"], data["history"]
+        fp32_max = float(np.finfo(np.float32).max)
+        if (
+            history.dtype.kind not in "iuf"
+            or not np.isfinite(history).all()
+            or (history > fp32_max).any()
+            or (history < -fp32_max).any()
+        ):
+            raise ValueError("Expected finite history values representable in FP32")
         if (
             ids.shape != (count,)
             or ids.dtype.kind != "U"
             or np.any(ids == "")
             or len(np.unique(ids)) != count
             or history.shape != (count, 24)
-            or not np.isfinite(history).all()
         ):
             raise ValueError("Inference rows disagree with the eligible cohort")
     if count == 0:
