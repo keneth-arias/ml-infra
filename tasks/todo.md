@@ -33,3 +33,13 @@ The Nebius CLI and a Terraform data-source plan authenticated to the production 
 - [x] Publish the private AirAware runtime and run by digest on two GPUs. GHCR and the pod used `sha256:549f56bc614674399df79345941a44a7ebfa6182492ea61aa653c62711accea1`. [MLflow release check](http://bm.degu-fir.ts.net:5000/#/experiments/2/runs/9f6c78947ea646cd8b69f7fddc7d204e)
 - [ ] Deferred by the owner. Restore the AirAware checkpoint and MLflow metadata/artifacts from independent storage when a destination is selected. The verified migration between local PVCs exercises same-host recovery.
 - [ ] Select the production GPU configuration and spend limit for one qualification run. [Model evaluation scope](https://github.com/keneth-arias/airaware/issues/28)
+
+## Lima forecast and episode pilot
+
+- [ ] **Image and interchange.** Rebuild from pinned revisions and compare an in-container history-only export with OpenTSLM's synthetic reference. Record the pullable image digest, checkpoint identity and input/output hashes.
+- [ ] **SkyPilot profiles.** Render one-GPU fit and inference jobs. Verify resources, read-only phase inputs, isolated run paths and retained state. Reject swapped role hashes, show fit pods cannot read calibration or held-out outcomes, and reject an inference archive containing targets before GPU initialization.
+- [ ] **Recovery and telemetry.** Resume a short rank-4 run after interruption on a new pod. Retrieve its complete prediction artifact and comparison metrics from the recorded MLflow run. Qualify simultaneous fits only if measured host/GPU capacity permits.
+- [ ] **Hourly pilot.** Using a frozen release, replay an entire station-day including a late reading, a missing window and a retried trigger. Reconcile expected, emitted and abstained forecasts; verify one canonical issuance per feed/station/origin across revisions, original issue times and a verified rollback from a release protected from training rotation.
+- [ ] **External qualification.** After an approved costed Terraform plan, replay the same fixture on Nebius, verify numerical agreement and record actual cost and resource release. [Implementation order and dependencies](lima-episodes.md)
+
+**For every PR**, complete the [three-model review and follow-up](lima-episodes.md#review-before-merging-each-pr) before merging.
