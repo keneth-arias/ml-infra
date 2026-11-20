@@ -20,14 +20,14 @@ class WorkloadTest(unittest.TestCase):
         cuda = Mock()
         mib = 1024**2
         total = 16303 * mib
-        for free, expected in ((15900 * mib, 16_000_000_000), (8192 * mib, 7680 * mib)):
+        for free, expected in ((15700 * mib, 16_000_000_000), (8192 * mib, 7936 * mib)):
             cuda.mem_get_info.return_value = (free, total)
             configure(cuda, 1)
             cuda.set_device.assert_called_with(1)
             cuda.mem_get_info.assert_called_with(1)
             cuda.set_per_process_memory_fraction.assert_called_with(expected / total, 1)
         cuda.reset_mock()
-        cuda.mem_get_info.return_value = (512 * mib, total)
+        cuda.mem_get_info.return_value = (256 * mib, total)
         with self.assertRaises(RuntimeError):
             configure(cuda, 0)
         cuda.set_per_process_memory_fraction.assert_not_called()

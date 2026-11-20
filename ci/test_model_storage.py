@@ -45,5 +45,5 @@ class ModelStorageTest(unittest.TestCase):
         self.assertEqual(container["resources"]["limits"]["memory"], "55G")
         mount, = [m for m in container["volumeMounts"] if m["mountPath"] == "/opt/airaware"]
         volume, = [v for v in spec["volumes"] if v["name"] == mount["name"]]
-        self.assertEqual(volume["configMap"]["name"], "airaware-workers-v2")
+        self.assertEqual(volume["configMap"]["name"], "airaware-workers-v3")
         self.assertIn("/opt/airaware/airaware.py", task["run"])

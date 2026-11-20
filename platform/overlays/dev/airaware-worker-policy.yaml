@@ -24,7 +24,7 @@ spec:
       variables.trainers.all(c, has(c.volumeMounts) && c.volumeMounts.exists(m,
       m.mountPath == '/opt/airaware' && has(m.readOnly) && m.readOnly &&
       object.spec.volumes.exists(v, v.name == m.name && has(v.configMap) &&
-      v.configMap.name == 'airaware-workers-v2')))
+      v.configMap.name == 'airaware-workers-v3')))
     message: El perfil de SkyPilot para AirAware requiere el lanzador con límite de VRAM en /opt/airaware.
 ---
 apiVersion: admissionregistration.k8s.io/v1

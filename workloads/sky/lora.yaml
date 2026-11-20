@@ -25,7 +25,7 @@ config:
         volumes:
           - name: workers
             configMap:
-              name: airaware-workers-v2
+              name: airaware-workers-v3
           - name: checkpoints
             persistentVolumeClaim:
               claimName: checkpoints
