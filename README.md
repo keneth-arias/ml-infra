@@ -153,7 +153,7 @@ input view, scaler, channels, forecast hours and window IDs.
 
 ### Lima candidate heads
 
-Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of both repositories. Import the image to MicroK8s with the same digest referenced in the profile. The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
+Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of both repositories. Import the image to MicroK8s with the same digest referenced in the profile. For new paired point controls, use the OpenTSLM revision recorded in [local qualification](tasks/lima-qualification.md). The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
 
 Use `workloads/sky/prepare-episode-smoke.py` with the synthetic AirAware fixture, the phase directory and the base weights manifest to generate each qualification bundle. The inference phase also takes the chosen checkpoint manifest. Each call prints the immutable bundle digest. Both entry points use the same command and one GPU.
 

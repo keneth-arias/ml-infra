@@ -93,3 +93,75 @@ class BundleTest(unittest.TestCase):
             }
         )
         self.assertEqual(result, {"mae": 2.0, "width_h1": 9.0, "width_h2": 8.0})
+
+    def test_matched_fit_reuses_exact_quantile_input(self):
+        from episode_job import prepare_point_control
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "quantile"
+            source.mkdir()
+            (source / "data.npz").write_bytes(b"same ordered archive")
+            spec = {
+                "phase": "fit",
+                "head": "quantile",
+                "block": "train",
+                "schema": "forecast-input-v1",
+                "unit": "ug/m3",
+                "split_sha256": "1" * 64,
+                "weights_manifest_sha256": "2" * 64,
+                "files": {"data.npz": sha256(source / "data.npz")},
+            }
+            (source / "manifest.json").write_text(json.dumps(spec))
+            expected = sha256(source / "manifest.json")
+            checkpoint = root / "checkpoint.json"
+            identity = {
+                "head": "quantile",
+                "data": spec["files"]["data.npz"],
+                "weights": spec["weights_manifest_sha256"],
+                "input_manifest_sha256": expected,
+                "world": 1,
+                "mode": "single",
+                "precision": "fp32",
+                "lora": True,
+                "seed": 27,
+                "batch": 16,
+                "schedule": 14,
+                "task_schema": {"lora_rank": 4, "lora_alpha": 8},
+            }
+            checkpoint.write_text(json.dumps({"step": 14, "identity": identity}))
+            with self.assertRaises(ValueError):
+                prepare_point_control(
+                    source, "0" * 64, checkpoint, sha256(checkpoint), root / "bad"
+                )
+            out = root / "control"
+            got = prepare_point_control(
+                source, expected, checkpoint, sha256(checkpoint), out
+            )
+            with self.assertRaises(FileExistsError):
+                prepare_point_control(source, expected, checkpoint, sha256(checkpoint), out)
+            for key, value in (("block", "selection"), ("schema", "legacy"),
+                               ("unit", "ppm"), ("split_sha256", "unknown"),
+                               ("head", "direct"), ("phase", "infer")):
+                with self.subTest(key=key):
+                    altered = {**spec, key: value}
+                    manifest = source / "manifest.json"
+                    manifest.write_text(json.dumps(altered))
+                    with self.assertRaises(ValueError):
+                        prepare_point_control(source, sha256(manifest), checkpoint,
+                                              sha256(checkpoint), root / "rejected")
+                    self.assertFalse((root / "rejected").exists())
+            (source / "manifest.json").write_text(json.dumps(spec))
+            bound = bundle(out, got, "fit", "direct")
+            self.assertEqual(bound["point_control_of"], expected)
+            self.assertEqual(bound["files"]["data.npz"], spec["files"]["data.npz"])
+            from episode_job import paired_recipe
+
+            self.assertEqual(
+                paired_recipe(out, bound), {"seed": 27, "batch": 16, "schedule": 14}
+            )
+            with self.assertRaises(ValueError):
+                paired_recipe(out, {**bound, "block": "selection"})
+            self.assertEqual(
+                (out / "data.npz").read_bytes(), (source / "data.npz").read_bytes()
+            )
