@@ -10,4 +10,4 @@ COPY --from=reader-python / /opt/reader-python
 RUN uv sync --project /opt/reader --locked --python /opt/reader-python/bin/python3.13
 ARG FORECAST_SOURCE_REVISION
 ENV FORECAST_SOURCE_REVISION=${FORECAST_SOURCE_REVISION} HF_HUB_OFFLINE=1 PYTHONPATH=/opt/forecast/src
-COPY runtime/airaware.py /opt/ml-infra/airaware.py
+COPY runtime/airaware.py runtime/gpu_worker.py /opt/ml-infra/

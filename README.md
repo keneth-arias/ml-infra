@@ -87,7 +87,7 @@ workloads/sky/launch-airaware.sh pair airaware-heads heads-01 -y \
 sky down -y airaware-heads
 ```
 
-SkyPilot rejects concurrent pods mounting this ReadWriteOnce claim. The paired task mounts it once. Two independent trainers see one GPU each, read the same arrays and write separate MLflow runs and checkpoint directories with `-direct` and `-persistence` suffixes. Wait for both trainers before releasing the pod. Either trainer can cause the job to fail. Use the individual mode to resume just one unfinished head. The paired launcher requests 8 CPUs and 40 GB of host memory to accommodate simultaneous model loads and checkpoint writes.
+SkyPilot rejects concurrent pods mounting this ReadWriteOnce claim. The paired task mounts it once. Two independent trainers see one GPU each, read the same arrays and write separate MLflow runs and checkpoint directories with `-direct` and `-persistence` suffixes. Wait for both trainers before releasing the pod. Either trainer can cause the job to fail. Use the individual mode to resume just one unfinished head. El lanzador pareado solicita 8 CPU y 36 GB de RAM. El límite del contenedor y la cuota acumulada del espacio de nombres `training` son 36 GiB. En el nodo de 59 GiB quedan unos 23 GiB fuera de esa cuota. Cada proceso de modelo tiene una tarjeta exclusiva. Antes de cargar los pesos, el asignador de PyTorch se limita al menor valor entre 12 GiB y la memoria libre de la tarjeta menos 3 GiB. El contexto de CUDA y las bibliotecas pueden usar memoria adicional. El mismo límite se aplica al restaurar y exportar predicciones. El perfil monta el ConfigMap inmutable `airaware-workers-v1`, que contiene el lanzador y el control de memoria. Al cambiar esos archivos, publica una nueva versión del ConfigMap y actualiza los perfiles que la montan.
 
 The first local timing used 60 FP32 updates per head, global batch 4, seed 27 and the same 240 training windows in identical order. The interval from the first MLflow run start to the last finish was 45.657 s for the pair. The two successive DDP runs used 62.527 s in total across their MLflow intervals. Each interval includes model loading and the final checkpoint write. Cluster provisioning and input verification precede the interval. Peak sampled container memory during the pair was 31.69 GiB including file cache. These measurements qualify the scheduling path for the repeated performance comparison in AirAware issue #28.
 
@@ -95,7 +95,7 @@ To export forecasts in a SkyPilot job, set the package path explicitly in the ta
 
 ```bash
 export PYTHONPATH=/opt/forecast/src
-/opt/conda/bin/python -m opentslm.forecast_inference \
+/opt/conda/bin/python /opt/airaware/gpu_worker.py -m opentslm.forecast_inference \
   --checkpoint /checkpoints/heads-01-direct/step-00000060 --weights /inputs/qwen/weights \
   --data /inputs/windows/lima-pm25-qwen-v1/validation.npz \
   --output /checkpoints/heads-01-direct/validation-predictions.npz

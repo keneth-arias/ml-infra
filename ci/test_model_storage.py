@@ -36,3 +36,14 @@ class ModelStorageTest(unittest.TestCase):
         self.assertTrue(all(mounts[k]["readOnly"] for k in ("/inputs","/inputs/qwen")))
         self.assertIn("@sha256:",task["resources"]["image_id"])
         self.assertEqual(task["envs"]["LORA"],"1")
+
+    def test_joint_limits_host_memory_and_mounts_capped_worker(self):
+        profile = ROOT / "workloads/sky/airaware.yaml"
+        task = run_path(str(profile.with_name("model-state.py")))["model_task"](profile, joint=True)
+        spec = task["config"]["kubernetes"]["pod_config"]["spec"]
+        container, = spec["containers"]
+        self.assertEqual(container["resources"]["limits"]["memory"], "36Gi")
+        mount, = [m for m in container["volumeMounts"] if m["mountPath"] == "/opt/airaware"]
+        volume, = [v for v in spec["volumes"] if v["name"] == mount["name"]]
+        self.assertEqual(volume["configMap"]["name"], "airaware-workers-v1")
+        self.assertIn("/opt/airaware/airaware.py", task["run"])

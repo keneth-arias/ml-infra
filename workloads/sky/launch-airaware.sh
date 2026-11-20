@@ -13,7 +13,7 @@ resources=()
 case "$mode" in
   single) cards=1 ;;
   ddp|fsdp) cards=2 ;;
-  pair|joint) cards=2; resources=(--cpus 8 --memory 40) ;;
+  pair|joint) cards=2; resources=(--cpus 8 --memory 36) ;;
   *) echo "Unsupported training mode: $mode" >&2; exit 2 ;;
 esac
 task="$(dirname "$0")/airaware.yaml"

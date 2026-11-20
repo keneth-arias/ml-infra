@@ -10,3 +10,5 @@ resources:
 - airaware-storage.yaml
 - sky-access.yaml
 - credentials.sops.yaml
+- ../../../runtime
+- training-memory.yaml

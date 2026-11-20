@@ -14,7 +14,13 @@ config:
         containers:
           - name: ray-node
             imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                memory: 36Gi
             volumeMounts:
+              - name: workers
+                mountPath: /opt/airaware
+                readOnly: true
               - name: storage
                 mountPath: /inputs
                 subPath: airaware/inputs
@@ -25,6 +31,9 @@ config:
               - name: shm
                 mountPath: /dev/shm
         volumes:
+          - name: workers
+            configMap:
+              name: airaware-workers-v1
           - name: storage
             persistentVolumeClaim:
               claimName: airaware-checkpoints
@@ -56,7 +65,7 @@ run: |
     if [ -n "$view" ]; then set -- "$@" --input-view "$view"; fi
     if [ "$LORA" = "1" ]; then set -- "$@" --lora; fi
     if [ "$RESUME" = "1" ]; then set -- "$@" --resume; fi
-    /opt/conda/bin/python /opt/ml-infra/airaware.py "$run_id" "$@"
+    /opt/conda/bin/python /opt/airaware/airaware.py "$run_id" "$@"
   }
   : "${RUN_ID:?Provide RUN_ID}"
   if [ "$TRAIN_MODE" != "pair" ] && [ "$TRAIN_MODE" != "joint" ]; then

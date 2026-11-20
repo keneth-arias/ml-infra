@@ -62,9 +62,10 @@ def main():
             env={**os.environ, "PYTHONPATH": ""}, stdout=subprocess.DEVNULL, check=True,
         )
     process_count = 1 if options.mode == "single" else 2
+    worker = str(Path(__file__).with_name("gpu_worker.py"))
     command = [
         "/opt/conda/bin/torchrun", "--standalone", f"--nproc-per-node={process_count}",
-        "/opt/forecast/train_qwen_forecast.py", "--mode", options.mode,
+        worker, "/opt/forecast/train_qwen_forecast.py", "--mode", options.mode,
         "--data", str(windows / "train.npz"), "--validation", str(windows / "validation.npz"),
         "--weights", str(inputs / "qwen/weights"), "--run-dir", f"/checkpoints/{options.run_id}",
         *trainer_args,
@@ -110,7 +111,7 @@ def main():
             checkpoint = run_dir / (run_dir / "best").read_text().strip()
             output = run_dir / (checkpoint.name + "-validation.npz")
             subprocess.run([
-                "/opt/conda/bin/python", "-m", "opentslm.forecast_inference",
+                "/opt/conda/bin/python", worker, "-m", "opentslm.forecast_inference",
                 "--checkpoint", str(checkpoint), "--weights", str(inputs / "qwen/weights"),
                 "--input-view", options.input_view, "--scaler", str(windows / "scaler.json"),
                 "--data", str(windows / "validation.npz"), "--output", str(output), "--batch", "16",

@@ -1,6 +1,6 @@
 FROM ghcr.io/keneth-arias/ml-infra-qwen@sha256:32b27ab5bc82060bde95e565348dd7fd54b004015cc2dddd7df0747653fbe1d9
 COPY --from=forecast /src/opentslm/ /opt/forecast/src/opentslm/
 COPY --from=forecast /scripts/train_qwen_forecast.py /opt/forecast/train_qwen_forecast.py
-COPY runtime/airaware.py /opt/ml-infra/airaware.py
+COPY runtime/airaware.py runtime/gpu_worker.py /opt/ml-infra/
 ARG FORECAST_SOURCE_REVISION
 ENV FORECAST_SOURCE_REVISION=${FORECAST_SOURCE_REVISION}

@@ -16,7 +16,7 @@ spec:
           image: ml-infra/training:dev2
           imagePullPolicy: Never
           command: [/opt/conda/bin/accelerate]
-          args: [launch, --multi_gpu, --num_machines, "1", --num_processes, "2", --mixed_precision, bf16, /opt/ml-infra/train.py, --checkpoint, /checkpoints/ddp-smoke]
+          args: [launch, --multi_gpu, --num_machines, "1", --num_processes, "2", --mixed_precision, bf16, /opt/airaware/gpu_worker.py, /opt/ml-infra/train.py, --checkpoint, /checkpoints/ddp-smoke]
           env:
             - {name: MLFLOW_TRACKING_URI, value: "http://mlflow.ml-platform.svc:5000"}
             - {name: OMP_NUM_THREADS, value: "2"}
@@ -24,9 +24,12 @@ spec:
             requests: {cpu: "4", memory: 4Gi}
             limits: {memory: 12Gi, nvidia.com/gpu: 2}
           volumeMounts:
+            - {name: workers, mountPath: /opt/airaware, readOnly: true}
             - {name: checkpoints, mountPath: /checkpoints}
             - {name: shm, mountPath: /dev/shm}
       volumes:
+        - name: workers
+          configMap: {name: airaware-workers-v1}
         - name: checkpoints
           persistentVolumeClaim: {claimName: checkpoints}
         - name: shm

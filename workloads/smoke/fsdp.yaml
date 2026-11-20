@@ -38,6 +38,7 @@ spec:
         - '2'
         - --mixed_precision
         - bf16
+        - /opt/airaware/gpu_worker.py
         - /opt/ml-infra/train.py
         - --checkpoint
         - /checkpoints/fsdp-smoke
@@ -54,11 +55,14 @@ spec:
             memory: 12Gi
             nvidia.com/gpu: 2
         volumeMounts:
+        - {name: workers, mountPath: /opt/airaware, readOnly: true}
         - name: checkpoints
           mountPath: /checkpoints
         - name: shm
           mountPath: /dev/shm
       volumes:
+      - name: workers
+        configMap: {name: airaware-workers-v1}
       - name: checkpoints
         persistentVolumeClaim:
           claimName: checkpoints

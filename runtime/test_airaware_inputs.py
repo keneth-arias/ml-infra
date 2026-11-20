@@ -8,11 +8,28 @@ import tempfile
 from textwrap import dedent
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
+
+from gpu_worker import GIB, configure
 
 from airaware import window_inputs
 
 
 class WorkloadTest(unittest.TestCase):
+    def test_worker_caps_only_the_assigned_device_and_preserves_headroom(self):
+        cuda = Mock()
+        for free, expected in ((16, 12), (8, 5)):
+            cuda.mem_get_info.return_value = (free * GIB, 16 * GIB)
+            configure(cuda, 1)
+            cuda.set_device.assert_called_with(1)
+            cuda.mem_get_info.assert_called_with(1)
+            cuda.set_per_process_memory_fraction.assert_called_with(expected / 16, 1)
+        cuda.reset_mock()
+        cuda.mem_get_info.return_value = (3 * GIB, 16 * GIB)
+        with self.assertRaises(RuntimeError):
+            configure(cuda, 0)
+        cuda.set_per_process_memory_fraction.assert_not_called()
+
     def test_versioned_inputs_match_the_frozen_export(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -53,7 +70,7 @@ class WorkloadTest(unittest.TestCase):
                 self.assertEqual(args[args.index("--gpus") + 1], f"rtx5070ti:{count}")
                 self.assertIn(f"TRAIN_MODE={mode}", args)
                 if mode == "pair":
-                    self.assertEqual(args[args.index("--memory") + 1], "40")
+                    self.assertEqual(args[args.index("--memory") + 1], "36")
                     self.assertEqual(args[args.index("--cpus") + 1], "8")
 
     def test_pair_assigns_visible_cards_and_propagates_a_failed_head(self):
@@ -65,7 +82,7 @@ class WorkloadTest(unittest.TestCase):
                 '#!/bin/sh\nprintf "%s\\n" "$CUDA_VISIBLE_DEVICES" "$@" > "$LOGS/$1"\ncase "$1" in *direct) exit 7 ;; esac\n'
             )
             fake.chmod(0o755)
-            command = command.replace("/opt/conda/bin/python /opt/ml-infra/airaware.py", str(fake))
+            command = command.replace("/opt/conda/bin/python /opt/airaware/airaware.py", str(fake))
             env = dict(
                 os.environ,
                 TRAIN_MODE="pair",
@@ -98,7 +115,7 @@ class WorkloadTest(unittest.TestCase):
             fake = Path(tmp) / "runner"
             fake.write_text('#!/bin/sh\nprintf "%s\\n" "$CUDA_VISIBLE_DEVICES" "$@" > "$LOGS/$1"\n')
             fake.chmod(0o755)
-            command = command.replace("/opt/conda/bin/python /opt/ml-infra/airaware.py",str(fake))
+            command = command.replace("/opt/conda/bin/python /opt/airaware/airaware.py",str(fake))
             env=dict(os.environ,TRAIN_MODE="joint",RUN_ID="trial",CUDA_VISIBLE_DEVICES="GPU-a,GPU-b",
                      PRECISION="fp32",STOP_STEP="4",SCHEDULE_STEPS="4",SAVE_SECONDS="900",BATCH="16",
                      INPUT_VERSION="lima-pm25-pm10-v1",VALIDATE_AT="final",LORA="1",RESUME="0",HEAD="direct",LOGS=tmp)

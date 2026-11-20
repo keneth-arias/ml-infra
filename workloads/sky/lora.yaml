@@ -13,10 +13,19 @@ config:
         containers:
           - name: ray-node
             imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                memory: 12Gi
             volumeMounts:
+              - name: workers
+                mountPath: /opt/airaware
+                readOnly: true
               - name: checkpoints
                 mountPath: /checkpoints
         volumes:
+          - name: workers
+            configMap:
+              name: airaware-workers-v1
           - name: checkpoints
             persistentVolumeClaim:
               claimName: checkpoints
@@ -24,4 +33,4 @@ envs:
   MLFLOW_TRACKING_URI: http://mlflow.ml-platform.svc:5000
   OMP_NUM_THREADS: "2"
 run: |
-  /opt/conda/bin/accelerate launch --multi_gpu --num_processes 2 --num_machines 1 --mixed_precision bf16 /opt/ml-infra/train.py --checkpoint /checkpoints/sky-${SKYPILOT_TASK_ID}
+  /opt/conda/bin/accelerate launch --multi_gpu --num_processes 2 --num_machines 1 --mixed_precision bf16 /opt/airaware/gpu_worker.py /opt/ml-infra/train.py --checkpoint /checkpoints/sky-${SKYPILOT_TASK_ID}
