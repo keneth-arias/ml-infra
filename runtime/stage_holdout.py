@@ -74,6 +74,11 @@ def stage(cohort, cohort_digest, inputs_root, state_root, run_id, release_digest
         (state_root / "episodes" / run_id / "output").mkdir(parents=True, exist_ok=True)
     return {
         "status": "ready",
+        "run_id": run_id,
+        "release_json": manifest.read_text(),
+        "seal_json": (release / "policy.json").read_text(),
+        "checkpoint_manifest_json": (generation / "manifest.json").read_text(),
+        "input_manifest_json": (source / "manifest.json").read_text(),
         "bundle_sha256": digest,
         "head": head,
         "image": seal["image"],

@@ -1,5 +1,6 @@
 import json
 import tempfile
+import runpy
 import unittest
 from pathlib import Path
 
@@ -97,7 +98,32 @@ class HoldoutStageTest(unittest.TestCase):
             self.assertEqual(run()["status"], "empty")
             self.assertFalse(inputs.exists())
             rec["eligible_histories"] = 1
-            self.assertEqual(run(), run())
+            plan = run()
+            self.assertEqual(plan, run())
+            launch = root / "launch.json"
+            put(launch, plan)
+            renderer = runpy.run_path(
+                str(
+                    Path(__file__).resolve().parents[1]
+                    / "workloads/sky/episode-profile.py"
+                )
+            )
+            validate = renderer["validate_staged_launch"]
+            valid = [launch, rel, bs, "station-test", "direct", image, 27, 2]
+            validate(*valid)
+            for i, wrong in (
+                (1, "0" * 64),
+                (2, "1" * 64),
+                (3, "different"),
+                (4, "quantile"),
+                (5, image.replace("ghcr.io", "docker.io")),
+                (6, 28),
+                (7, 3),
+            ):
+                with self.subTest(i=i), self.assertRaises(ValueError):
+                    args = valid.copy()
+                    args[i] = wrong
+                    validate(*args)
             target = inputs / "airaware/episodes/station-test"
             self.assertEqual(
                 {p.name for p in (target / "infer").iterdir()},

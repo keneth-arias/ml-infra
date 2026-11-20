@@ -1,9 +1,44 @@
 """Render a one-GPU AirAware job for bm or a SkyPilot task with the same inputs."""
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
+from pathlib import Path
+
+
+def validate_staged_launch(
+    path, release_sha, bundle_sha, run_id, head, image, seed, step
+):
+    launch = json.loads(path.read_bytes())
+
+    def checked(field, digest):
+        raw = launch[field].encode()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("Staged " + field + " digest differs")
+        return json.loads(raw)
+
+    release = checked("release_json", release_sha)
+    seal_sha = release["components"]["policy.json"]
+    seal = checked("seal_json", seal_sha)
+    ck = checked("checkpoint_manifest_json", release["checkpoint_sha256"])
+    spec = checked("input_manifest_json", bundle_sha)
+    if (
+        launch["status"] != "ready"
+        or launch["run_id"] != run_id
+        or release.get("purpose") != "retrospective_holdout_only"
+        or ck["step"] != step
+        or seal["seed"] != seed
+        or seal["head"] != head
+        or release["image"] != seal["image"]
+        or image != seal["image"]
+        or spec["head"] != head
+        or spec["seal_sha256"] != seal_sha
+        or spec["checkpoint_sha256"] != release["checkpoint_sha256"]
+        or spec["weights_manifest_sha256"] != release["base_manifest_sha256"]
+    ):
+        raise ValueError("Submission differs from the staged test release")
 
 
 def pod_spec(phase, run_id, retained_release=None, step=None):
@@ -95,7 +130,25 @@ def main():
         "--retained-release",
         help="Mount this verified release generation for inference",
     )
+    p.add_argument(
+        "--staged-launch", type=Path, help="JSON emitted by stage_holdout.py"
+    )
     a = p.parse_args()
+    if bool(a.retained_release) != bool(a.staged_launch):
+        p.error(
+            "Retained inference requires the release digest and staged launch record"
+        )
+    if a.staged_launch:
+        validate_staged_launch(
+            a.staged_launch,
+            a.retained_release,
+            a.bundle_sha256,
+            a.run_id,
+            a.head,
+            a.image,
+            a.seed,
+            a.step,
+        )
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,40}[a-z0-9]", a.run_id):
         p.error("Invalid Kubernetes run name")
     if not re.fullmatch(
