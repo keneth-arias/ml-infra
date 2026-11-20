@@ -313,9 +313,15 @@ def main():
                     "checkpoint_sha256",
                     "split_sha256",
                     "fixture_sha256",
+                    "schema",
+                    "unit",
                 )
                 if k in spec
             }
+        )
+        mlflow.log_artifact(str(root / "manifest.json"), artifact_path="inputs")
+        mlflow.set_tags(
+            {"schema": spec.get("schema", "legacy"), "unit": spec.get("unit", "ug/m3")}
         )
         env = {**os.environ, "PYTHONPATH": "/opt/forecast/src"}
         with stage_attempt(

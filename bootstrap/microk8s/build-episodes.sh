@@ -4,7 +4,7 @@ if (( $# != 3 )); then
   echo 'Usage: build-episodes.sh OpenTSLM_CHECKOUT AIR_AWARE_CHECKOUT IMAGE_TAG' >&2
   exit 2
 fi
-infra=$(git rev-parse --show-toplevel)
+infra=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 forecast_sha=$(git -C "$1" rev-parse HEAD)
 reader_sha=$(git -C "$2" rev-parse HEAD)
 stage=$(mktemp -d)
@@ -16,3 +16,4 @@ infra_sha=$(git -C "$infra" rev-parse HEAD)
 git -C "$infra" archive "$infra_sha:runtime" episode_job.py gpu_worker.py Dockerfile.episodes | tar -x -C "$stage"
 docker build --build-arg "INFRA_SOURCE_REVISION=$infra_sha" -f "$stage/Dockerfile.episodes" -t "$3" \
   --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" --build-arg "AIRAWARE_SOURCE_REVISION=$reader_sha" "$stage"
+docker image inspect "$3" --format '{{json .RepoDigests}}'
