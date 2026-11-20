@@ -1,6 +1,8 @@
 import json
-import tempfile
 import runpy
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -134,12 +136,24 @@ class HoldoutStageTest(unittest.TestCase):
             self.assertEqual(plan, run())
             launch = root / "launch.json"
             put(launch, plan)
-            renderer = runpy.run_path(
-                str(
-                    Path(__file__).resolve().parents[1]
-                    / "workloads/sky/episode-profile.py"
-                )
-            )
+            script = Path(__file__).resolve().parents[1] / "workloads/sky/episode-profile.py"
+            rendered = subprocess.check_output([
+                sys.executable, str(script), "preflight", "infer", "direct", "station-test",
+                "--image", image, "--bundle-sha256", bs, "--step", "2", "--batch", "2",
+                "--retained-release", rel, "--staged-launch", str(launch),
+            ])
+            pod = json.loads(rendered)["spec"]["template"]["spec"]
+            worker = pod["containers"][0]
+            mounts = {m["mountPath"]: m for m in worker["volumeMounts"]}
+            checkpoint = "/checkpoint/step-00000002"
+            self.assertEqual(set(mounts), {"/bundle", "/base", checkpoint})
+            self.assertEqual(mounts[checkpoint]["subPath"], f"episodes/retained/{rel}/step-00000002")
+            self.assertTrue(all(m["readOnly"] for m in mounts.values()))
+            self.assertEqual(worker["resources"], {"requests": {"cpu": "2", "memory": "1G"}})
+            self.assertNotIn("runtimeClassName", pod)
+            self.assertIn("--preflight", worker["command"])
+
+            renderer = runpy.run_path(str(script))
             validate = renderer["validate_staged_launch"]
             valid = [launch, rel, bs, "station-test", "direct", image, 27, 2, 2]
             validate(*valid)

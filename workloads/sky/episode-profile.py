@@ -57,14 +57,12 @@ def pod_spec(phase, run_id, retained_release=None, step=None):
             "readOnly": True,
         },
     ]
-    mounts.append(
-        {
-            "name": "state",
-            "mountPath": "/state" if phase == "fit" else "/checkpoint",
-            "subPath": f"episodes/{run_id}/state",
-            "readOnly": phase == "infer",
-        }
-    )
+    checkpoint_mount = {
+        "name": "state",
+        "mountPath": "/state" if phase == "fit" else "/checkpoint",
+        "subPath": f"episodes/{run_id}/state",
+        "readOnly": phase == "infer",
+    }
     if retained_release:
         if (
             phase != "infer"
@@ -76,10 +74,11 @@ def pod_spec(phase, run_id, retained_release=None, step=None):
                 "Expected a retained release digest and step for inference"
             )
         generation = f"step-{step:08d}"
-        mounts[-1].update(
+        checkpoint_mount.update(
             mountPath=f"/checkpoint/{generation}",
             subPath=f"episodes/retained/{retained_release}/{generation}",
         )
+    mounts.append(checkpoint_mount)
     if phase == "infer":
         mounts.append(
             {
