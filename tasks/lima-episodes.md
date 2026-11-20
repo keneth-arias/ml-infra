@@ -18,3 +18,13 @@ AirAware supplies immutable split manifests, threshold versions, label eligibili
 6. **Qualify Nebius after the local pilot.** Select an available regional GPU, storage and spend ceiling for one time-boxed replay in eu-south1. Review the scoped [Terraform plan](../bootstrap/nebius/README.md) and account for registry access, model/data transfer rights and size, CPU/GPU hours and teardown. With provisioning approved, run the identical digests on the same permitted fixture using the production Kubernetes context and separate credentials. Compare ordered IDs, predictions, run metadata, measured cost and resource release. Local filesystem paths and a node's image cache cannot serve as cloud inputs.
 
 **Order of work.** Image and profile verification can start with synthetic inputs. Real episode fits depend on AirAware's label decision and OpenTSLM's exported task schema. First verify point exports. The interval/probability reference depends on delivery of AirAware’s tested calibration code and its immutable artifacts. Add the classifier after recording that baseline. Pilot release follows chronological evaluation on a fresh period. Select in validation and freeze before opening test. The held-out replay may veto the release. Choose the forecast-derived probability in validation if it meets AirAware's warning budget and the separate classifier adds no detection benefit. If both candidates miss the budget, run the concentration forecast alone and use the recorded outcomes to investigate the misses.
+
+## Review before merging each PR
+
+At the end of every PR in this plan, review the full diff against the acceptance criteria. Give each of the following reviewers the same base and head commit IDs, the diff, and the test results. Ask each independently for concrete findings, their impact, and a way to verify a fix.
+
+- `model:opencode/zai-coding-plan/glm-5.3-flash`
+- `model:acpRegistry_qwen_code/qwen4-max-preview(openai)`
+- `model:codex/gpt-6.2-sol`
+
+Collect all three responses before merging. Check each finding against the code, implement applicable fixes in the PR, and record how each finding was resolved. Give a brief reason for any suggestion declined. Review the resulting diff, rerun the affected checks, and record the final commit and results in the PR. If a requested review is unavailable, keep it pending and identify the missing reviewer.

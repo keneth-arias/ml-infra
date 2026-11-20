@@ -41,3 +41,5 @@ The Nebius CLI and a Terraform data-source plan authenticated to the production 
 - [ ] **Recovery and telemetry.** Resume a short rank-4 run after interruption on a new pod. Retrieve its complete prediction artifact and comparison metrics from the recorded MLflow run. Qualify simultaneous fits only if measured host/GPU capacity permits.
 - [ ] **Hourly pilot.** Using a frozen release, replay an entire station-day including a late reading, a missing window and a retried trigger. Reconcile expected, emitted and abstained forecasts; verify one canonical issuance per feed/station/origin across revisions, original issue times and a verified rollback from a release protected from training rotation.
 - [ ] **External qualification.** After an approved costed Terraform plan, replay the same fixture on Nebius, verify numerical agreement and record actual cost and resource release. [Implementation order and dependencies](lima-episodes.md)
+
+**For every PR**, complete the [three-model review and follow-up](lima-episodes.md#review-before-merging-each-pr) before merging.
