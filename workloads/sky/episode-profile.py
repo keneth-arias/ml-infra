@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def validate_staged_launch(
-    path, release_sha, bundle_sha, run_id, head, image, seed, step
+    path, release_sha, bundle_sha, run_id, head, image, seed, step, batch
 ):
     launch = json.loads(path.read_bytes())
 
@@ -28,6 +28,7 @@ def validate_staged_launch(
         launch["status"] != "ready"
         or launch["run_id"] != run_id
         or release.get("purpose") != "retrospective_holdout_only"
+        or ("inference_batch" in release and release["inference_batch"] != batch)
         or ck["step"] != step
         or seal["seed"] != seed
         or seal["head"] != head
@@ -148,6 +149,7 @@ def main():
             a.image,
             a.seed,
             a.step,
+            a.batch,
         )
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,40}[a-z0-9]", a.run_id):
         p.error("Invalid Kubernetes run name")

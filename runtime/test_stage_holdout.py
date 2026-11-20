@@ -58,6 +58,7 @@ class HoldoutStageTest(unittest.TestCase):
                     "version": 1,
                     "mode": "concentration",
                     "purpose": "retrospective_holdout_only",
+                    "inference_batch": 2,
                     "image": image,
                     "base_manifest_sha256": base,
                     "checkpoint_sha256": ck,
@@ -131,7 +132,7 @@ class HoldoutStageTest(unittest.TestCase):
                 )
             )
             validate = renderer["validate_staged_launch"]
-            valid = [launch, rel, bs, "station-test", "direct", image, 27, 2]
+            valid = [launch, rel, bs, "station-test", "direct", image, 27, 2, 2]
             validate(*valid)
             for i, wrong in (
                 (1, "0" * 64),
@@ -141,6 +142,7 @@ class HoldoutStageTest(unittest.TestCase):
                 (5, image.replace("ghcr.io", "docker.io")),
                 (6, 28),
                 (7, 3),
+                (8, 16),
             ):
                 with self.subTest(i=i), self.assertRaises(ValueError):
                     args = valid.copy()
