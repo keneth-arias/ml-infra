@@ -53,6 +53,8 @@ class ProfileTest(unittest.TestCase):
             job = json.loads(subprocess.check_output(cmd))
             pod = job["spec"]["template"]["spec"]
             c = pod["containers"][0]
+            self.assertEqual(c["resources"]["requests"]["memory"], "1G")
+            self.assertEqual(c["resources"]["limits"]["memory"], "3G")
             self.assertNotIn("runtimeClassName", pod)
             self.assertFalse(
                 any("nvidia.com/gpu" in v for v in c["resources"].values())

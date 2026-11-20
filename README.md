@@ -103,6 +103,10 @@ export PYTHONPATH=/opt/forecast/src
 
 For the full model comparison, set `AIRAWARE_MODEL_STATE=1` when calling `workloads/sky/launch-airaware.sh`. The launcher renders the pinned task with the retained `training/airaware-model-state` claim at `/checkpoints`. Its 64 GiB budget is dedicated to new model states. Frozen inputs still come from the read-only mount on `airaware-checkpoints`. Use the same setting to resume or restore these runs. The default profile continues to find existing qualification checkpoints at their original paths. Both claims use local storage on bm.
 
+Before resuming or running inference with `sky exec`, check the existing cluster’s Pod in the training namespace. Its `/opt/airaware` mount must reference the immutable `airaware-workers-v3` ConfigMap. For a cluster launched with an older worker, launch a **new cluster name** with the current profile, the original checkpoint PVC and the same run ID. The new Pod can restore the retained checkpoint. Existing SkyPilot Pods keep the mounts they received when created.
+
+The legacy single, distributed and pair profiles each reserve the full 55 GB namespace memory budget through their Pod limit, so schedule them exclusively. Lima episode fits each reserve 24 GB. Two such fits and two CPU verification Jobs (3 GB limit each) use 54 GB together. A CPU preflight on the real 237,397-window training bundle peaked at 414,171,136 bytes while both fits were running.
+
 To use the model volume with a separate `sky exec` task, render the same profile with `uv run --script workloads/sky/model-state.py workloads/sky/airaware.yaml`. The claim binds on first use. At global batch 16 each full state occupies about 6.52 GiB. Keeping two completed generations plus one in progress per head needs about 39.1 GiB for two heads. Monitor actual usage and free bytes before starting other writers.
 
 For the hybrid Qwen LoRA experiment, set `LORA=1` and choose `TRAIN_MODE=ddp`

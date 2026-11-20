@@ -134,6 +134,8 @@ def main():
         )
         c["resources"]["requests"]["cpu"] = "2"
         if a.format == "preflight":
+            c["resources"]["requests"]["memory"] = "1G"
+            c["resources"]["limits"]["memory"] = "3G"
             cmd.append("--preflight")
             spec.pop("runtimeClassName")
             c["volumeMounts"] = [m for m in c["volumeMounts"] if m.get("readOnly")]
