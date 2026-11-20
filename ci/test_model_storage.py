@@ -42,8 +42,8 @@ class ModelStorageTest(unittest.TestCase):
         task = run_path(str(profile.with_name("model-state.py")))["model_task"](profile, joint=True)
         spec = task["config"]["kubernetes"]["pod_config"]["spec"]
         container, = spec["containers"]
-        self.assertEqual(container["resources"]["limits"]["memory"], "36Gi")
+        self.assertEqual(container["resources"]["limits"]["memory"], "55G")
         mount, = [m for m in container["volumeMounts"] if m["mountPath"] == "/opt/airaware"]
         volume, = [v for v in spec["volumes"] if v["name"] == mount["name"]]
-        self.assertEqual(volume["configMap"]["name"], "airaware-workers-v1")
+        self.assertEqual(volume["configMap"]["name"], "airaware-workers-v2")
         self.assertIn("/opt/airaware/airaware.py", task["run"])

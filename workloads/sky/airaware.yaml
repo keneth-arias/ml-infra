@@ -16,7 +16,7 @@ config:
             imagePullPolicy: IfNotPresent
             resources:
               limits:
-                memory: 36Gi
+                memory: 55G
             volumeMounts:
               - name: workers
                 mountPath: /opt/airaware
@@ -33,7 +33,7 @@ config:
         volumes:
           - name: workers
             configMap:
-              name: airaware-workers-v1
+              name: airaware-workers-v2
           - name: storage
             persistentVolumeClaim:
               claimName: airaware-checkpoints

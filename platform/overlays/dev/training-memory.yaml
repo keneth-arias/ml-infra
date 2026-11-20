@@ -5,7 +5,7 @@ metadata:
   namespace: training
 spec:
   hard:
-    limits.memory: 36Gi
+    limits.memory: 55G
 ---
 apiVersion: v1
 kind: LimitRange
@@ -20,4 +20,4 @@ spec:
     defaultRequest:
       memory: 256Mi
     max:
-      memory: 36Gi
+      memory: 55G

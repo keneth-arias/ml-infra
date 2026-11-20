@@ -6,15 +6,16 @@ import runpy
 import sys
 from pathlib import Path
 
-GIB = 1024**3
+MAX_GPU_BYTES = 16_000_000_000
+RESERVE_BYTES = 512 * 1024**2
 
 
 def configure(cuda, rank):
     cuda.set_device(rank)
     free, total = cuda.mem_get_info(rank)
-    budget = min(12 * GIB, free - 3 * GIB)
+    budget = min(MAX_GPU_BYTES, free - RESERVE_BYTES)
     if budget <= 0:
-        raise RuntimeError("La memoria libre de la GPU es insuficiente para la reserva de 3 GiB")
+        raise RuntimeError("La memoria libre de la GPU es insuficiente para la reserva de 512 MiB")
     cuda.set_per_process_memory_fraction(budget / total, rank)
     print(json.dumps({"cuda_device": rank, "allocator_limit_bytes": budget}), flush=True)
 

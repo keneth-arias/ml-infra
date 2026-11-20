@@ -62,7 +62,7 @@ spec:
           mountPath: /dev/shm
       volumes:
       - name: workers
-        configMap: {name: airaware-workers-v1}
+        configMap: {name: airaware-workers-v2}
       - name: checkpoints
         persistentVolumeClaim:
           claimName: checkpoints
