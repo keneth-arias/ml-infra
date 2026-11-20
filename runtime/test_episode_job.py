@@ -78,3 +78,18 @@ class BundleTest(unittest.TestCase):
             (weights / "weights.bin").write_bytes(b"extra")
             with self.assertRaisesRegex(ValueError, "Unlisted"):
                 verify_base(weights, sha256(sums))
+
+    def test_future_fields_and_metric_names(self):
+        from episode_job import verify_fields, training_metrics
+
+        with self.assertRaisesRegex(ValueError, "phase"):
+            verify_fields({"window_id", "history", "targets"}, "infer", "direct")
+        result = training_metrics(
+            {
+                "mae": 2.0,
+                "width_by_horizon": [9.0, 8.0],
+                "window_ids": ["secret"],
+                "step": 7,
+            }
+        )
+        self.assertEqual(result, {"mae": 2.0, "width_h1": 9.0, "width_h2": 8.0})

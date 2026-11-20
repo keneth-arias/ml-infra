@@ -99,6 +99,28 @@ def verify_base(weights, expected):
     )
 
 
+def verify_fields(names, phase, head):
+    fields = {"window_id", "history"}
+    if head == "episode":
+        fields.update(("station_key", "threshold_ug_m3", "thresholds_sha256"))
+    if phase == "fit":
+        fields.add("event" if head == "episode" else "targets")
+    if set(names) != fields:
+        raise ValueError("Fields outside phase schema")
+
+
+def training_metrics(event):
+    metrics = {
+        k: float(v)
+        for k, v in event.items()
+        if k != "step" and isinstance(v, (float, int))
+    }
+    for name in ("mae", "coverage", "width", "crossed"):
+        for h, v in enumerate(event.get(name + "_by_horizon", []), 1):
+            metrics[f"{name}_h{h}"] = float(v)
+    return metrics
+
+
 def main():
     import numpy as np
 
@@ -122,14 +144,8 @@ def main():
     spec = bundle(root, args.bundle_sha256, args.phase, args.head)
     verify_base(weights, spec["weights_manifest_sha256"])
     data = root / "data.npz"
-    fields = {"window_id", "history"}
-    if args.head == "episode":
-        fields.update(("station_key", "threshold_ug_m3", "thresholds_sha256"))
-    if args.phase == "fit":
-        fields.add("event" if args.head == "episode" else "targets")
     with np.load(data, allow_pickle=False) as archive:
-        if set(archive.files) != fields:
-            raise ValueError("Fields outside phase schema")
+        verify_fields(archive.files, args.phase, args.head)
     if args.head in ("quantile", "episode"):
         from opentslm.forecast_inference import verify_candidate_input
 
@@ -292,7 +308,12 @@ def main():
         mlflow.set_tags(
             {
                 k: spec[k]
-                for k in ("thresholds_sha256", "checkpoint_sha256", "split_sha256")
+                for k in (
+                    "thresholds_sha256",
+                    "checkpoint_sha256",
+                    "split_sha256",
+                    "fixture_sha256",
+                )
                 if k in spec
             }
         )
@@ -317,20 +338,17 @@ def main():
                                 max(v[0] for v in event["peak_bytes_per_rank"]),
                                 step=event["step"],
                             )
-                        if isinstance(event, dict) and "loss" in event:
-                            mlflow.log_metrics(
-                                {
-                                    k: float(event[k])
-                                    for k in ("loss", "windows_per_second")
-                                },
-                                step=event["step"],
-                            )
+                        if isinstance(event, dict):
+                            metrics = training_metrics(event)
+                            if metrics:
+                                mlflow.log_metrics(metrics, step=event.get("step", 0))
                     if proc.wait():
                         raise subprocess.CalledProcessError(proc.returncode, command)
         mlflow.log_metrics(
             {
                 "duration_seconds": time.monotonic() - started,
                 "filesystem_free_bytes": shutil.disk_usage(work).free,
+                "inputs_filesystem_free_bytes": shutil.disk_usage(root).free,
             }
         )
         host_mem = Path("/sys/fs/cgroup/memory.peak")
