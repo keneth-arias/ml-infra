@@ -7,6 +7,7 @@ resources:
   image_id: docker:ml-infra/training:dev2
 config:
   kubernetes:
+    set_pod_resource_limits: false
     remote_identity: NONE
     pod_config:
       spec:

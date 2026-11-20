@@ -44,10 +44,7 @@ def pod_spec(phase, run_id):
                 "name": "ray-node",
                 "imagePullPolicy": "IfNotPresent",
                 "volumeMounts": mounts,
-                "resources": {
-                    "requests": {"memory": "12G"},
-                    "limits": {"memory": "24G"},
-                },
+                "resources": {"requests": {"memory": "12G"}},
             }
         ],
         "volumes": [
@@ -135,12 +132,13 @@ def main():
         c["resources"]["requests"]["cpu"] = "2"
         if a.format == "preflight":
             cmd.append("--preflight")
+            c["resources"]["requests"]["memory"] = "1G"
             spec.pop("runtimeClassName")
             c["volumeMounts"] = [m for m in c["volumeMounts"] if m.get("readOnly")]
             mount_names = {m["name"] for m in c["volumeMounts"]}
             spec["volumes"] = [v for v in spec["volumes"] if v["name"] in mount_names]
         else:
-            c["resources"]["limits"]["nvidia.com/gpu"] = 1
+            c["resources"]["limits"] = {"nvidia.com/gpu": 1}
             c["resources"]["requests"]["nvidia.com/gpu"] = 1
         spec.update(restartPolicy="Never", automountServiceAccountToken=False)
         template = {"metadata": {"labels": {"app": "airaware-episodes"}}, "spec": spec}
@@ -171,7 +169,11 @@ def main():
                 "memory": 12,
             },
             "config": {
-                "kubernetes": {"remote_identity": "NONE", "pod_config": {"spec": spec}}
+                "kubernetes": {
+                    "remote_identity": "NONE",
+                    "set_pod_resource_limits": False,
+                    "pod_config": {"spec": spec},
+                }
             },
             "envs": env,
             "run": shlex.join(cmd),

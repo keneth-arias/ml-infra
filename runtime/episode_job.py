@@ -288,7 +288,6 @@ def main():
         return
     import mlflow
 
-    worker = "/opt/airaware/gpu_worker.py"
     common = [
         "--head",
         args.head,
@@ -316,7 +315,6 @@ def main():
             "/opt/conda/bin/torchrun",
             "--standalone",
             "--nproc-per-node=1",
-            worker,
             "/opt/forecast/train_qwen_forecast.py",
             "--mode",
             "single",
@@ -345,7 +343,6 @@ def main():
         artifact = Path("/output") / f"predictions-{step_name}.npz"
         command = [
             "/opt/conda/bin/python",
-            worker,
             "-m",
             "opentslm.forecast_inference",
             "--checkpoint",

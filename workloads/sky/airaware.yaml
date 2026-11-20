@@ -8,6 +8,7 @@ resources:
   image_id: docker:ghcr.io/keneth-arias/ml-infra-qwen@sha256:32b27ab5bc82060bde95e565348dd7fd54b004015cc2dddd7df0747653fbe1d9
 config:
   kubernetes:
+    set_pod_resource_limits: false
     remote_identity: NONE
     pod_config:
       spec:
