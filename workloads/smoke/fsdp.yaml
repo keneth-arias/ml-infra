@@ -51,7 +51,6 @@ spec:
             cpu: '4'
             memory: 4Gi
           limits:
-            memory: 12Gi
             nvidia.com/gpu: 2
         volumeMounts:
         - name: checkpoints

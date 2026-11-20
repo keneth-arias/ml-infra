@@ -22,7 +22,7 @@ spec:
             - {name: OMP_NUM_THREADS, value: "2"}
           resources:
             requests: {cpu: "4", memory: 4Gi}
-            limits: {memory: 12Gi, nvidia.com/gpu: 2}
+            limits: {nvidia.com/gpu: 2}
           volumeMounts:
             - {name: checkpoints, mountPath: /checkpoints}
             - {name: shm, mountPath: /dev/shm}
