@@ -114,13 +114,40 @@ class BundleTest(unittest.TestCase):
             }
             (source / "manifest.json").write_text(json.dumps(spec))
             expected = sha256(source / "manifest.json")
+            checkpoint = root / "checkpoint.json"
+            identity = {
+                "head": "quantile",
+                "data": spec["files"]["data.npz"],
+                "weights": spec["weights_manifest_sha256"],
+                "input_manifest_sha256": expected,
+                "world": 1,
+                "mode": "single",
+                "precision": "fp32",
+                "lora": True,
+                "seed": 27,
+                "batch": 16,
+                "schedule": 14,
+                "task_schema": {"lora_rank": 4, "lora_alpha": 8},
+            }
+            checkpoint.write_text(json.dumps({"step": 14, "identity": identity}))
             with self.assertRaises(ValueError):
-                prepare_point_control(source, "0" * 64, root / "bad")
+                prepare_point_control(
+                    source, "0" * 64, checkpoint, sha256(checkpoint), root / "bad"
+                )
             out = root / "control"
-            got = prepare_point_control(source, expected, out)
+            got = prepare_point_control(
+                source, expected, checkpoint, sha256(checkpoint), out
+            )
             bound = bundle(out, got, "fit", "direct")
             self.assertEqual(bound["point_control_of"], expected)
-            self.assertEqual(bound["files"], spec["files"])
+            self.assertEqual(bound["files"]["data.npz"], spec["files"]["data.npz"])
+            from episode_job import paired_recipe
+
+            self.assertEqual(
+                paired_recipe(out, bound), {"seed": 27, "batch": 16, "schedule": 14}
+            )
+            with self.assertRaises(ValueError):
+                paired_recipe(out, {**bound, "block": "selection"})
             self.assertEqual(
                 (out / "data.npz").read_bytes(), (source / "data.npz").read_bytes()
             )

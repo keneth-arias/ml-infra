@@ -27,6 +27,8 @@ def bundle(root, digest, phase, head):
     if (spec["phase"], spec["head"]) != (phase, head):
         raise ValueError("Bundle belongs to another phase or model")
     expected = {"data.npz", "thresholds.json"} if head == "episode" else {"data.npz"}
+    if "point_control_of" in spec:
+        expected.update(("quantile-fit.json", "quantile-checkpoint.json"))
     if set(spec["files"]) != expected or {
         p.name for p in root.iterdir()
     } != expected | {"manifest.json"}:
@@ -35,10 +37,68 @@ def bundle(root, digest, phase, head):
         path = root / name
         if path.is_symlink() or sha256(path) != spec["files"][name]:
             raise ValueError("Corrupt phase input")
+    if "point_control_of" in spec:
+        paired_recipe(root, spec)
     return spec
 
 
-def prepare_point_control(source, source_digest, output):
+def paired_recipe(root, spec):
+    if (
+        spec["phase"],
+        spec["head"],
+        spec.get("schema"),
+        spec.get("block"),
+        spec.get("unit"),
+    ) != ("fit", "direct", "forecast-input-v1", "train", "ug/m3"):
+        raise ValueError("Expected a matched train-only point fit")
+    if spec["point_control_of"] != spec["files"][
+        "quantile-fit.json"
+    ] or not re.fullmatch("[a-f0-9]{64}", spec.get("split_sha256", "")):
+        raise ValueError("Quantile source or split digest mismatch")
+    original = json.loads((root / "quantile-fit.json").read_text())
+    if (
+        original.get("head") != "quantile"
+        or original.get("files") != {"data.npz": spec["files"]["data.npz"]}
+        or any(
+            original.get(k) != spec[k]
+            for k in (
+                "phase",
+                "block",
+                "schema",
+                "unit",
+                "weights_manifest_sha256",
+                "split_sha256",
+            )
+        )
+    ):
+        raise ValueError(
+            "Direct and quantile bundles describe different training inputs"
+        )
+    m = json.loads((root / "quantile-checkpoint.json").read_text())
+    identity = m["identity"]
+    expected = {
+        "head": "quantile",
+        "data": spec["files"]["data.npz"],
+        "weights": spec["weights_manifest_sha256"],
+        "input_manifest_sha256": spec["point_control_of"],
+        "world": 1,
+        "mode": "single",
+        "precision": "fp32",
+        "lora": True,
+    }
+    if (
+        any(identity.get(k) != v for k, v in expected.items())
+        or m["step"] != identity.get("schedule")
+        or identity.get("task_schema", {}).get("lora_rank") != 4
+        or identity.get("task_schema", {}).get("lora_alpha") != 8
+    ):
+        raise ValueError(
+            "Source checkpoint does not identify the completed quantile recipe"
+        )
+    return {k: identity[k] for k in ("seed", "batch", "schedule")}
+
+
+def prepare_point_control(source, source_digest, checkpoint, checkpoint_digest, output):
     original = bundle(source, source_digest, "fit", "quantile")
     if (
         original.get("schema") != "forecast-input-v1"
@@ -54,7 +114,19 @@ def prepare_point_control(source, source_digest, output):
         stage = Path(tmp) / "fit"
         stage.mkdir()
         shutil.copyfile(source / "data.npz", stage / "data.npz")
-        spec = {**original, "head": "direct", "point_control_of": source_digest}
+        shutil.copyfile(source / "manifest.json", stage / "quantile-fit.json")
+        shutil.copyfile(checkpoint, stage / "quantile-checkpoint.json")
+        files = {
+            **original["files"],
+            "quantile-fit.json": source_digest,
+            "quantile-checkpoint.json": checkpoint_digest,
+        }
+        spec = {
+            **original,
+            "head": "direct",
+            "point_control_of": source_digest,
+            "files": files,
+        }
         (stage / "manifest.json").write_text(json.dumps(spec, sort_keys=True) + "\n")
         digest = sha256(stage / "manifest.json")
         bundle(stage, digest, "fit", "direct")
@@ -168,12 +240,22 @@ def main():
     spec = bundle(root, args.bundle_sha256, args.phase, args.head)
     verify_base(weights, spec["weights_manifest_sha256"])
     matched = "point_control_of" in spec
-    if matched and (
-        args.phase != "fit"
-        or args.head != "direct"
-        or not re.fullmatch("[0-9a-f]{64}", spec["point_control_of"])
-    ):
-        raise ValueError("Invalid matched direct control")
+    if matched:
+        if paired_recipe(root, spec) != {
+            k: getattr(args, k) for k in ("seed", "batch", "schedule")
+        }:
+            raise ValueError(
+                "Seed, batch, or schedule differs from the source quantile fit"
+            )
+        options = subprocess.check_output(
+            ["/opt/conda/bin/python", "/opt/forecast/train_qwen_forecast.py", "--help"],
+            text=True,
+            env={**os.environ, "PYTHONPATH": "/opt/forecast/src"},
+        )
+        if "--matched-point" not in options:
+            raise ValueError(
+                "Rebuild with an OpenTSLM revision supporting matched point controls"
+            )
 
     data = root / "data.npz"
     with np.load(data, allow_pickle=False) as archive:
