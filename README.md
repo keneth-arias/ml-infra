@@ -125,3 +125,28 @@ kubectl logs -n training job/airaware-checkpoint-migration
 
 Hostpath uses the node's shared filesystem. Monitor actual bytes on the node
 and keep a verified copy outside the node for disaster recovery.
+
+### Matched two-channel forecasts
+
+The `joint` profile starts one direct LoRA fit per RTX 5070 Ti. Both fit the same targets.
+The `first` process sees the first history channel and `both` sees both. It mounts
+`airaware/joint-inputs` read-only at `/inputs` and the pinned base weights at
+`/inputs/qwen`. Stage the historical TimeF release in `timef/`, its matrices and
+verified scaler in `windows/lima-pm25-pm10-v1/`, and a top-level `SHA256SUMS`
+covering the TimeF and input bundle manifests. Keep external releases outside these mounts.
+
+On bm the profile uses the locally imported digest recorded in `model-state.py`.
+`runtime/Dockerfile.joint` extends the existing evaluation image. Its `forecast` build
+context is a Git archive of the trainer commit containing `src/opentslm` and
+`scripts/train_qwen_forecast.py`; pass that same SHA as `FORECAST_SOURCE_REVISION`.
+Import the built image into MicroK8s and verify the node's digest before launching.
+
+```sh
+workloads/sky/launch-airaware.sh joint lima-pm-pair lima-pm-joint-v1 -y -d \
+  --env STOP_STEP=15745 --env SCHEDULE_STEPS=15745
+```
+
+Each process writes an attempt log under its own run directory in the model-state PVC.
+After the final scheduled validation, it restores the selected checkpoint and writes
+`step-XXXXXXXX-validation.npz` in original units. The output identifies its checkpoint,
+input view, scaler, channels, forecast hours and window IDs.
