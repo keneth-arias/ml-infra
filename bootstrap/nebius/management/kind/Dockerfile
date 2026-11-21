@@ -5,7 +5,7 @@ COPY --from=tools --chmod=u=rwX,go=rX /mirror /mirror
 WORKDIR /opt/cleanup
 COPY management/kind/s3-requirements.txt management/otlp-requirements.txt /tmp/
 RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/s3-requirements.txt -r /tmp/otlp-requirements.txt && pip check
-COPY main.tf versions.tf .terraform.lock.hcl expire-workers worker_cleanup.py with-credentials ./
+COPY main.tf versions.tf .terraform.lock.hcl expire-workers worker_cleanup.py control_storage.py with-credentials ./
 COPY management /opt/cleanup/management
 ENV PATH="/opt/cleanup/management/kind/bin:${PATH}"
 ENV TF_CLI_CONFIG_FILE=/opt/cleanup/management/kind/terraform.rc TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 PYTHONDONTWRITEBYTECODE=1 AI_AGENT=worker-cleanup

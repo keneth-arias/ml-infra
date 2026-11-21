@@ -20,6 +20,7 @@ from render import NS, SA
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from control_storage import control_bucket, publish_timer_proof
 from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_inventory
 
 ENDPOINT = "https://storage.eu-south1.nebius.cloud"
@@ -159,6 +160,7 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
                             "--project-id", scope["project_id"], "--cluster-id", scope["cluster_id"],
                             "--inventory", str(scope_dir / "inventory.json")], check=True)
             return
+        control_bucket(scope)
         # Missing alert credentials block a new allocation but never prevent cutoff cleanup.
         bearer = Path("/identity/otlp-bearer").read_text().strip()
         if not bearer or any(c.isspace() for c in bearer):
@@ -189,12 +191,8 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
             raise ValueError("Backup stopping before attestation")
         import boto3
         store = boto3.client("s3", region_name="eu-south1", endpoint_url=ENDPOINT)
-        response = store.put_object(Bucket=scope["state_bucket"],
-                                    Key=f"prod/mk8s/release-control/timers/{run}/{stage}/fw13.json",
-                                    Body=json.dumps(proof).encode(), ContentType="application/json")
-        if response.get("VersionId") in (None, "", "null"):
-            raise ValueError("Missing storage version for fw13 proof")
-        print("Published fw13 CronJob proof", response["VersionId"])
+        version = publish_timer_proof(store, scope, "fw13", proof)
+        print("Published fw13 CronJob proof", version)
 
 
 def stop_worker(child, control, *, grace=75, terraform_binary="/usr/local/bin/terraform"):

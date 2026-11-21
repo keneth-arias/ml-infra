@@ -61,13 +61,15 @@ class Storage:
         self.barrier = barrier
         self.lock = Lock()
 
-    def get_object(self, **kwargs):
+    def get_object(self, *, Bucket, Key):
+        assert (Bucket, Key) == ("controls", "prod/mk8s/release-control/ledger.json")
         data = self.raw
         if self.barrier:
             self.barrier.wait(timeout=5)
         return {"VersionId": "v1", "ETag": digest(data), "Body": BytesIO(data)}
 
-    def put_object(self, *, IfMatch, Body, **kwargs):
+    def put_object(self, *, Bucket, Key, IfMatch, Body, **kwargs):
+        assert (Bucket, Key) == ("controls", "prod/mk8s/release-control/ledger.json")
         with self.lock:
             if IfMatch != digest(self.raw):
                 raise ValueError("Conditional write conflict")
@@ -82,6 +84,8 @@ def fixture(request, now=NOW):
         start=utc(now - timedelta(hours=1)),
         cutoff=utc(now + timedelta(hours=10)),
         state_bucket="fixture",
+        control_bucket="controls",
+        control_project_id="management-project",
     )
     timing = json.dumps(dict(timings(), seed=request["seed"])).encode()
     funds = dict(
@@ -92,7 +96,8 @@ def fixture(request, now=NOW):
         gpu_intervals=[{"vm": "worker", "start": sc["start"], "end": None}],
     )
     funds["fit_approval"] = {
-        k: sc[k] for k in ("project_id", "cluster_id", "start", "cutoff", "other_cost_usd")
+        k: sc[k] for k in ("project_id", "cluster_id", "start", "cutoff", "other_cost_usd",
+                                  "state_bucket", "control_bucket", "control_project_id")
     }
     funds["fit_approval"].update(
         vm="worker", request=request, purpose="selected", max_attempts=2, measurements_sha256=digest(timing)
@@ -101,6 +106,23 @@ def fixture(request, now=NOW):
 
 
 class FitAttemptTests(unittest.TestCase):
+    def test_storage_scope_is_required_before_any_reservation_io(self):
+        from unittest.mock import Mock
+
+        _, request, _ = inputs()
+        approved, _, timing = fixture(request)
+        for value in (None, approved["state_bucket"]):
+            with self.subTest(value=value):
+                sc = dict(approved)
+                if value is None:
+                    sc.pop("control_bucket")
+                else:
+                    sc["control_bucket"] = value
+                s3 = Mock()
+                with self.assertRaisesRegex(ValueError, "control_bucket"):
+                    reserve_fit(s3, sc, request, timing, "c", NOW)
+                self.assertEqual(s3.mock_calls, [])
+
     def test_two_runners_and_ambiguous_delivery(self):
         _, req, _ = inputs()
         sc, funds, timing = fixture(req)

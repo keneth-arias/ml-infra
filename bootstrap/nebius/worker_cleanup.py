@@ -63,6 +63,7 @@ def cleanup_digest(root, units):
         for name in (
             "expire-workers",
             "worker_cleanup.py",
+            "control_storage.py",
             "with-credentials",
             "main.tf",
             "versions.tf",
