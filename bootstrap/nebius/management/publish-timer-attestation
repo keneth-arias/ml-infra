@@ -26,6 +26,25 @@ def output(*args):
     return subprocess.check_output(args, text=True, timeout=30).strip()
 
 
+def provider_key(account, whoami, get_config, environ):
+    """Require the authenticated CLI profile and pinned Terraform provider to use the same key."""
+    key = environ["NEBIUS_AUTHORIZED_KEY_ID"]
+    if (
+        not key
+        or whoami != account
+        or environ["NEBIUS_SA_ID"] != account
+        or get_config("service-account-id") != account
+        or get_config("public-key-id") != key
+        or not Path(get_config("private-key-file-path")).samefile(
+            environ["NEBIUS_PRIVATE_KEY_FILE"]
+        )
+    ):
+        raise ValueError(
+            "CLI and Terraform must use the audited cleanup identity and key"
+        )
+    return key
+
+
 def main(run):
     if not re.fullmatch("[a-z0-9][a-z0-9-]{0,39}", run):
         raise ValueError("Invalid run ID")
@@ -53,8 +72,12 @@ def main(run):
     info = json.loads(
         output("nebius", "-p", "ml-prod", "iam", "whoami", "--format", "json")
     )
-    if account != info["service_account_profile"]["info"]["metadata"]["id"]:
-        raise ValueError("Unexpected Nebius cleanup identity")
+    provider_key_id = provider_key(
+        account,
+        info["service_account_profile"]["info"]["metadata"]["id"],
+        lambda name: output("nebius", "-p", "ml-prod", "config", "get", name),
+        os.environ,
+    )
     verify_inventory("ml-prod", target[0], target[1], baseline, before_stage=scope)
     backend = json.loads(
         (Path(os.environ["TF_DATA_DIR"]) / "terraform.tfstate").read_text()
@@ -78,6 +101,7 @@ def main(run):
     service = f"worker-expiry@{run}.service"
     units = {}
     for unit, template in (
+        (f"worker-attest@{run}.service", "worker-attest@.service"),
         (service, "worker-expiry@.service"),
         (timer, "worker-expiry@.timer"),
     ):
@@ -100,7 +124,7 @@ def main(run):
 
     source_digest = cleanup_digest(TERRAFORM_ROOT, units)
     with TemporaryDirectory() as scratch:
-        groups = plan_release(
+        groups, _ = plan_release(
             Path(scratch) / "rehearsal.tfplan",
             profile="ml-prod",
             cluster_id=target[1],
@@ -161,6 +185,7 @@ def main(run):
     proof.update(
         host=host,
         account_id=account,
+        provider_key_id=provider_key_id,
         state_serial=state["serial"],
         timer=timer,
         observed_at=now.isoformat().replace("+00:00", "Z"),

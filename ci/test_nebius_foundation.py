@@ -149,6 +149,18 @@ class LiveCleanupTest(unittest.TestCase):
             self.cleanup.release_candidates(doc, "cluster", "fit", "cut", **expected),
             [address],
         )
+        # During actual expiry the managed CPU is releasable even if a GPU never entered state.
+        self.assertEqual(
+            self.cleanup.release_candidates(
+                doc,
+                "cluster",
+                "fit",
+                "cut",
+                target_ids={"cpu-group", "orphan-gpu"},
+                allow_orphans=True,
+            ),
+            [address],
+        )
         for case in ("foreign-id", "orphan", "wrong-run", "extra-resource", "deferred"):
             modified = deepcopy(doc)
             opts = dict(expected)
@@ -172,3 +184,67 @@ class LiveCleanupTest(unittest.TestCase):
                 self.cleanup.release_candidates(
                     modified, "cluster", "fit", "cut", **opts
                 )
+
+    def test_expiry_releases_managed_subset_and_exits_nonzero_for_orphan(self):
+        from unittest.mock import Mock, patch
+
+        main = runpy.run_path(
+            str(Path(self.cleanup.__file__).with_name("expire-workers"))
+        )["main"]
+        apply = Mock()
+        with (
+            patch.dict(
+                main.__globals__,
+                plan_release=Mock(return_value=({"cpu"}, {"gpu-orphan"})),
+                terraform=apply,
+            ),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "expire-workers",
+                    "--cluster-id",
+                    "cluster",
+                    "--run-id",
+                    "fit",
+                    "--cutoff",
+                    "2020-01-01T00:00:00Z",
+                    "--apply",
+                ],
+            ),
+            self.assertRaisesRegex(SystemExit, "reconcile"),
+        ):
+            main()
+        self.assertEqual(apply.call_count, 1)
+        self.assertEqual(apply.call_args.args[0], "apply")
+
+    def test_different_terraform_credential_cannot_use_cli_grant(self):
+        from tempfile import TemporaryDirectory
+
+        script = (
+            Path(self.cleanup.__file__).parent / "management/publish-timer-attestation"
+        )
+        verify = runpy.run_path(str(script))["provider_key"]
+        with TemporaryDirectory() as tmp:
+            key = Path(tmp) / "fixture"
+            key.touch()
+            other = key.with_name("other")
+            other.touch()
+            cfg = {
+                "service-account-id": "acct",
+                "public-key-id": "key",
+                "private-key-file-path": str(key),
+            }
+            env = {
+                "NEBIUS_SA_ID": "acct",
+                "NEBIUS_AUTHORIZED_KEY_ID": "key",
+                "NEBIUS_PRIVATE_KEY_FILE": str(key),
+            }
+            self.assertEqual(verify("acct", "acct", cfg.__getitem__, env), "key")
+            for field, value in (
+                ("NEBIUS_SA_ID", "other"),
+                ("NEBIUS_AUTHORIZED_KEY_ID", "other"),
+                ("NEBIUS_PRIVATE_KEY_FILE", str(other)),
+            ):
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    verify("acct", "acct", cfg.__getitem__, dict(env, **{field: value}))

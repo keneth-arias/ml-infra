@@ -58,6 +58,9 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         grant = grants[host]
         if (
             grant["account_id"] != account
+            or not grant["public_key_id"]
+            or grant["state_bucket"] != bucket
+            or grant["state_key"] != "prod/mk8s/terraform.tfstate"
             or grant["project_id"] != scope["project_id"]
             or grant["cluster_id"] != scope["cluster_id"]
             or not re.fullmatch("[0-9a-f]{64}", grant["evidence_sha256"])
@@ -75,7 +78,11 @@ def reserve(s3, scope, plan_digest, state_serial, now):
     root = Path(__file__).resolve().parent
     units = {
         name: root / "management" / name
-        for name in ("worker-expiry@.timer", "worker-expiry@.service")
+        for name in (
+            "worker-expiry@.timer",
+            "worker-expiry@.service",
+            "worker-attest@.service",
+        )
     }
     expected_source = cleanup_digest(root, units)
     versions = {}
@@ -98,6 +105,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         expected.update(
             host=host,
             account_id=account,
+            provider_key_id=grants[host]["public_key_id"],
             scope_sha256=scope_digest(scope),
             cleanup_source_sha256=expected_source,
             state_serial=state_serial,

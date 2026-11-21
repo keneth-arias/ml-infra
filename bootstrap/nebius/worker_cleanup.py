@@ -12,7 +12,9 @@ GROUPS = {
 }
 
 
-def release_candidates(plan, cluster_id, run_id, cutoff_label, *, target_ids=None):
+def release_candidates(
+    plan, cluster_id, run_id, cutoff_label, *, target_ids=None, allow_orphans=False
+):
     if (
         plan.get("format_version", "").split(".")[0] != "1"
         or (target_ids is None and plan.get("complete") is not True)
@@ -47,7 +49,8 @@ def release_candidates(plan, cluster_id, run_id, cutoff_label, *, target_ids=Non
             planned_ids.append(before["id"])
     if target_ids is not None and (
         len(set(planned_ids)) != len(planned_ids)
-        or set(planned_ids) != target_ids
+        or not set(planned_ids) <= target_ids
+        or (not allow_orphans and set(planned_ids) != target_ids)
         or (planned_ids and plan.get("applyable") is not True)
     ):
         raise ValueError("Release plan differs from live run-owned groups")
@@ -149,7 +152,9 @@ def terraform(*args, capture=False):
     ).stdout
 
 
-def plan_release(saved, *, profile, cluster_id, run_id, cutoff_label):
+def plan_release(
+    saved, *, profile, cluster_id, run_id, cutoff_label, allow_orphans=False
+):
     groups = cloud_items(profile, "mk8s", "node-group", cluster_id)
     target_ids = {
         ident
@@ -172,5 +177,17 @@ def plan_release(saved, *, profile, cluster_id, run_id, cutoff_label):
         capture=True,
     )
     plan = json.loads(terraform("show", "-json", saved, capture=True))
-    release_candidates(plan, cluster_id, run_id, cutoff_label, target_ids=target_ids)
-    return target_ids
+    changes = release_candidates(
+        plan,
+        cluster_id,
+        run_id,
+        cutoff_label,
+        target_ids=target_ids,
+        allow_orphans=allow_orphans,
+    )
+    managed = {
+        r["change"]["before"]["id"]
+        for r in plan.get("resource_changes", [])
+        if r["address"] in changes
+    }
+    return managed, target_ids - managed

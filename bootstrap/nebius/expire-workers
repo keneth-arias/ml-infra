@@ -45,12 +45,13 @@ def main():
 
     with TemporaryDirectory() as directory:
         saved = Path(directory) / "release.tfplan"
-        releases = plan_release(
+        releases, orphans = plan_release(
             saved,
             profile=args.profile,
             cluster_id=args.cluster_id,
             run_id=args.run_id,
             cutoff_label=cutoff.strftime("%Y%m%d%H%M%S"),
+            allow_orphans=True,
         )
         print(
             f"Verified {len(releases)} expired worker group(s) for {args.run_id}.",
@@ -60,12 +61,22 @@ def main():
             terraform(
                 "apply", "-input=false", "-lock-timeout=60s", "-no-color", str(saved)
             )
+    if orphans:
+        print(
+            "Run-owned groups absent from Terraform state:",
+            ", ".join(sorted(orphans)),
+            flush=True,
+        )
     if args.inventory and (args.apply or not releases):
         verify_inventory(
             args.profile,
             args.project_id,
             args.cluster_id,
             json.loads(args.inventory.read_text()),
+        )
+    if orphans:
+        raise SystemExit(
+            "Keep cleanup armed and reconcile the listed live groups through the provider."
         )
 
 

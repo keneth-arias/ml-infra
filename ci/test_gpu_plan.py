@@ -490,7 +490,11 @@ class ReservationTests(unittest.TestCase):
         root = Path(gpu_window.__file__).parent
         units = {
             name: root / "management" / name
-            for name in ("worker-expiry@.service", "worker-expiry@.timer")
+            for name in (
+                "worker-expiry@.service",
+                "worker-expiry@.timer",
+                "worker-attest@.service",
+            )
         }
         source = cleanup_digest(root, units)
 
@@ -506,6 +510,9 @@ class ReservationTests(unittest.TestCase):
         grants = {
             host: dict(
                 account_id=account,
+                public_key_id=host + "-key",
+                state_bucket="state",
+                state_key="prod/mk8s/terraform.tfstate",
                 project_id="p",
                 cluster_id="c",
                 evidence_sha256="d" * 64,
@@ -553,6 +560,7 @@ class ReservationTests(unittest.TestCase):
                     inventory_reconciled=True,
                     locked_release_plan_checked=True,
                     account_id=sc["cleanup_accounts"][host],
+                    provider_key_id=host + "-key",
                 )
                 if case == "timer" and host == "fw13":
                     data["run_id"] = "old"
@@ -609,7 +617,12 @@ class ReservationTests(unittest.TestCase):
 
         # The live ledger carries evidence of provider deletion authority separately
         # from the cleanup process that can only demonstrate a read-only rehearsal.
-        for key, value in (("node_group_delete", False), ("valid_through", utc(NOW))):
+        for key, value in (
+            ("node_group_delete", False),
+            ("valid_through", utc(NOW)),
+            ("state_bucket", "other"),
+            ("state_key", "other"),
+        ):
             bad = deepcopy(grants)
             bad["fw13"][key] = value
             raw = json.dumps(
