@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Publish the local cleanup service's live, stage-specific preallocation evidence."""
+
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shlex
+import socket
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+TERRAFORM_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TERRAFORM_ROOT))
+from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_inventory
+
+STATE_KEY = "prod/mk8s/terraform.tfstate"
+ENDPOINT = "https://storage.eu-south1.nebius.cloud"
+
+
+def output(*args):
+    return subprocess.check_output(args, text=True, timeout=30).strip()
+
+
+def provider_key(account, whoami, get_config, environ):
+    """Require the authenticated CLI profile and pinned Terraform provider to use the same key."""
+    key = environ["NEBIUS_AUTHORIZED_KEY_ID"]
+    if (
+        not key
+        or whoami != account
+        or environ["NEBIUS_SA_ID"] != account
+        or get_config("service-account-id") != account
+        or get_config("public-key-id") != key
+        or not Path(get_config("private-key-file-path")).samefile(
+            environ["NEBIUS_PRIVATE_KEY_FILE"]
+        )
+    ):
+        raise ValueError(
+            "CLI and Terraform must use the audited cleanup identity and key"
+        )
+    return key
+
+
+def main(run):
+    if not re.fullmatch("[a-z0-9][a-z0-9-]{0,39}", run):
+        raise ValueError("Invalid run ID")
+    if pwd.getpwuid(os.geteuid()).pw_name != "nebius-cleanup":
+        raise ValueError("Run under the cleanup service identity")
+    host = {"bm": "bm", "fw13pro": "fw13"}[socket.gethostname()]
+    root = Path("/etc/nebius-cleanup")
+    scope = json.loads((root / f"{run}-scope.json").read_bytes())
+    target = tuple(os.environ[k] for k in ("PROJECT_ID", "CLUSTER_ID", "CUTOFF"))
+    if (
+        target != tuple(scope[k] for k in ("project_id", "cluster_id", "cutoff"))
+        or scope["run_id"] != run
+        or scope["stage"] not in ("pilot", "support", "gpu")
+    ):
+        raise ValueError("Run service environment differs from approved scope")
+    raw = (root / f"{run}-inventory.json").read_bytes()
+    baseline = json.loads(raw)
+    if (
+        hashlib.sha256(raw).hexdigest() != scope["baseline_sha256"]
+        or (baseline["project_id"], baseline["cluster_id"]) != target[:2]
+    ):
+        raise ValueError("Inventory baseline mismatch")
+
+    account = scope["cleanup_accounts"][host]
+    info = json.loads(
+        output("nebius", "-p", "ml-prod", "iam", "whoami", "--format", "json")
+    )
+    provider_key_id = provider_key(
+        account,
+        info["service_account_profile"]["info"]["metadata"]["id"],
+        lambda name: output("nebius", "-p", "ml-prod", "config", "get", name),
+        os.environ,
+    )
+    verify_inventory("ml-prod", target[0], target[1], baseline, before_stage=scope)
+    backend = json.loads(
+        (Path(os.environ["TF_DATA_DIR"]) / "terraform.tfstate").read_text()
+    )["backend"]
+    config = backend["config"]
+    if (
+        backend["type"] != "s3"
+        or config["bucket"] != scope["state_bucket"]
+        or config["key"] != STATE_KEY
+        or config["region"] != "eu-south1"
+        or config["endpoints"]["s3"] != ENDPOINT
+        or config["use_lockfile"] is not True
+        or output("terraform", "workspace", "show") != "default"
+    ):
+        raise ValueError("Unexpected cleanup backend")
+    state = json.loads(output("terraform", "state", "pull"))
+    if state["lineage"] != scope["state_lineage"]:
+        raise ValueError("Unexpected live state lineage")
+
+    timer = f"worker-expiry@{run}.timer"
+    service = f"worker-expiry@{run}.service"
+    units = {}
+    for unit, template in (
+        (f"worker-attest@{run}.service", "worker-attest@.service"),
+        (service, "worker-expiry@.service"),
+        (timer, "worker-expiry@.timer"),
+    ):
+
+        def prop(key):
+            return output("systemctl", "show", unit, "--value", "-p", key)
+
+        if prop("DropInPaths") or prop("NeedDaemonReload") != "no":
+            raise ValueError("Expiry unit differs from the loaded release")
+        units[template] = Path(prop("FragmentPath"))
+        if unit == timer and prop("Unit") != service:
+            raise ValueError("Timer does not trigger the scoped expiry service")
+        if unit == service and (
+            prop("User") != "nebius-cleanup"
+            or Path(prop("WorkingDirectory")) != Path.cwd()
+        ):
+            raise ValueError(
+                "Expiry service uses a different identity or Terraform directory"
+            )
+
+    source_digest = cleanup_digest(TERRAFORM_ROOT, units)
+    with TemporaryDirectory() as scratch:
+        groups, _ = plan_release(
+            Path(scratch) / "rehearsal.tfplan",
+            profile="ml-prod",
+            cluster_id=target[1],
+            run_id=run,
+            cutoff_label=datetime.fromisoformat(target[2]).strftime("%Y%m%d%H%M%S"),
+        )
+    if groups != ({scope["support_group_id"]} if scope["stage"] == "gpu" else set()):
+        raise ValueError("Expiry rehearsal did not match the stage's owned live groups")
+    dest = "org.freedesktop.systemd1"
+    bus_path = shlex.split(
+        output(
+            "busctl",
+            "--system",
+            "call",
+            dest,
+            "/org/freedesktop/systemd1",
+            dest + ".Manager",
+            "GetUnit",
+            "s",
+            timer,
+        )
+    )[1]
+    for key in ("ActiveState", "UnitFileState", "Persistent"):
+        want = {
+            "ActiveState": "active",
+            "UnitFileState": "enabled",
+            "Persistent": "yes",
+        }[key]
+        if output("systemctl", "show", timer, "--value", "-p", key) != want:
+            raise ValueError(f"Timer {key} differs from {want}")
+    micros = int(
+        output(
+            "busctl",
+            "--system",
+            "get-property",
+            dest,
+            bus_path,
+            dest + ".Timer",
+            "NextElapseUSecRealtime",
+        ).split()[1]
+    )
+    now = datetime.now(timezone.utc)
+    next_tick = datetime.fromtimestamp(micros / 1_000_000, timezone.utc)
+    if not 0 < (next_tick - now).total_seconds() <= 65:
+        raise ValueError("No imminent timer tick")
+    proof = {
+        k: scope[k]
+        for k in (
+            "stage",
+            "run_id",
+            "cutoff",
+            "project_id",
+            "cluster_id",
+            "state_lineage",
+            "baseline_sha256",
+        )
+    }
+    proof.update(
+        host=host,
+        account_id=account,
+        provider_key_id=provider_key_id,
+        state_serial=state["serial"],
+        timer=timer,
+        observed_at=now.isoformat().replace("+00:00", "Z"),
+        next_tick=next_tick.isoformat().replace("+00:00", "Z"),
+        enabled=True,
+        active=True,
+        cloud_state_access=True,
+        scope_sha256=scope_digest(scope),
+        cleanup_source_sha256=source_digest,
+        inventory_reconciled=True,
+        locked_release_plan_checked=True,
+    )
+    import boto3
+
+    store = boto3.client("s3", region_name="eu-south1", endpoint_url=ENDPOINT)
+    version = store.put_object(
+        Bucket=scope["state_bucket"],
+        Key=f"prod/mk8s/release-control/timers/{run}/{scope['stage']}/{host}.json",
+        ContentType="application/json",
+        Body=json.dumps(proof).encode(),
+    ).get("VersionId")
+    if not version or version == "null":
+        raise ValueError("Expected a versioned timer attestation")
+    print(host, run, "timer attestation", version)
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("AI_AGENT", "worker-cleanup")
+    main(sys.argv[1])
