@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import runpy
 import signal
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -12,8 +13,15 @@ STOP = runpy.run_path(str(
 
 
 class BackendStopTests(unittest.TestCase):
+    def test_service_interpreter_supports_pidfds(self):
+        subprocess.run([
+            "/usr/bin/python3", "-I", "-c",
+            "import os, signal; fd = os.pidfd_open(os.getpid()); "
+            "signal.pidfd_send_signal(fd, 0); os.close(fd)",
+        ], check=True)
+
     def test_no_supervisor_after_crash(self):
-        with patch.dict(os.environ, {}, clear=True), patch("os.pidfd_open") as open_pid:
+        with patch.dict(os.environ, {}, clear=True), patch("os.pidfd_open", create=True) as open_pid:
             STOP()
         open_pid.assert_not_called()
 
@@ -21,9 +29,9 @@ class BackendStopTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"MAINPID": "91234"}),
             patch.object(Path, "read_text", side_effect=["0::/fixture\n", "93333\n"]),
-            patch("os.pidfd_open", return_value=9),
+            patch("os.pidfd_open", return_value=9, create=True),
             patch("os.close") as close,
-            patch("signal.pidfd_send_signal") as send,
+            patch("signal.pidfd_send_signal", create=True) as send,
         ):
             with self.assertRaisesRegex(ValueError, "outside"):
                 STOP()
@@ -36,9 +44,9 @@ class BackendStopTests(unittest.TestCase):
             patch.dict(os.environ, {"MAINPID": "91234"}),
             patch.object(Path, "read_text", side_effect=lists),
             patch("os.getpid", return_value=91236),
-            patch("os.pidfd_open", return_value=9) as open_pid,
+            patch("os.pidfd_open", return_value=9, create=True) as open_pid,
             patch("os.close"),
-            patch("signal.pidfd_send_signal") as send,
+            patch("signal.pidfd_send_signal", create=True) as send,
             patch("time.sleep") as wait,
         ):
             STOP()
