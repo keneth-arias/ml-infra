@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Verify webhook TLS, its mutation, and API-server admission without allocating a GPU.
+set -euo pipefail
+umask 077
+here=$(dirname "$(realpath "$0")")
+"$here/webhook-tls" verify
+k=(kubectl --kubeconfig "${NEBIUS_OPERATOR_KUBECONFIG:-$HOME/.kube/nebius-prod}" --context prod-nebius --request-timeout=15s)
+dir=$(mktemp -d)
+pid=
+cleanup() {
+  if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+  rm -rf "$dir"
+}
+trap cleanup EXIT
+kubectl --kubeconfig "${NEBIUS_OPERATOR_KUBECONFIG:-$HOME/.kube/nebius-prod}" --context prod-nebius \
+  -n hami-system port-forward --address 127.0.0.1 service/hami-scheduler :443 >"$dir/forward" 2>&1 &
+pid=$!
+for ((i=0; i<60; i++)); do
+  port=$(sed -nE 's/^Forwarding from 127\.0\.0\.1:([0-9]+) .*/\1/p' "$dir/forward" | head -1)
+  if [[ -n $port ]]; then break; fi
+  kill -0 "$pid"; sleep 0.25
+done
+[[ $port =~ ^[0-9]+$ ]]
+# Client-side shaping only; no Pod is created by this request.
+python3 - "$here/workloads/probe-pod.yaml.example" <<'PY' > "$dir/pod"
+import json,sys,yaml
+pod=yaml.safe_load(open(sys.argv[1]))
+pod["metadata"].pop("generateName")
+pod["metadata"]["name"]="hami-admission-dry-run"
+pod["spec"]["schedulerName"]="default-scheduler"
+pod["spec"].pop("runtimeClassName")
+print(json.dumps(pod))
+PY
+uid=$(cat /proc/sys/kernel/random/uuid)
+jq --arg uid "$uid" '{
+  apiVersion:"admission.k8s.io/v1",kind:"AdmissionReview",request:{
+    uid:$uid,kind:{group:"",version:"v1",kind:"Pod"},resource:{group:"",version:"v1",resource:"pods"},
+    namespace:.metadata.namespace,name:.metadata.name,operation:"CREATE",dryRun:true,
+    userInfo:{username:"hami-admission-verification"},object:.}}' "$dir/pod" > "$dir/request"
+host=hami-scheduler.hami-system.svc
+ca="${XDG_STATE_HOME:-$HOME/.local/state}/ml-infra/hami-tls/$NEBIUS_TRAINING_CLUSTER_ID/ca.crt"
+curl --noproxy '*' --silent --show-error --fail --max-time 20 --cacert "$ca" \
+  --resolve "$host:$port:127.0.0.1" -H 'Content-Type: application/json' \
+  --data-binary @"$dir/request" "https://$host:$port/webhook" > "$dir/response"
+jq -e --arg uid "$uid" '.response|.uid==$uid and .allowed==true and .patchType=="JSONPatch"
+  and ((.patch|@base64d|fromjson) |
+       any(.[];.path=="/spec/schedulerName" and .value=="hami-scheduler") and
+       any(.[];.path=="/spec/runtimeClassName" and .value=="nvidia"))' "$dir/response" >/dev/null
+
+# This label-independent reserved field is rejected by HAMi before scheduling or quota.
+jq '.metadata.annotations={"hami.io/vgpu-time":"0"}' "$dir/pod" > "$dir/invalid"
+if "${k[@]}" create --validate=strict --dry-run=server -f "$dir/invalid" >"$dir/result" 2>&1; then
+  echo "Expected HAMi to reject a client-provided scheduler timestamp" >&2; exit 1
+fi
+if ! grep -Fq 'admission webhook "vgpu.hami.io" denied the request' "$dir/result" || ! grep -Fq 'hami.io/vgpu-time' "$dir/result"; then
+  cat "$dir/result" >&2; exit 1
+fi
+printf '%s\n' 'Verified serving TLS, fractional GPU admission mutation and a managed API-server webhook denial.'

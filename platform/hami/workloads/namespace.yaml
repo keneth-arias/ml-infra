@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hami-workloads
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: hami-workloads
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hami-workload
+  namespace: hami-workloads
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: hami-workload-budget
+  namespace: hami-workloads
+spec:
+  hard:
+    pods: "2"
+    count/pods: "2"
+    count/jobs.batch: "2"
+    count/services: "0"
+    persistentvolumeclaims: "0"
+    requests.cpu: "2"
+    limits.cpu: "4"
+    requests.memory: 4Gi
+    limits.memory: 8Gi
+    requests.ephemeral-storage: 1Gi
+    limits.ephemeral-storage: 2Gi
+    requests.hami.io/gpu: "0"
+    requests.hami.io/gpumem: "0"
+    requests.hami.io/gpumem-percentage: "0"
+    requests.hami.io/gpucores: "0"
+    requests.hami.io/priority: "0"
+    requests.nvidia.com/gpu: "0"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: hami-workloads
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hami-workload-operator
+  namespace: hami-workloads
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, delete]

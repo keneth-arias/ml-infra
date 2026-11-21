@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Bootstrap the operator-owned serving identity and admission webhook on prod-nebius.
+set -euo pipefail
+umask 077
+if [[ $# != 1 || ! $1 =~ ^(prepare|install-secret|install-webhook|verify)$ ]]; then
+  echo "Usage: webhook-tls prepare|install-secret|install-webhook|verify" >&2
+  exit 2
+fi
+mode=$1
+here=$(dirname "$(realpath "$0")")
+root=$(git -C "$here" rev-parse --show-toplevel)
+k=(kubectl --kubeconfig "${NEBIUS_OPERATOR_KUBECONFIG:-$HOME/.kube/nebius-prod}" --context prod-nebius --request-timeout=30s)
+python3 "$root/workloads/sky/private_api.py" "${k[@]}"
+namespace=hami-system
+name=hami-scheduler-tls
+svc=hami-scheduler.hami-system.svc
+pki="${XDG_STATE_HOME:-$HOME/.local/state}/ml-infra/hami-tls/$NEBIUS_TRAINING_CLUSTER_ID"
+if [[ $mode == prepare && ! -d $pki ]]; then
+  mkdir -p "$(dirname "$pki")"
+  tmp=$(mktemp -d "$(dirname "$pki")/.issue.XXXXXXXX")
+  trap 'rm -rf -- "$tmp"' EXIT
+  openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -subj '/CN=ml-infra HAMi admission CA' -days 730 -sha256 \
+    -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "$tmp/ca.key" -out "$tmp/ca.crt" 2>/dev/null
+  openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -subj "/CN=$svc" -keyout "$tmp/tls.key" -out "$tmp/server.csr" 2>/dev/null
+  cat > "$tmp/extensions" <<EXT
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:$svc,DNS:$svc.cluster.local
+EXT
+  openssl x509 -req -in "$tmp/server.csr" -CA "$tmp/ca.crt" -CAkey "$tmp/ca.key" \
+    -CAcreateserial -extfile "$tmp/extensions" -sha256 -days 180 -out "$tmp/tls.crt" 2>/dev/null
+  rm "$tmp/server.csr" "$tmp/extensions" "$tmp/ca.srl"
+  # rename(2) refuses to overwrite a nonempty issuer if another operator won the race.
+  python3 -c 'import os,sys; os.rename(sys.argv[1],sys.argv[2])' "$tmp" "$pki"
+  trap - EXIT
+fi
+[[ -d $pki && ! -L $pki && $(stat -c '%a:%u' "$pki") == "700:$(id -u)" ]]
+for f in ca.crt tls.crt tls.key; do
+  [[ -f $pki/$f && ! -L $pki/$f && $(stat -c '%a:%u' "$pki/$f") == "600:$(id -u)" ]]
+done
+openssl verify -purpose sslserver -verify_hostname "$svc" -CAfile "$pki/ca.crt" "$pki/tls.crt"
+openssl x509 -in "$pki/tls.crt" -checkend 2592000 -noout
+cmp <(openssl x509 -in "$pki/tls.crt" -pubkey -noout) <(openssl pkey -in "$pki/tls.key" -pubout)
+if [[ $mode == prepare ]]; then exit 0; fi
+kt=("${k[@]}" -n "$namespace")
+exists=$("${kt[@]}" get secret "$name" --ignore-not-found -o name)
+if [[ -z $exists && $mode == install-secret ]]; then
+  "${kt[@]}" create secret tls "$name" --cert="$pki/tls.crt" --key="$pki/tls.key" -o name
+fi
+cmp "$pki/tls.crt" <("${kt[@]}" get secret "$name" -o jsonpath='{.data.tls\.crt}' | base64 -d)
+if [[ $mode == install-secret ]]; then exit 0; fi
+"${kt[@]}" rollout status deployment/hami-scheduler --timeout=90s
+"${kt[@]}" get endpointslice -l kubernetes.io/service-name=hami-scheduler -ojson |
+  jq -e '[.items[].endpoints[]? | select(.conditions.ready==true)] | length>0' >/dev/null
+render() {
+  "${k[@]}" create --dry-run=client --validate=false -f "$here/system/operator/webhook.yaml" -o json |
+    jq -e --arg ca "$(base64 -w0 "$pki/ca.crt")" '
+      select(.kind=="MutatingWebhookConfiguration" and .metadata.name=="hami-webhook" and (.webhooks|length)==1)
+      | select(.webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]=="hami-workloads"
+          and .webhooks[0].clientConfig.service.name=="hami-scheduler"
+          and .webhooks[0].clientConfig.service.namespace=="hami-system" and .webhooks[0].sideEffects=="None")
+      | .webhooks[0].clientConfig.caBundle=$ca'
+}
+if [[ $mode == install-webhook ]]; then
+  render | "${k[@]}" apply --server-side --field-manager=nebius-hami-bootstrap --dry-run=server -f - -o name
+  render | "${k[@]}" apply --server-side --field-manager=nebius-hami-bootstrap -f - -o name
+fi
+"${k[@]}" get mutatingwebhookconfiguration hami-webhook -ojson |
+  jq -e --arg ca "$(base64 -w0 "$pki/ca.crt")" '
+    (.webhooks|length)==1 and .webhooks[0].clientConfig.caBundle==$ca
+    and .webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]=="hami-workloads"
+    and .webhooks[0].failurePolicy=="Fail"' >/dev/null

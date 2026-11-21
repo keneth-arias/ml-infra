@@ -1,0 +1,101 @@
+global:
+  imageTag: "v2.11.0@sha256:caab978ed50e53163c31ed7c4650c4e6e5d8facf157f377c26e021ff5fa3e5ce"
+
+schedulerName: hami-scheduler
+scheduler:
+  nodeSelector:
+    airaware.training/pool: training-cpu
+  nodeLabelSelector:
+    airaware.training/gpu-mode: hami
+    gpu: "on"
+  # The webhook matches only the dedicated namespace. Kubernetes defaults schedulerName before admission.
+  forceOverwriteDefaultScheduler: true
+  metricsBindAddress: "127.0.0.1:9395"
+  kubeScheduler:
+    image:
+      tag: "v1.36.3@sha256:128fc07d278d64c4f2cce416ed0a9f37b23a30cdde6f97873d18c9c78e259df4"
+    extraNewArgs: [--config=/config/config.yaml, --bind-address=127.0.0.1, -v=2]
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  extender:
+    extraArgs: [-v=2]
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  admissionWebhook:
+    enabled: true
+    manageNamespaceSelector: true
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: hami-workloads
+    failurePolicy: Fail
+  certManager:
+    enabled: false
+  patch:
+    enabled: false
+  service:
+    type: ClusterIP
+
+devicePlugin:
+  enabled: true
+  nvidiaNodeSelector:
+    airaware.training/gpu-mode: hami
+    gpu: "on"
+  tolerations:
+    - key: airaware.training/gpu-mode
+      operator: Equal
+      value: hami
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  service:
+    type: ClusterIP
+  hostNetwork: false
+  deviceListStrategy: envvar
+  migStrategy: none
+  reportNodeCapacity: false
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  monitor:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+
+devices:
+  nvidia:
+    resourceCountName: hami.io/gpu
+    resourceMemoryName: hami.io/gpumem
+    resourceMemoryPercentageName: hami.io/gpumem-percentage
+    resourceCoreName: hami.io/gpucores
+    resourcePriorityName: hami.io/priority
+    runtimeClassName: nvidia
+    createRuntimeClass: false
+    deviceSplitCount: 4
+    deviceMemoryScaling: 1
+    deviceCoreScaling: 1
+    defaultGPUNum: 0
+    defaultMemory: 0
+    defaultCores: 0
+  kunlun:
+    enabled: false
+  enflame:
+    enabled: false
+  mthreads:
+    enabled: false
+  vastai:
+    enabled: false
+  biren:
+    enabled: false
+  amd:
+    customresources: []
+  awsneuron:
+    customresources: []
+  ascend:
+    enabled: false
+  iluvatar:
+    enabled: false
+  remotegpu:
+    enabled: false
