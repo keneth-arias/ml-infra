@@ -43,34 +43,141 @@ spec:
         variables.pod.containers.exists(c, has(c.resources) &&
           ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
            (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
+    # Compare both literals with the signed release before activating this policy.
+    - name: trainerImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b'"
+    - name: preflightImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:50e25655174b3a2ceb7d16a31cf9bfffbc009cd44c11648e18eba31312d2ba6c'"
+    - name: container
+      expression: variables.pod.containers[0]
+    - name: argv
+      expression: "has(variables.container.command) ? variables.container.command : []"
+    - name: mounts
+      expression: "has(variables.container.volumeMounts) ? variables.container.volumeMounts : []"
+    - name: phase
+      expression: "size(variables.argv) > 2 ? variables.argv[2] : ''"
+    - name: runID
+      expression: "size(variables.argv) > 5 ? variables.argv[5] : ''"
   validations:
-    # The signed trainer and preflight release will replace this hold.
+    # Remove only in a separately reviewed signed deployment.
     - expression: "false"
       message: Native training submission is closed during CPU qualification.
+    - expression: >-
+        variables.container.image == (variables.usesGPU ? variables.trainerImage : variables.preflightImage)
+      message: Require the approved image for this native Job role.
+    - expression: >-
+        has(object.spec.parallelism) && object.spec.parallelism == 1 &&
+        has(object.spec.completions) && object.spec.completions == 1 &&
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 &&
+        (!has(object.spec.suspend) || !object.spec.suspend) &&
+        (!has(object.spec.completionMode) || object.spec.completionMode == 'NonIndexed') &&
+        (!has(object.spec.manualSelector) || !object.spec.manualSelector) &&
+        (!has(object.spec.managedBy) || object.spec.managedBy == 'kubernetes.io/job-controller') &&
+        !has(object.spec.podFailurePolicy) && !has(object.spec.successPolicy) &&
+        variables.pod.restartPolicy == 'Never'
+      message: Require a single active Job completion with zero retries.
+    - expression: >-
+        has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds > 0 &&
+        (!variables.usesGPU || object.spec.activeDeadlineSeconds <= 356400)
+      message: Require a positive Job deadline within the 99-hour maximum worker window.
+    - expression: >-
+        !has(variables.pod.resources) && has(variables.container.resources) &&
+        !has(variables.container.resources.claims) &&
+        has(variables.container.resources.requests) && has(variables.container.resources.limits) &&
+        (variables.usesGPU ?
+          (variables.container.resources.requests == {'cpu': '2', 'memory': '12G', 'nvidia.com/gpu': '1'} &&
+           variables.container.resources.limits == {'nvidia.com/gpu': '1'}) :
+          (variables.container.resources.requests == {'cpu': '1', 'memory': '256Mi'} &&
+           variables.container.resources.limits == {'cpu': '2', 'memory': '512Mi'}))
+      message: Require the approved CPU, memory and device resources for this Job role.
+    # Native Jobs pass the full argv in command. Keep the interpreter and script
+    # outside the variable CLI grammar so neither Python flags nor shell code run.
+    - expression: >-
+        size(variables.argv) >= 18 && size(variables.argv) <= 30 &&
+        variables.argv[0] == (variables.usesGPU ? '/opt/conda/bin/python' : '/usr/local/bin/python') &&
+        variables.argv[1] == '/opt/ml-infra/episode_job.py' &&
+        (!has(variables.container.args) || size(variables.container.args) == 0) &&
+        variables.argv.all(t, size(t) <= 128 && t.matches('^[a-zA-Z0-9/_.:-]+$')) &&
+        variables.argv.join(' ').matches(
+          '^[^ ]+ [^ ]+ (fit|infer) (direct|quantile|episode) --run-id [a-z0-9][a-z0-9-]{0,40}[a-z0-9]' +
+          ' --bundle-sha256 [a-f0-9]{64} --step [1-9][0-9]* --seed -?[0-9]+ --batch [1-9][0-9]*' +
+          ' --attempt [1-9][0-9]* --save-seconds [0-9]+' +
+          '( --direct-objective (normalized-mse|physical-mae) --validation-sha256 [a-f0-9]{64})?' +
+          '( --schedule [1-9][0-9]*)?( --resume)?( --resume-checkpoint [1-9][0-9]*:[a-f0-9]{64})?' +
+          '( --graceful-stop)?( --preflight)?$') &&
+        (variables.argv[size(variables.argv)-1] == '--preflight') == !variables.usesGPU &&
+        (!('--direct-objective' in variables.argv) ||
+          (variables.phase == 'fit' && variables.argv[3] == 'direct' &&
+           (('--resume' in variables.argv) == ('--resume-checkpoint' in variables.argv)))) &&
+        !has(variables.container.lifecycle) && !has(variables.container.livenessProbe) &&
+        !has(variables.container.readinessProbe) && !has(variables.container.startupProbe) &&
+        (!has(variables.container.workingDir) || variables.container.workingDir == '')
+      message: Require the approved native episode entrypoint and arguments for this role.
     - expression: >-
         has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'episode-worker'
         && has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
       message: Require the token-free episode-worker account.
     - expression: >-
-        !has(variables.pod.volumes) || variables.pod.volumes.all(v,
-        has(v.emptyDir) || (has(v.persistentVolumeClaim) &&
-        (v.persistentVolumeClaim.claimName == 'airaware-model-state' ||
-        (v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
-        has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly))))
-      message: Native training may mount only scratch, model state and read-only training inputs.
+        has(variables.pod.volumes) && variables.pod.volumes.all(v,
+        has(v.persistentVolumeClaim) &&
+        ((v.name == 'state' && v.persistentVolumeClaim.claimName == 'airaware-model-state') ||
+         (v.name == 'inputs' && v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
+          has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly)))
+      message: Native training may mount only model state and read-only training inputs.
+    - expression: >-
+        !has(variables.container.volumeDevices) &&
+        variables.mounts.exists_one(m, m.mountPath == '/base') &&
+        variables.mounts.exists_one(m, m.mountPath == '/bundle') &&
+        (variables.mounts.exists_one(m, m.mountPath == '/validation') == ('--validation-sha256' in variables.argv)) &&
+        (variables.mounts.exists_one(m, m.mountPath == '/state') == (variables.usesGPU && variables.phase == 'fit')) &&
+        (variables.mounts.exists_one(m, m.mountPath == '/output') == (variables.usesGPU && variables.phase == 'infer')) &&
+        (variables.mounts.exists_one(m, m.mountPath == '/checkpoint' || m.mountPath.startsWith('/checkpoint/')) == (variables.phase == 'infer')) &&
+        variables.mounts.all(m, has(m.subPath) && !has(m.subPathExpr) &&
+          (!has(m.mountPropagation) || m.mountPropagation == 'None') &&
+          ((m.name == 'inputs' && has(m.readOnly) && m.readOnly &&
+            ((m.mountPath == '/bundle' && ((!('--direct-objective' in variables.argv) &&
+               m.subPath == 'airaware/episodes/' + variables.runID + '/' + variables.phase) ||
+               (size(variables.argv) > 7 && m.subPath == 'airaware/cache/bundles/' + variables.argv[7]))) ||
+             (m.mountPath == '/base' && ((!('--direct-objective' in variables.argv) && m.subPath == 'airaware/inputs/qwen') ||
+               m.subPath.matches('^airaware/cache/weights/[0-9a-f]{64}$'))) ||
+             (m.mountPath == '/validation' && size(variables.argv) > 21 &&
+               m.subPath == 'airaware/cache/bundles/' + variables.argv[21]))) ||
+           (m.name == 'state' &&
+            ((variables.usesGPU && (!has(m.readOnly) || !m.readOnly) &&
+              ((variables.phase == 'fit' && m.mountPath == '/state' && m.subPath == 'episodes/' + variables.runID + '/state') ||
+               (variables.phase == 'infer' && m.mountPath == '/output' && m.subPath == 'episodes/' + variables.runID + '/output'))) ||
+             (variables.phase == 'infer' && has(m.readOnly) && m.readOnly &&
+              ((m.mountPath == '/checkpoint' && m.subPath == 'episodes/' + variables.runID + '/state') ||
+               (m.mountPath.matches('^/checkpoint/step-[0-9]{8,}$') &&
+                m.subPath.matches('^episodes/retained/[0-9a-f]{64}/step-[0-9]{8,}$') &&
+                m.subPath.endsWith(m.mountPath.substring(11)))))))))
+      message: Require the rendered input and checkpoint mount paths for this role.
     - expression: >-
         size(variables.pod.containers) == 1 && !has(variables.pod.initContainers)
         && !has(variables.pod.ephemeralContainers) && !has(variables.pod.resourceClaims)
         && (!has(variables.pod.imagePullSecrets) || variables.pod.imagePullSecrets.all(s, s.name == 'ghcr-pull'))
       message: Require one training container and its approved pull credential.
     - expression: >-
-        variables.pod.containers.all(c, !has(c.envFrom) && (!has(c.env) ||
-        c.env.all(e, !has(e.valueFrom) || has(e.valueFrom.fieldRef) ||
-        (has(e.valueFrom.configMapKeyRef) && e.valueFrom.configMapKeyRef.name == 'episode-tracking'
-        && e.valueFrom.configMapKeyRef.key == 'https-uri') ||
-        (has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name == 'episode-tracking'
-        && e.valueFrom.secretKeyRef.key == 'token'))))
-      message: Permit only the training tracking URI and token as configuration references.
+        !has(variables.container.envFrom) && has(variables.container.env) &&
+        variables.container.env.exists_one(e, e.name == 'EPISODE_IMAGE') &&
+        variables.container.env.all(e,
+          (has(e.value) &&
+           ((e.name == 'EPISODE_IMAGE' && e.value == variables.trainerImage) ||
+            (e.name == 'OMP_NUM_THREADS' && e.value == '2') ||
+            (e.name == 'HF_HUB_OFFLINE' && e.value == '1') ||
+            (variables.usesGPU &&
+             ((e.name == 'FORECAST_GPU_LIMIT_BYTES' && e.value.matches('^[1-9][0-9]{0,10}$') && int(e.value) <= 96000000000) ||
+              (e.name == 'MLFLOW_HTTP_REQUEST_TIMEOUT' && e.value == '5') ||
+              (e.name == 'MLFLOW_HTTP_REQUEST_MAX_RETRIES' && e.value == '0'))))) ||
+          (variables.usesGPU && has(e.valueFrom) &&
+           ((e.name == 'EPISODE_POD_UID' && has(e.valueFrom.fieldRef) && e.valueFrom.fieldRef.fieldPath == 'metadata.uid') ||
+            (e.name == 'MLFLOW_TRACKING_URI' && has(e.valueFrom.configMapKeyRef) &&
+             e.valueFrom.configMapKeyRef.name == 'episode-tracking' && e.valueFrom.configMapKeyRef.key == 'https-uri') ||
+            (e.name == 'MLFLOW_TRACKING_TOKEN' && has(e.valueFrom.secretKeyRef) &&
+             e.valueFrom.secretKeyRef.name == 'episode-tracking' && e.valueFrom.secretKeyRef.key == 'token')))) &&
+        (!variables.usesGPU || (variables.container.env.exists_one(e, e.name == 'MLFLOW_TRACKING_URI') &&
+                                variables.container.env.exists_one(e, e.name == 'MLFLOW_TRACKING_TOKEN')))
+      message: Require only the approved environment and role-specific training tracking URI and token.
     - expression: >-
         (!has(variables.pod.nodeName) || variables.pod.nodeName == '') &&
         (!has(variables.pod.schedulerName) || variables.pod.schedulerName == 'default-scheduler') &&
@@ -78,16 +185,16 @@ spec:
         variables.pod.nodeSelector['airaware.training/pool'] == (variables.usesGPU ? 'training-gpu' : 'training-cpu')
       message: Require the default scheduler and the matching CPU or GPU training pool.
     - expression: >-
+        !variables.usesGPU ||
+        (has(variables.pod.tolerations) && size(variables.pod.tolerations) == 1 &&
+         variables.pod.tolerations.all(t, has(t.key) && t.key == 'nvidia.com/gpu' && t.operator == 'Equal' &&
+                                        has(t.value) && t.value == 'true' && t.effect == 'NoSchedule'))
+      message: Require the renderer's single training GPU toleration.
+    - expression: >-
         variables.usesGPU ||
         (has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 600 &&
         (!has(variables.pod.tolerations) || size(variables.pod.tolerations) == 0))
       message: CPU preflight requires a deadline of at most 600 seconds and no tolerations.
-    - expression: >-
-        !variables.usesGPU || variables.pod.containers.all(c,
-        has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests && c.resources.requests['nvidia.com/gpu'] == '1' &&
-        has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits && c.resources.limits['nvidia.com/gpu'] == '1' &&
-        (!has(c.command) || !('--preflight' in c.command)) && (!has(c.args) || !('--preflight' in c.args)))
-      message: GPU jobs must request and limit exactly one GPU and run training or inference.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

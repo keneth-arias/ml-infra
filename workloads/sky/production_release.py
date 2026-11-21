@@ -95,6 +95,18 @@ def single_container(pod):
     return pod["containers"][0]
 
 
+def check_native_policy(images, policy):
+    if (policy.get("kind"), policy.get("metadata", {}).get("name")) != (
+        "ValidatingAdmissionPolicy", "episode-submit-inputs"
+    ):
+        raise ValueError("Expected the native training admission policy")
+    variables = policy["spec"]["variables"]
+    for role in ("trainer", "preflight"):
+        expressions = [v["expression"] for v in variables if v["name"] == role + "Image"]
+        if expressions != [repr(images[role])]:
+            raise ValueError(f"Native admission policy differs from the approved {role} image")
+
+
 def check_episode(images, preflight, task):
     if preflight.get("kind") != "Job":
         raise ValueError("Expected the rendered preflight Job")
@@ -125,6 +137,7 @@ def main():
     build.add_argument("rootless", type=Path)
     build.add_argument("paired", type=Path)
     commands.add_parser("reference", help="Print one verified production reference").add_argument("role", choices=ROLES)
+    commands.add_parser("check-native-policy", help="Compare policy JSON on stdin with the signed role images")
     episode = commands.add_parser("check-episode")
     episode.add_argument("preflight", type=Path)
     episode.add_argument("task", type=Path)
@@ -138,6 +151,9 @@ def main():
         images, fingerprint = current_release()
         if args.command == "reference":
             print(images[args.role])
+        elif args.command == "check-native-policy":
+            check_native_policy(images, json.load(sys.stdin))
+            print(fingerprint)
         else:
             check_episode(images, json.loads(args.preflight.read_bytes()), json.loads(args.task.read_bytes()))
             print(fingerprint)

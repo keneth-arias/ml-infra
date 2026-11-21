@@ -86,6 +86,21 @@ class ProductionReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Untrusted signature"):
             self.verify()
 
+    def test_native_policy_role_mapping_matches_signed_release(self):
+        images, _ = self.verify()
+        variables = [{"name": role + "Image", "expression": repr(images[role])}
+                     for role in ("trainer", "preflight")]
+        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "episode-submit-inputs"},
+                  "spec": {"variables": variables}}
+        release.check_native_policy(images, policy)
+        variables[0]["expression"] = repr(images["preflight"])
+        with self.assertRaisesRegex(ValueError, "approved trainer image"):
+            release.check_native_policy(images, policy)
+        variables[0]["expression"] = repr(images["trainer"])
+        variables.pop()
+        with self.assertRaisesRegex(ValueError, "approved preflight image"):
+            release.check_native_policy(images, policy)
+
     def test_invalid_candidate_records(self):
         for field, value in (("index", "latest"), ("repository", "example.invalid/trainer")):
             data = copy.deepcopy(self.release)
