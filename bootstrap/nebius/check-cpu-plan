@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Verify the saved CPU pilot plan against independently approved scope and cumulative spend."""
+
+import argparse
+import hashlib
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from worker_plan import CPU, check_envelope, check_group, pilot_budget, timestamp
+
+
+def check(plan, scope, now):
+    check_envelope(plan)
+    start, cutoff = (timestamp(scope[key]) for key in ("start", "cutoff"))
+    planned = timestamp(plan["timestamp"])
+    if not (
+        start <= planned <= now < cutoff <= start + timedelta(hours=8)
+        and now - planned <= timedelta(minutes=15)
+    ):
+        raise ValueError("CPU window is closed, too long, or plan is stale")
+    for key in ("project_id", "subnet_id"):
+        if scope[key] != plan["variables"][key]["value"]:
+            raise ValueError(f"Wrong {key}")
+    if scope["cluster_id"] != plan["planned_values"]["outputs"]["cluster_id"]["value"]:
+        raise ValueError("Wrong cluster")
+    run = plan["variables"]["worker_run"]["value"]
+    if (
+        any(run[k] != scope[k] for k in ("start", "cutoff"))
+        or run["id"] != scope["run_id"]
+    ):
+        raise ValueError("Wrong run window")
+    pilot_budget(
+        cutoff - start,
+        cpu_rate=scope["cpu_and_boot_disk_usd_per_hour"],
+        accrued_non_gpu=scope["accrued_non_gpu_usd"],
+        outstanding_other=scope["other_remaining_usd"],
+        cleanup=scope["cleanup_reserve_usd"],
+        gpu_used=scope["accrued_gpu_hours"],
+        gpu_remaining=scope["remaining_gpu_hours"],
+        gpu_spend=scope["accrued_gpu_usd"],
+        reserved_non_gpu=run["other_cost_usd"],
+    )
+    cpu = None
+    for resource in plan["resource_changes"]:
+        change = resource["change"]
+        if (
+            resource["address"] == CPU
+            and change["actions"] == ["create"]
+            and cpu is None
+        ):
+            cpu = change
+        elif change["actions"] != ["no-op"] or resource["type"] in (
+            "nebius_mk8s_v1_node_group",
+            "nebius_compute_v1_instance",
+        ):
+            raise ValueError(
+                "Unexpected resource in CPU pilot plan: " + resource["address"]
+            )
+    if not cpu:
+        raise ValueError("Missing CPU creation")
+    check_group(cpu, "cpu", scope)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("plan", type=Path)
+    p.add_argument("approved_scope", type=Path)
+    a = p.parse_args()
+    # Also check the embedded configuration. Provider-computed NIC defaults in
+    # the plan alone cannot prove that the operator omitted a public IP request.
+    with TemporaryDirectory() as temp:
+        saved = Path(temp) / "pilot.tfplan"
+        shutil.copyfile(a.plan, saved)
+        inspect_saved(saved, a.approved_scope)
+
+
+def inspect_saved(saved, scope):
+    with ZipFile(saved) as archive:
+        configs = {
+            n
+            for n in archive.namelist()
+            if n.startswith("tfconfig/") and n != "tfconfig/modules.json"
+        }
+        if configs != {"tfconfig/m-/main.tf", "tfconfig/m-/versions.tf"} or any(
+            archive.read(n) != (ROOT / Path(n).name).read_bytes() for n in configs
+        ):
+            raise ValueError("Unexpected Terraform source in saved plan")
+    # The approval receipt identifies the exact bytes for a future authorized apply.
+    with saved.open("rb") as stream:
+        fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
+    plan = json.loads(subprocess.check_output(["terraform", "show", "-json", saved]))
+    check(plan, json.loads(scope.read_text()), datetime.now(timezone.utc))
+    print("Verified one CPU create. Saved plan SHA-256", fingerprint)
+
+
+if __name__ == "__main__":
+    main()

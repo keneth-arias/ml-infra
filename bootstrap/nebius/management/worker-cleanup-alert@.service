@@ -1,0 +1,13 @@
+[Unit]
+Description=Notify the designated Nebius cleanup operator for run %i
+[Service]
+Type=oneshot
+DynamicUser=true
+EnvironmentFile=/etc/nebius-cleanup/alert.env
+Environment=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+LoadCredential=otlp-bearer:/etc/nebius-cleanup/otlp-bearer
+ExecStart=/usr/bin/python3 -Bs /opt/nebius-cleanup/notifier/notify-cleanup.py %i
+TimeoutStartSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true

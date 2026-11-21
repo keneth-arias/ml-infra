@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Prepare, recheck or apply the exact worker plan for a CPU pilot or GPU experiment."""
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from gpu_reservation import reserve_remote
+from gpu_window import BudgetStop, bounds, check_projection, check_stage, fit_projection
+
+SOURCES = ("main.tf", "versions.tf", ".terraform.lock.hcl")
+STATE_KEY = "prod/mk8s/terraform.tfstate"
+REGION = "eu-south1"
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_digests(plan, scope_hash, ledger_hash, receipt):
+    if (
+        digest(plan) != receipt["plan_sha256"]
+        or scope_hash != receipt["scope_sha256"]
+        or ledger_hash != receipt["ledger_sha256"]
+    ):
+        raise ValueError(
+            "Saved plan, approved scope or current ledger differs from the prepare receipt"
+        )
+
+
+def inspect_archive(saved, scope):
+    with ZipFile(saved) as archive:
+        entries = archive.namelist()
+        sources = {"tfconfig/m-/" + name for name in SOURCES if name.endswith(".tf")}
+        if len(entries) != len(set(entries)) or {
+            n for n in entries if n.startswith("tfconfig/")
+        } != sources | {"tfconfig/modules.json"}:
+            raise ValueError("Unexpected saved-plan source layout")
+        for name in sorted(sources | {".terraform.lock.hcl"}):
+            if archive.read(name) != (ROOT / Path(name).name).read_bytes():
+                raise ValueError("Reviewed source or provider lock changed")
+        state = json.loads(archive.read("tfstate"))
+    if not scope["state_lineage"] or scope["state_lineage"] != state["lineage"]:
+        raise ValueError("Unexpected Terraform state lineage")
+    return state["serial"]
+
+
+def checked_plan(args):
+    scope_bytes, ledger_bytes = args.scope.read_bytes(), args.ledger.read_bytes()
+    scope_hash, ledger_hash = (
+        hashlib.sha256(b).hexdigest() for b in (scope_bytes, ledger_bytes)
+    )
+    scope, ledger = json.loads(scope_bytes), json.loads(ledger_bytes)
+    if scope["ledger_sha256"] != ledger_hash:
+        raise ValueError("Approved scope references a different ledger revision")
+    # Prepare controls the backend embedded in the plan. Recheck requires that
+    # prepare receipt from the operator's protected off-host record.
+    receipt = (
+        json.loads(args.receipt.read_bytes())
+        if args.command in ("recheck", "apply")
+        else None
+    )
+    plan_path = args.plan.resolve()
+    with TemporaryDirectory(dir=plan_path.parent) as tmp:
+        work = Path(tmp)
+        saved = work / "window.tfplan"
+        if receipt is not None:
+            shutil.copyfile(plan_path, saved)
+            verify_digests(saved, scope_hash, ledger_hash, receipt)
+        elif plan_path.exists():
+            raise ValueError("Choose a new filename for this reservation")
+        for name in SOURCES:
+            shutil.copyfile(ROOT / name, work / name)
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("TF_CLI_ARGS", "TF_VAR_"))
+        }
+        env.update(
+            TF_DATA_DIR=str(work / ".terraform"), TF_WORKSPACE="default", TF_INPUT="0"
+        )
+
+        def terraform(*argv, capture=False):
+            return subprocess.run(
+                ["terraform", *argv],
+                cwd=work,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE if capture else sys.stderr,
+            ).stdout
+
+        bucket = scope["state_bucket"]
+        if not isinstance(bucket, str) or not bucket:
+            raise ValueError("Missing approved state bucket")
+        init = [
+            "init",
+            "-input=false",
+            "-no-color",
+            "-lockfile=readonly",
+            "-backend-config=bucket=" + bucket,
+            "-backend-config=key=" + STATE_KEY,
+            "-backend-config=region=" + REGION,
+            '-backend-config=endpoints={s3="https://storage.eu-south1.nebius.cloud"}',
+        ]
+        # The pin and checksum in the reviewed lock still apply to a local mirror.
+        mirror = ROOT / ".terraform/providers"
+        if mirror.is_dir():
+            init.append("-plugin-dir=" + str(mirror))
+        terraform(*init)
+        if receipt is None:
+            terraform(
+                "plan",
+                "-input=false",
+                "-no-color",
+                "-lock-timeout=60s",
+                *["-var-file=" + str(path.resolve()) for path in args.var_file],
+                "-out=" + str(saved),
+            )
+        serial = inspect_archive(saved, scope)
+        live = json.loads(terraform("state", "pull", capture=True))
+        if (live["lineage"], live["serial"]) != (scope["state_lineage"], serial):
+            raise ValueError("Saved plan is stale against the approved backend")
+        plan = json.loads(terraform("show", "-json", str(saved), capture=True))
+        checked_at = datetime.now(timezone.utc)
+        limits = check_stage(plan, scope, ledger, checked_at)
+        result = dict(
+            stage=scope["stage"],
+            run_id=scope["run_id"],
+            checked_at=checked_at.isoformat(),
+            plan_sha256=digest(saved),
+            scope_sha256=scope_hash,
+            ledger_sha256=ledger_hash,
+            ledger_revision=ledger["revision"],
+            state_lineage=scope["state_lineage"],
+            state_serial=serial,
+            state_bucket=bucket,
+            state_key=STATE_KEY,
+            workspace="default",
+            bounds={k: str(v) for k, v in limits.items()},
+        )
+        if receipt is None:
+            saved.chmod(0o600)
+            os.link(saved, plan_path)
+        if args.command == "apply":
+            revision, version = reserve_remote(scope, result["plan_sha256"], serial)
+            if not version or version == "null":
+                raise ValueError(
+                    "Missing versioned reservation receipt; reconcile the ledger"
+                )
+            result.update(reserved_revision=revision, reservation_version=version)
+            print(
+                "Reserved attempt",
+                scope["attempt_id"],
+                "ledger version",
+                version,
+                file=sys.stderr,
+                flush=True,
+            )
+            check_stage(plan, scope, ledger, datetime.now(timezone.utc))
+            terraform(
+                "apply", "-input=false", "-no-color", "-lock-timeout=5s", str(saved)
+            )
+        return result
+
+
+def project(args):
+    scope_bytes = args.scope.read_bytes()
+    scope = json.loads(scope_bytes)
+    if scope.get("stage") == "pilot":
+        raise ValueError("A CPU-only pilot cannot authorize a GPU fit")
+    raw = args.ledger.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
+        raise ValueError("Fit scope references a different ledger revision")
+    ledger = json.loads(raw)
+    observations = args.measurements.read_bytes()
+    fit = fit_projection(json.loads(observations), ledger)
+    now = datetime.now(timezone.utc)
+    result = {
+        "run_id": scope["run_id"],
+        "ledger_revision": ledger["revision"],
+        "scope_sha256": hashlib.sha256(scope_bytes).hexdigest(),
+        "ledger_sha256": scope["ledger_sha256"],
+        "checked_at": now.isoformat(),
+        "measurements_sha256": hashlib.sha256(observations).hexdigest(),
+        "fit": fit,
+    }
+    try:
+        limits = bounds(scope, ledger, now)
+    except BudgetStop as stop:
+        result.update(decision="budget-stop", reason=str(stop), bounds=stop.limits)
+    else:
+        result["bounds"] = limits
+        try:
+            check_projection(limits, fit["projected_hours"])
+        except ValueError as exc:
+            result.update(decision="budget-stop", reason=str(exc))
+        else:
+            result["decision"] = "fits"
+    print(json.dumps(result, sort_keys=True, default=str))
+    return 0 if result["decision"] == "fits" else 2
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("prepare", "recheck", "apply"):
+        sub = commands.add_parser(name)
+        sub.add_argument("plan", type=Path)
+        sub.add_argument("--scope", type=Path, required=True)
+        sub.add_argument("--ledger", type=Path, required=True)
+        if name == "prepare":
+            sub.add_argument("--var-file", action="append", type=Path, required=True)
+        else:
+            sub.add_argument("--receipt", type=Path, required=True)
+    projection = commands.add_parser(
+        "project", help="Price a seed pair or retry using measured timings"
+    )
+    for field in ("scope", "ledger", "measurements"):
+        projection.add_argument("--" + field, type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        if args.command == "project":
+            return project(args)
+        print(json.dumps(checked_plan(args), sort_keys=True))
+    except (KeyError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, "Worker window refused: " + str(exc) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
