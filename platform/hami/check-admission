@@ -3,8 +3,14 @@
 set -euo pipefail
 umask 077
 here=$(dirname "$(realpath "$0")")
-"$here/webhook-tls" verify
+mode=${1:-full}
+[[ $# -le 1 && ( $mode == full || $mode == --serving-only ) ]]
 k=(kubectl --kubeconfig "${NEBIUS_OPERATOR_KUBECONFIG:-$HOME/.kube/nebius-prod}" --context prod-nebius --request-timeout=15s)
+if [[ $mode == --serving-only ]]; then
+  python3 "$here/../../workloads/sky/private_api.py" "${k[@]}"
+else
+  "$here/webhook-tls" verify
+fi
 dir=$(mktemp -d)
 pid=
 cleanup() {
@@ -47,12 +53,17 @@ jq -e --arg uid "$uid" '.response|.uid==$uid and .allowed==true and .patchType==
        any(.[];.path=="/spec/schedulerName" and .value=="hami-scheduler") and
        any(.[];.path=="/spec/runtimeClassName" and .value=="nvidia"))' "$dir/response" >/dev/null
 
-# This label-independent reserved field is rejected by HAMi before scheduling or quota.
-jq '.metadata.annotations={"hami.io/vgpu-time":"0"}' "$dir/pod" > "$dir/invalid"
-if "${k[@]}" create --validate=strict --dry-run=server -f "$dir/invalid" >"$dir/result" 2>&1; then
-  echo "Expected HAMi to reject a client-provided scheduler timestamp" >&2; exit 1
+if [[ $mode == --serving-only ]]; then
+  echo 'Verified the serving certificate and admission mutation before webhook registration.'
+  exit 0
 fi
-if ! grep -Fq 'admission webhook "vgpu.hami.io" denied the request' "$dir/result" || ! grep -Fq 'hami.io/vgpu-time' "$dir/result"; then
+
+# This label-independent reserved field is rejected by HAMi before scheduling or quota.
+jq '.metadata.annotations={"hami.io/vgpu-node":"admission-dry-run"}' "$dir/pod" > "$dir/invalid"
+if "${k[@]}" create --validate=strict --dry-run=server -f "$dir/invalid" >"$dir/result" 2>&1; then
+  echo "Expected HAMi to reject a client-provided scheduler node" >&2; exit 1
+fi
+if ! grep -Fq 'admission webhook "vgpu.hami.io" denied the request' "$dir/result" || ! grep -Fq 'hami.io/vgpu-node' "$dir/result"; then
   cat "$dir/result" >&2; exit 1
 fi
 printf '%s\n' 'Verified serving TLS, fractional GPU admission mutation and a managed API-server webhook denial.'

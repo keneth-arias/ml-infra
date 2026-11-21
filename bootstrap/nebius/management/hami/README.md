@@ -36,7 +36,7 @@ require_denied() {
   local result
   local status=0
   result=$("${k[@]}" --as="$account" "$@") || status=$?
-  [[ "$status" == 1 && "$result" == no ]]
+  [[ "$status" == 1 && ( "$result" == no || "$result" == "no - "* ) ]]
 }
 require_denied -n hami-system auth can-i get secrets/hami-scheduler-tls
 require_denied -n hami-system auth can-i create deployments

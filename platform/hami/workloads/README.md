@@ -37,14 +37,21 @@ Server dry-run checks admission only. After both dry-run and the independent poo
 ```bash
 receipts=$(mktemp -d)
 cleanup() {
+  result=0
   for i in 1 2; do
     file="$receipts/create-$i.json"
     [[ -s "$file" ]] || continue
     name=$(jq -er .metadata.name "$file") || continue
     uid=$(jq -er .metadata.uid "$file") || continue
     jq -n --arg uid "$uid" '{apiVersion:"v1",kind:"DeleteOptions",preconditions:{uid:$uid}}' |
-      "${k[@]}" delete --raw "/api/v1/namespaces/hami-workloads/pods/$name" -f -
+      "${k[@]}" delete --raw "/api/v1/namespaces/hami-workloads/pods/$name" -f - || {
+        if ! remaining=$("${k[@]}" get pod "$name" --ignore-not-found -o name) || [[ -n $remaining ]]; then
+          echo "Reconcile Pod $name with UID $uid" >&2
+          result=1
+        fi
+      }
   done
+  return "$result"
 }
 trap cleanup EXIT
 for i in 1 2; do
