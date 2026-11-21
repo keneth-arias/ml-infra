@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: keneth-arias/OpenTSLM
-          ref: ea911024c8c28273a94fc176a31e223efd568e7b
+          ref: 1313259efa6ebe94c9cd3e1ac37954f015e11d96
           path: paired-trainer
           persist-credentials: false
           sparse-checkout: src/opentslm
