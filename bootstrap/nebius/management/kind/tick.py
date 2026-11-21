@@ -21,7 +21,7 @@ from render import NS, SA
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from control_storage import control_bucket, publish_timer_proof
-from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_inventory
+from worker_cleanup import cleanup_digest, cloud_items, plan_release, scope_digest, verify_inventory
 
 ENDPOINT = "https://storage.eu-south1.nebius.cloud"
 STATE_KEY = "prod/mk8s/terraform.tfstate"
@@ -131,6 +131,77 @@ def initialize(scope, key, directory):
     return state["serial"]
 
 
+def verify_allocated_inventory(profile, scope, baseline, groups):
+    """Verify a completed allocation against the independently checked release targets."""
+    cluster, project = scope["cluster_id"], scope["project_id"]
+    stage = scope["stage"]
+    support = {scope["support_group_id"]} if stage == "gpu" else set()
+    if not support < groups or len(groups) != len(support) + 1:
+        raise ValueError("Unexpected run groups after allocation")
+    new_group, = groups - support
+    cutoff_label = datetime.fromisoformat(scope["cutoff"]).strftime("%Y%m%d%H%M%S")
+
+    def inventory(key, service, resource, parent, support_key):
+        rows = cloud_items(profile, service, resource, parent)
+        approved = baseline[key]
+        if not isinstance(approved, list) or any(not isinstance(row, str) or not row for row in approved):
+            raise ValueError("Invalid approved baseline for " + resource)
+        original = set(approved)
+        if stage == "gpu":
+            if scope[support_key] in original:
+                raise ValueError("Support resource overlaps the approved baseline")
+            original.add(scope[support_key])
+        if not original <= rows.keys() or len(rows) != len(original) + 1:
+            raise ValueError("Inventory differs from approved baseline plus one " + resource)
+        return rows, set(rows) - original
+
+    group_rows, new_groups = inventory(
+        "group_ids", "mk8s", "node-group", cluster, "support_group_id"
+    )
+    vm_rows, new_vms = inventory(
+        "instance_ids", "compute", "instance", project, "support_instance_id"
+    )
+    disk_rows, new_disks = inventory(
+        "disk_ids", "compute", "disk", project, "support_boot_disk_id"
+    )
+    if new_groups != {new_group}:
+        raise ValueError("Live group differs from the locked release plan")
+
+    worker_ids = [(new_group, *new_vms, *new_disks)]
+    if stage == "gpu":
+        worker_ids.append((scope["support_group_id"], scope["support_instance_id"],
+                           scope["support_boot_disk_id"]))
+    for group_id, vm_id, disk_id in worker_ids:
+        group, vm, disk = group_rows[group_id], vm_rows[vm_id], disk_rows[disk_id]
+        status = group["status"]
+        metadata = group["metadata"]
+        group_labels = metadata.get("labels", {})
+        if (
+            metadata["parent_id"] != cluster
+            or group_labels.get("airaware-run") != scope["run_id"]
+            or group_labels.get("airaware-cutoff") != cutoff_label
+            or status["state"] != "RUNNING"
+            or status.get("reconciling")
+            or status.get("outdated_node_count") not in (None, 0, "0")
+            or vm["status"]["state"] != "RUNNING"
+            or any(str(status.get(k)) != "1" for k in
+                   ("node_count", "target_node_count", "ready_node_count"))
+        ):
+            raise ValueError("Allocated group or VM is not owned and healthy")
+        resources = vm["spec"]["resources"]
+        expected = (("gpu-rtx6000-a", "1gpu-24vcpu-218gb") if stage == "gpu" and group_id == new_group
+                    else ("cpu-d3", "4vcpu-16gb"))
+        boot = vm["spec"]["boot_disk"]["managed_disk"]
+        labels = {"mk8s-cluster-id": cluster, "mk8s-node-group-id": group_id}
+        if (
+            (resources["platform"], resources["preset"]) != expected
+            or boot["name"] != disk["metadata"]["name"]
+            or any(row.get("labels", {}).get(k) != v for row in
+                   (vm["metadata"], boot, disk["metadata"]) for k, v in labels.items())
+        ):
+            raise ValueError("VM or boot disk differs from the allocated group")
+
+
 def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
     if rehearsal:
         evidence = scheduler(run)
@@ -168,11 +239,14 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
         # An empty protobuf ExportLogsServiceRequest verifies ingestion and emits no log.
         notifier = runpy.run_path(str(ROOT / "management/notify-cleanup.py"))
         notifier["send"](ALERT_URL, bearer, b"", cafile=ALERT_CA)
-        verify_inventory("ml-prod", scope["project_id"], scope["cluster_id"], baseline, before_stage=scope)
         groups, _ = plan_release(Path(scratch) / "rehearsal.tfplan", profile="ml-prod", cluster_id=scope["cluster_id"],
                                  run_id=run, cutoff_label=cutoff.strftime("%Y%m%d%H%M%S"))
-        if groups != ({scope["support_group_id"]} if stage == "gpu" else set()):
-            raise ValueError("Unexpected groups in locked fw13 release rehearsal")
+        expected = {scope["support_group_id"]} if stage == "gpu" else set()
+        if groups != expected:
+            verify_allocated_inventory("ml-prod", scope, baseline, groups)
+            print("Verified allocated worker inventory without publishing a funding proof")
+            return
+        verify_inventory("ml-prod", scope["project_id"], scope["cluster_id"], baseline, before_stage=scope)
         observed = scheduler(run)
         now = utc()
         next_tick = check_tick(observed, scope["fw13_cronjob"], now)
