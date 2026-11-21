@@ -13,12 +13,15 @@ from production_release import release_images, require_image
 from production_target import kubectl_client
 
 
-def render_job(mode, trainer, preflight, *, paired=False):
+def render_job(mode, trainer, preflight, *, paired=False, attempt=1, restore=False, phase="fit", head="direct"):
     return json.loads(subprocess.check_output([
-        sys.executable, SKY / "episode-profile.py", mode, "fit", "direct", "access-check",
+        sys.executable, SKY / "episode-profile.py", mode, phase, head, "access-check",
         "--target", "prod-nebius", "--image", trainer,
         *(["--preflight-image", preflight] if mode == "preflight" else []),
-        "--bundle-sha256", "b" * 64, "--schedule", "14084", "--step", "14084",
+        "--bundle-sha256", "b" * 64, "--step", "14084", "--attempt", str(attempt),
+        *(["--schedule", "14084"] if phase == "fit" else []),
+        *(["--resume", "--resume-checkpoint", "500:" + "a" * 64,
+           "--graceful-stop", "--gpu-limit-bytes", "16000000000"] if restore else []),
         *(["--cached-weights-sha256", "c" * 64, "--validation-sha256", "d" * 64,
            "--direct-objective", "physical-mae"] if paired else []),
     ]))
@@ -80,22 +83,71 @@ def main():
             raise SystemExit("Expected the held submitter to be refused Job creation by RBAC")
         print("native training submission held")
         return
+    exercise_release(args.trainer_image, args.preflight_image, check)
+
+
+def exercise_release(trainer_image, preflight_image, check):
+    invalid = "example.invalid/probe@sha256:" + "a" * 64
     for mode in ("preflight", "job"):
-        trainer = invalid if mode == "job" else args.trainer_image
-        preflight = invalid if mode == "preflight" else args.preflight_image
+        trainer = invalid if mode == "job" else trainer_image
+        preflight = invalid if mode == "preflight" else preflight_image
         check(render_job(mode, trainer, preflight), "unapproved-" + mode, "approved image")
-        check(render_job(mode, args.preflight_image, args.trainer_image), "swapped-" + mode, "approved image")
-        check(render_job(mode, args.trainer_image, args.preflight_image), mode)
-        check(render_job(mode, args.trainer_image, args.preflight_image, paired=True), "paired-" + mode)
+        check(render_job(mode, preflight_image, trainer_image), "swapped-" + mode, "approved image")
+        check(render_job(mode, trainer_image, preflight_image), mode)
+        check(render_job(mode, trainer_image, preflight_image, paired=True), "paired-" + mode)
+        check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2, restore=True), "retry-" + mode)
+        check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2), "fresh-retry-" + mode)
+        check(render_job(mode, trainer_image, preflight_image, phase="infer", head="quantile"), "inference-" + mode)
+
+        job = render_job(mode, trainer_image, preflight_image, paired=True, attempt=2, restore=True)
+        command = job["spec"]["template"]["spec"]["containers"][0]["command"]
+        pin = command.index("--resume-checkpoint")
+        del command[pin:pin + 2]
+        check(job, "missing-restore-pin-" + mode, "episode entrypoint")
+        job = render_job(mode, trainer_image, preflight_image, paired=True)
+        mount = next(m for m in job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] if m["mountPath"] == "/bundle")
+        mount["subPath"] = "airaware/cache/bundles/" + "a" * 64
+        check(job, "wrong-cache-pin-" + mode, "checkpoint mount paths")
+
+        for label, override in (
+            ("args-override", {"args": ["--attempt", "2"]}),
+            ("shell", {"command": ["/bin/sh", "-c", "true"]}),
+            ("runtime-env", {"env": [{"name": "PYTHONPATH", "value": "/inputs"}]}),
+            ("lifecycle", {"lifecycle": {"postStart": {"exec": {"command": ["/bin/true"]}}}}),
+        ):
+            job = render_job(mode, trainer_image, preflight_image)
+            container = job["spec"]["template"]["spec"]["containers"][0]
+            if label == "runtime-env":
+                container["env"].extend(override["env"])
+            else:
+                container.update(override)
+            check(job, label + "-" + mode, "approved environment" if label == "runtime-env" else "episode entrypoint")
+
+        job = render_job(mode, trainer_image, preflight_image)
+        job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"] = "/opt/ml-infra"
+        check(job, "program-mount-" + mode, "checkpoint mount paths")
+        job = render_job(mode, trainer_image, preflight_image)
+        job["spec"]["template"]["spec"]["containers"][0]["command"][1] = "/opt/ml-infra/stage_episode_inputs.py"
+        check(job, "staging-entrypoint-" + mode, "episode entrypoint")
+
+    job = render_job("preflight", trainer_image, preflight_image)
+    pod = job["spec"]["template"]["spec"]
+    pod["containers"][0]["command"].pop()
+    check(job, "missing-preflight", "episode entrypoint")
+    job = render_job("preflight", trainer_image, preflight_image)
+    job["spec"]["template"]["spec"]["containers"][0]["env"].append({
+        "name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}
+    })
+    check(job, "preflight-tracking", "approved environment")
     for pool in (None, "training-gpu"):
-        job = render_job("preflight", args.trainer_image, args.preflight_image)
+        job = render_job("preflight", trainer_image, preflight_image)
         pod = job["spec"]["template"]["spec"]
         if pool is None:
             del pod["nodeSelector"]
         else:
             pod["nodeSelector"]["airaware.training/pool"] = pool
-        check(job, "misplaced-preflight", "matching CPU or GPU training pool")
-    job = render_job("preflight", args.trainer_image, args.preflight_image)
+        check(job, "misplaced-preflight-" + str(pool), "matching CPU or GPU training pool")
+    job = render_job("preflight", trainer_image, preflight_image)
     job["spec"]["activeDeadlineSeconds"] = 601
     check(job, "overlong-preflight", "at most 600 seconds")
     for label, field, value, message in (
@@ -106,10 +158,10 @@ def main():
         ("writable-input", "volumes", [{"name": "inputs", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}},
                                       {"name": "state", "emptyDir": {}}], "read-only training inputs"),
     ):
-        job = render_job("job", args.trainer_image, args.preflight_image)
+        job = render_job("job", trainer_image, preflight_image)
         job["spec"]["template"]["spec"][field] = value
         check(job, label, message)
-    job = render_job("job", args.trainer_image, args.preflight_image)
+    job = render_job("job", trainer_image, preflight_image)
     job["spec"]["template"]["spec"]["containers"][0]["env"].append({
         "name": "FIXTURE", "valueFrom": {"secretKeyRef": {"name": "scoring-fixture", "key": "marker"}},
     })
