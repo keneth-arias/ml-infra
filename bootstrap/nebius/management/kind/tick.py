@@ -144,7 +144,7 @@ def run_tick(run, stage, rehearsal):
     now = utc()
     if now < cutoff and now > datetime.fromisoformat(scope["fw13_attest_until"]):
         return
-    key = Path("/identity/public-key-id").read_text().strip()
+    key = scope["fw13_public_key_id"]
     with TemporaryDirectory() as scratch:
         serial = initialize(scope, key, Path(scratch))
         if utc() >= cutoff:

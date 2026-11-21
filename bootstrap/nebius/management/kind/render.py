@@ -23,7 +23,7 @@ def resources(run, image, stage, *, armed=False, rehearsal=False):
         "securityContext": {"runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
                             "runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
         "containers": [{
-            "name": "cleanup", "image": image, "imagePullPolicy": "IfNotPresent",
+            "name": "cleanup", "image": image, "imagePullPolicy": "Never",
             "args": [run, stage] + (["--rehearsal"] if rehearsal else []),
             "env": [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
                     {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}],
@@ -42,7 +42,13 @@ def resources(run, image, stage, *, armed=False, rehearsal=False):
     if not rehearsal:
         spec["volumes"].extend([
             {"name": "scope", "configMap": {"name": config}},
-            {"name": "identity", "secret": {"secretName": name + "-identity", "defaultMode": 0o440}},
+            {"name": "identity", "projected": {"defaultMode": 0o440, "sources": [
+                {"secret": {"name": "fw13-auth-key", "items": [{"key": "auth.pem", "path": "auth.pem"}]}},
+                {"secret": {"name": name + "-state", "items": [{"key": "aws-credentials", "path": "aws-credentials"}]}},
+                {"secret": {"name": "fw13-otlp", "optional": True,
+                            "items": [{"key": "otlp-bearer", "path": "otlp-bearer"}]}},
+                {"configMap": {"name": "fw13-otlp-ca", "optional": True,
+                               "items": [{"key": "ca.crt", "path": "otlp-ca.pem"}]}}] }},
         ])
         spec["containers"][0]["volumeMounts"].extend([
             {"name": key, "mountPath": "/" + key, "readOnly": True} for key in ("scope", "identity")

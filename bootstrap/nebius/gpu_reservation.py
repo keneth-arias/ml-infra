@@ -123,6 +123,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
                 or not re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", cron["image"])
                 or not re.fullmatch("[0-9a-f]{64}", cron["spec_sha256"])
                 or not re.fullmatch("[0-9a-f]{64}", scope["fw13_tfvars_sha256"])
+                or scope["fw13_public_key_id"] != grants[host]["public_key_id"]
                 or not cron["uid"]
                 or any(live.get(k) != cron[k] for k in ("uid", "spec_sha256", "image"))
                 or not live.get("job_uid") or not live.get("pod_uid")

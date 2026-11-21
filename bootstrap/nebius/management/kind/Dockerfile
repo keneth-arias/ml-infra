@@ -8,8 +8,8 @@ RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/s3-r
 COPY main.tf versions.tf .terraform.lock.hcl expire-workers worker_cleanup.py with-credentials ./
 COPY management /opt/cleanup/management
 ENV TF_CLI_CONFIG_FILE=/opt/cleanup/management/kind/terraform.rc TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 PYTHONDONTWRITEBYTECODE=1 AI_AGENT=worker-cleanup
-RUN terraform init -backend=false -lockfile=readonly && rm -rf .terraform
 ARG BUILD_COMMIT
 LABEL org.opencontainers.image.revision=$BUILD_COMMIT
 USER 1000:1000
+RUN python3 -B management/kind/tick.py --help >/dev/null && test -x ./expire-workers && TF_DATA_DIR=/tmp/check-provider terraform init -backend=false -lockfile=readonly && rm -rf /tmp/check-provider
 ENTRYPOINT ["python3","-B","/opt/cleanup/management/kind/tick.py"]

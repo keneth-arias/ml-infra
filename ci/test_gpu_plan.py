@@ -508,6 +508,7 @@ class ReservationTests(unittest.TestCase):
             cleanup_accounts={"bm": "primary", "fw13": "backup"},
             fw13_cronjob={"uid": "cron-uid", "spec_sha256": "c" * 64,
                           "image": "local/backup@sha256:" + "1" * 64},
+            fw13_public_key_id="fw13-key",
             fw13_tfvars_sha256="d" * 64,
             fw13_attest_until=utc(NOW + timedelta(minutes=3)),
         )
