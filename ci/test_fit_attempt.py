@@ -21,11 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SKY = ROOT / "workloads/sky"
 
 
-def inputs(mode="job", *opts):
+def inputs(mode="job", *opts, run_id="fixture"):
     args = [
         "fit",
         "direct",
-        "fixture",
+        run_id,
         "--image",
         "ghcr.io/test/t@sha256:" + "a" * 64,
         "--preflight-image",
@@ -276,6 +276,93 @@ class FitAttemptTests(unittest.TestCase):
                     reserve_fit(s3, sc, retry, timing, "c", NOW)
             else:
                 reserve_fit(s3, sc, retry, timing, "c", NOW)
+
+    def test_bounded_recovery_uses_a_closed_control_and_a_different_vm(self):
+        _, control, _ = inputs("job", "--step", "500", "--schedule", "500")
+        _, first, _ = inputs("job", "--step", "500", "--schedule", "500", run_id="recovery-drill")
+        first_at = NOW - timedelta(minutes=10)
+        sc, funds, timing = fixture(first, first_at)
+        baseline = {
+            "attempt_id": "paired-qualification-27-control-1", "purpose": "qualification",
+            "request": control, "max_attempts": 1, "vm": "worker",
+            "outcome": "complete", "writer_fenced": True, "selected_fit_credit": 0,
+            "closeout_sha256": "f" * 64, "qualification_checkpoint": "500:" + "a" * 64,
+        }
+        funds["fit_attempts"] = [baseline]
+        funds["attempt_ids"] = [baseline["attempt_id"]]
+        reference = {key: baseline[key] for key in ("attempt_id", "closeout_sha256")}
+        reference["checkpoint"] = baseline["qualification_checkpoint"]
+        funds["fit_approval"].update(purpose="qualification-recovery", recovery_reference=reference)
+        for attempt_patch, message in (
+            ({"request": {**control, "attempt": 7}}, "attempt ID"),
+            ({"request": {**control, "resume": True}}, "fresh"),
+            ({"request": {**control, "checkpoint": "200:" + "a" * 64}}, "fresh"),
+            ({"selected_fit_credit": False}, "zero selected"),
+            ({"selected_fit_credit": 0.0}, "zero selected"),
+        ):
+            with self.subTest(attempt_patch=attempt_patch):
+                modified = {**funds, "fit_attempts": [{**baseline, **attempt_patch}]}
+                store = Storage(modified)
+                with self.assertRaisesRegex(ValueError, message):
+                    reserve_fit(store, {**sc, "ledger_sha256": digest(store.raw)}, first, timing, "c", first_at)
+        s3 = Storage(funds)
+        sc["ledger_sha256"] = digest(s3.raw)
+        first_receipt = reserve_fit(s3, sc, first, timing, "c", first_at)
+        self.assertEqual(first_receipt["attempt_id"], "paired-qualification-recovery-27-control-1")
+        closed = json.loads(s3.raw)
+        self.assertEqual(closed["fit_attempts"][0], baseline)
+        self.assertEqual(closed["active_reservation"]["recovery_reference"], reference)
+        pin = "300:" + "b" * 64
+        closed["fit_attempts"][-1].update(closeout_sha256="c" * 64, writer_fenced=True,
+                                        outcome="aborted", qualification_checkpoint=pin)
+        closed["active_reservation"] = None
+        _, retry, _ = inputs("job", "--step", "500", "--schedule", "500", "--attempt", "2",
+                            "--resume", "--resume-checkpoint", pin, run_id="recovery-drill")
+        closed["fit_approval"]["request"] = retry
+
+        def consume(funds, request=retry):
+            store = Storage(funds)
+            scoped = {**sc, "ledger_sha256": digest(store.raw)}
+            return reserve_fit(store, scoped, request, timing, "c", NOW)
+
+        with self.assertRaisesRegex(ValueError, "different GPU"):
+            consume(closed)
+        closed["gpu_intervals"][0]["end"] = utc(NOW - timedelta(minutes=2))
+        closed["gpu_intervals"].append({"vm": "replacement", "start": utc(NOW - timedelta(minutes=1)), "end": None})
+        closed["fit_approval"]["vm"] = "replacement"
+        bad = deepcopy(closed)
+        bad["fit_attempts"][-1]["qualification_checkpoint"] = "500:" + "b" * 64
+        with self.assertRaisesRegex(ValueError, "interrupted checkpoint"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["fit_approval"]["recovery_reference"]["closeout_sha256"] = "e" * 64
+        with self.assertRaisesRegex(ValueError, "reference"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["fit_approval"]["max_attempts"] = 3
+        with self.assertRaisesRegex(ValueError, "two separately approved"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["end"] = utc(NOW)
+        with self.assertRaisesRegex(ValueError, "close the interrupted GPU allocation"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["end"] = utc(first_at - timedelta(seconds=1))
+        with self.assertRaisesRegex(ValueError, "interval must cover"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["start"] = utc(first_at + timedelta(seconds=1))
+        with self.assertRaisesRegex(ValueError, "interval must cover"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["end"] = None
+        with self.assertRaisesRegex(ValueError, "one approved live GPU"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["fit_attempts"][-1]["request"]["attempt"] = 7
+        with self.assertRaisesRegex(ValueError, "attempt ID"):
+            consume(bad)
+        self.assertEqual(consume(closed)["attempt_id"], "paired-qualification-recovery-27-control-2")
 
     def test_seed_28_uses_both_completed_exports_and_the_preregistered_scores(self):
         exports = {"control": "c" * 64, "candidate": "d" * 64}
