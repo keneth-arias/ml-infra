@@ -19,14 +19,28 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def bundle(root, digest, phase, head):
-    manifest = root / "manifest.json"
+def bundle_manifest(manifest, digest, phase, head, *, paired=False):
     if manifest.is_symlink() or sha256(manifest) != digest:
         raise ValueError("Phase manifest checksum mismatch")
     spec = json.loads(manifest.read_text())
     if (spec["phase"], spec["head"]) != (phase, head):
         raise ValueError("Bundle belongs to another phase or model")
-    expected = {"data.npz", "thresholds.json"} if head == "episode" else {"data.npz"}
+    cohort = spec.get("schema") == "forecast-direct-cohort-v1"
+    if cohort != paired:
+        raise ValueError("Direct cohort inputs require a pinned fit and inner-validation pair")
+    if paired and (
+        head != "direct" or phase not in {"fit", "inner_validation"} or spec.get("unit") != "ug/m3"
+        or any(not re.fullmatch("[0-9a-f]{64}", str(spec.get(k, ""))) for k in
+               ("protocol_sha256", "source_manifest_sha256", "weights_manifest_sha256", "ids_sha256"))
+        or type(spec.get("windows")) is not int or spec["windows"] < 1
+    ):
+        raise ValueError("Incomplete direct cohort identity")
+    return spec
+
+
+def bundle(root, digest, phase, head, *, paired=False):
+    spec = bundle_manifest(root / "manifest.json", digest, phase, head, paired=paired)
+    expected = {"data.npz", "thresholds.json"} if head == "episode" or paired else {"data.npz"}
     if "point_control_of" in spec:
         expected.update(("quantile-fit.json", "quantile-checkpoint.json"))
     if set(spec["files"]) != expected or {
@@ -171,7 +185,7 @@ def stage_attempt(root, key, identity, artifact, verify):
 
 def verify_base(weights, expected):
     sums = weights.parent / "SHA256SUMS"
-    if sha256(sums) != expected:
+    if weights.is_symlink() or sums.is_symlink() or sha256(sums) != expected:
         raise ValueError("Base weights manifest mismatch")
     listed = {
         line.split(maxsplit=1)[1].removeprefix("*")

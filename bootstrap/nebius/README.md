@@ -35,3 +35,18 @@ On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebi
    ```
 
 For offline verification, use `terraform init -backend=false`, `terraform fmt -check` and `terraform validate`. The resource layout follows the [Nebius training example](https://github.com/nebius/nebius-solution-library/tree/194faa5249939d7345f6db7f5bf60ccd2f3a6b2c/k8s-training).
+
+### Stage fit and inner-validation data on the CPU
+
+For the direct PM2.5 comparison, take the two role manifest digests from the approved AirAware cohort receipt. Render the staging Job with the immutable preflight image, fit digest, inner-validation digest, base weights digest and the name of a training-only inventory Secret.
+
+```bash
+python3 workloads/sky/stage-episode.py --phase fit --head direct \
+  --image "$preflight_image" --weights-sha256 "$weights_sha256" \
+  --bundle-sha256 "$fit_sha256" --validation-sha256 "$validation_sha256" \
+  --source-prefix "$approved_https_prefix" --inventory-secret "$training_inventory" > "$stage_job"
+```
+
+Under that prefix the paired inventory’s `base`, `bundle` and `inner_validation` lists refer to exact versioned keys in `base/`, `trainer/fit/` and `trainer/inner_validation/`. Each list item supplies its relative `name`, byte `size`, `version_id` and a matching version-specific HTTPS `url`. Keep scorer objects and credentials in separately authorized storage. The stager checks the role manifest before fetching its data. It verifies both roles share the protocol, historical source, base and fit-derived threshold table before returning success. The receipt records cold copies or verified cache hits for each digest. A retry can reuse individually verified entries after a partial failure.
+
+For a local qualification, supply `--base`, `--bundle` and `--validation-bundle` to `runtime/stage_episode_inputs.py` along with the digest and cache arguments. The managed Job requires the released image containing this stager and the prepared training claim.
