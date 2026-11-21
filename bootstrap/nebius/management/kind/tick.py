@@ -59,16 +59,20 @@ def scheduler(run, *, get=get_object):
     spec = cron["spec"]
     if (pod["metadata"]["uid"] != os.environ["POD_UID"] or jobref["uid"] != job["metadata"]["uid"]
             or cronref["uid"] != cron["metadata"]["uid"] or cronref["name"] != cron["metadata"]["name"]
-            or scheduled != cron["status"]["lastScheduleTime"]
+            or datetime.fromisoformat(scheduled) != datetime.fromisoformat(cron["status"]["lastScheduleTime"])
             or any(obj["metadata"].get("deletionTimestamp") for obj in (pod, job, cron))
             or spec["suspend"] or spec["schedule"] != "* * * * *" or spec["concurrencyPolicy"] != "Forbid"
             or spec["timeZone"] != "Etc/UTC" or spec["startingDeadlineSeconds"] != 45):
         raise ValueError("Unexpected, suspended or stale cleanup scheduler")
     templates = [spec["jobTemplate"]["spec"]["template"]["spec"], job["spec"]["template"]["spec"], pod["spec"]]
     image = templates[0]["containers"][0]["image"]
+    desired = templates[0]["containers"][0]
     for template in templates:
         if (template["serviceAccountName"] != SA or template["automountServiceAccountToken"] is not False
-                or len(template["containers"]) != 1 or template["containers"][0]["image"] != image):
+                or len(template["containers"]) != 1
+                or any(template["containers"][0].get(k) != desired.get(k)
+                       for k in ("image", "command", "args", "volumeMounts"))
+                or {v["name"]: v for v in template["volumes"]} != {v["name"]: v for v in templates[0]["volumes"]}):
             raise ValueError("Unexpected cleanup Pod identity or image")
     return {"uid": cronref["uid"], "spec_sha256": scope_digest(spec), "image": image,
             "job_uid": jobref["uid"], "pod_uid": pod["metadata"]["uid"], "scheduled_at": scheduled}
@@ -123,7 +127,7 @@ def initialize(scope, key, directory):
     return state["serial"]
 
 
-def run_tick(run, stage, rehearsal):
+def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
     if rehearsal:
         evidence = scheduler(run)
         check_tick(evidence, evidence, utc())
@@ -133,8 +137,8 @@ def run_tick(run, stage, rehearsal):
                     pass
         print(json.dumps({"rehearsal": True, "scheduler": evidence}, sort_keys=True))
         return
-    scope = json.loads(Path("/scope/scope.json").read_bytes())
-    raw = Path("/scope/inventory.json").read_bytes()
+    scope = json.loads((scope_dir / "scope.json").read_bytes())
+    raw = (scope_dir / "inventory.json").read_bytes()
     baseline = json.loads(raw)
     if ((scope["run_id"], scope["stage"]) != (run, stage)
             or (baseline["project_id"], baseline["cluster_id"]) != (scope["project_id"], scope["cluster_id"])
@@ -150,7 +154,7 @@ def run_tick(run, stage, rehearsal):
         if utc() >= cutoff:
             subprocess.run([str(ROOT / "expire-workers"), "--apply", "--run-id", run, "--cutoff", scope["cutoff"],
                             "--project-id", scope["project_id"], "--cluster-id", scope["cluster_id"],
-                            "--inventory", "/scope/inventory.json"], check=True)
+                            "--inventory", str(scope_dir / "inventory.json")], check=True)
             return
         verify_inventory("ml-prod", scope["project_id"], scope["cluster_id"], baseline, before_stage=scope)
         groups, _ = plan_release(Path(scratch) / "rehearsal.tfplan", profile="ml-prod", cluster_id=scope["cluster_id"],
