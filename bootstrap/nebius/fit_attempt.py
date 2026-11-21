@@ -133,6 +133,39 @@ def previous_attempts(ledger, request, purpose, max_attempts):
     return group, attempt_id
 
 
+def recovery_checkpoint(ledger, approval, request, group):
+    """Bind the one recovery drill to its completed control and replacement VM."""
+    reference = approval["recovery_reference"]
+    baseline = next((entry for entry in ledger["fit_attempts"]
+                     if entry["attempt_id"] == "paired-qualification-27-control-1"), None)
+    if (baseline is None or baseline["purpose"] != "qualification" or baseline["max_attempts"] != 1
+            or baseline.get("outcome") != "complete" or baseline.get("selected_fit_credit") != 0
+            or reference != {"attempt_id": baseline["attempt_id"], "closeout_sha256": baseline["closeout_sha256"],
+                             "checkpoint": baseline.get("qualification_checkpoint")}
+            or any(baseline["request"][key] != request[key] for key in
+                   ("mode", "seed", "arm", "pair", "ceiling", "save_interval_seconds"))
+            or not re.fullmatch(rf"{request['ceiling']}:[0-9a-f]{{64}}", reference["checkpoint"] or "")):
+        raise ValueError("Recovery reference must match the completed and verified control qualification")
+    if not group:
+        return None
+
+    interrupted, = group
+    checkpoint = interrupted.get("qualification_checkpoint") or ""
+    if (interrupted.get("recovery_reference") != reference or interrupted.get("outcome") not in ("aborted", "preempted")
+            or not re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{64}", checkpoint)
+            or int(checkpoint.split(":", 1)[0]) >= request["ceiling"]):
+        raise ValueError("Recovery requires a verified interrupted checkpoint below the approved ceiling")
+    if interrupted["vm"] == approval["vm"]:
+        raise ValueError("Recovery must use a different GPU VM")
+    current_vm, = [span for span in ledger["gpu_intervals"] if span["end"] is None]
+    previous = [span for span in ledger["gpu_intervals"] if span["vm"] == interrupted["vm"]]
+    if not previous or any(
+        span["end"] is None or timestamp(span["end"]) > timestamp(current_vm["start"]) for span in previous
+    ):
+        raise ValueError("Reconcile and close the interrupted GPU allocation before opening its replacement")
+    return checkpoint
+
+
 def reserve_fit(s3, scope, request, measurements, cluster, now):
     current, ledger = read_ledger(s3, scope)
     limits = bounds(scope, ledger, now)
@@ -156,10 +189,12 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     if purpose == "selected":
         if request["ceiling"] != EPOCH:
             raise ValueError("Selected fit requires the full epoch ceiling")
-    elif purpose != "qualification" or seed != 27 or not 0 < request["ceiling"] < EPOCH:
+    elif purpose not in ("qualification", "qualification-recovery") or seed != 27 or not 0 < request["ceiling"] < EPOCH:
         raise ValueError("Expected a selected pair or bounded seed-27 qualification")
     history = ledger.get("fit_attempts", [])
     max_attempts = whole(approval["max_attempts"], 1, 2**31 - 1)
+    if purpose == "qualification-recovery" and (arm != "control" or request["mode"] != "job" or max_attempts != 2):
+        raise ValueError("Recovery requires two separately approved native control qualification attempts")
     group, attempt_id = previous_attempts(ledger, request, purpose, max_attempts)
     projection = Decimal(request["deadline_seconds"]) / 3600
     checkpoint = None
@@ -190,6 +225,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         if request["save_interval_seconds"] != fit["save_interval_seconds"]:
             raise ValueError("Rendered save interval differs from the measured checkpoint policy")
         projection = fit["projected_hours"]
+    elif purpose == "qualification-recovery":
+        checkpoint = recovery_checkpoint(ledger, approval, request, group)
     elif group:
         checkpoint = group[-1].get("qualification_checkpoint")
         if checkpoint is not None and not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", checkpoint):
@@ -214,6 +251,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         prior_revision=ledger["revision"],
         reserved_at=now.astimezone(timezone.utc).isoformat(),
     )
+    if purpose == "qualification-recovery":
+        hold["recovery_reference"] = approval["recovery_reference"]
     ledger.setdefault("fit_attempts", []).append(hold)
     revision, version = write_reservation(s3, scope, current, ledger, hold)
     return {
