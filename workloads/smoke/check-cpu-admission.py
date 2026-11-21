@@ -22,7 +22,11 @@ from production_target import kubectl_client
 def check(client, namespace, image, template):
     if not re.fullmatch(r"ghcr\.io/keneth-arias/ml-infra-sky-cpu@sha256:[0-9a-f]{64}", image):
         raise ValueError("Expected the rootless CPU repository and an immutable index digest")
-    spec = yaml.safe_load(template)["config"]["kubernetes"]["pod_config"]["spec"]
+    config = yaml.safe_load(template)["config"]["kubernetes"]
+    spec = config["pod_config"]["spec"]
+    # SkyPilot 0.14.3 resolves NONE to this account before rendering the Pod.
+    if config.get("remote_identity") != "NONE" or {"serviceAccount", "serviceAccountName"} & spec.keys():
+        raise ValueError("Use the qualified SkyPilot NONE identity without a task account override")
     spec.update(serviceAccountName="skypilot-service-account", restartPolicy="Never")
     pod = {
         "apiVersion": "v1",

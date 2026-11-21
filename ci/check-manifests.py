@@ -17,7 +17,8 @@ def render(path):
     return [resource for resource in yaml.safe_load_all(output) if resource]
 
 
-def validate_cluster(cluster, minor):
+def validate_cluster(cluster, *, production):
+    minor = "1.36" if production else "1.35"
     objects = render(cluster)
     paths = {
         obj["spec"]["path"] for obj in objects
@@ -42,7 +43,7 @@ def validate_cluster(cluster, minor):
             ):
                 raise ValueError(f"Expected SOPS-encrypted Secret: {obj['metadata']['name']}")
             obj.pop("sops")
-        if cluster.name.startswith("prod-"):
+        if production:
             for image in images(obj):
                 if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image):
                     raise ValueError(f"Production image requires a digest: {image}")
@@ -70,5 +71,5 @@ def images(node):
 
 if __name__ == "__main__":
     for cluster in sorted(Path("clusters").glob("*/kustomization.yaml")):
-        validate_cluster(cluster.parent, "1.36" if cluster.parent.name.startswith("prod-") else "1.35")
-    validate_cluster(Path("platform/overlays/prod/sky-cpu"), "1.36")
+        validate_cluster(cluster.parent, production=cluster.parent.name.startswith("prod-"))
+    validate_cluster(Path("platform/overlays/prod/sky-cpu"), production=True)
