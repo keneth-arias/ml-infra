@@ -27,7 +27,8 @@ set -euo pipefail
 k=(kubectl --kubeconfig "$HOME/.kube/nebius-prod" --context prod-nebius)
 selector=$("${k[@]}" -n kube-system get service coredns -o jsonpath='{.spec.selector}')
 "${k[@]}" -n kube-system get deployment coredns -o jsonpath='{.spec.template.metadata.labels}' |
-  jq -e --argjson dns "$selector" '($dns|length) > 0 and contains($dns)'
+  jq -e --argjson dns "$selector" '. as $labels | ($dns|length) > 0
+    and all($dns | to_entries[]; $labels[.key] == .value)'
 "${k[@]}" -n sky-cpu get networkpolicy dns-only -o json |
   jq -e --argjson dns "$selector" '.spec.egress | length == 1 and .[0].to == [{
     namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "kube-system"}},
