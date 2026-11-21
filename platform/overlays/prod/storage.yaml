@@ -1,0 +1,40 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: airaware-network-retain
+provisioner: compute.csi.nebius.com
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: NETWORK_SSD
+  csi.storage.k8s.io/fstype: ext4
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: airaware-checkpoints
+  namespace: training
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: airaware-network-retain
+  resources:
+    requests:
+      storage: 64Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: airaware-model-state
+  namespace: training
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: airaware-network-retain
+  resources:
+    requests:
+      storage: 64Gi

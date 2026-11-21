@@ -18,6 +18,25 @@ uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"
 
 The probe verifies the endpoint, CA, namespace and backend identity. It requires an image-policy denial for a changed digest and admission for the approved digest, both by server-side dry run. Repeat after policy bindings have propagated. Keep allocation closed on a mismatch. After a previous successful release, restore its reviewed policy and matching image reference to roll back, then rerun the probe. On a first deployment, keep submissions closed until the probe passes.
 
+## Reconcile the production platform
+
+The [production root](../../clusters/prod-nebius/kustomization.yaml) includes CPU admission, the native training and scoring boundaries, and two 64 GiB RWO claims. Their storage class waits for the first consumer and retains its disks. Namespace, storage class and claim annotations protect them from Flux pruning. Deleting the Flux Kustomization leaves its managed objects in place. Price retained disk capacity until explicit cleanup.
+
+Install the seven source and kustomize CRDs from the reviewed Flux 2.10.0 component manifest and wait for `Established`. Use the separate `flux-system/nebius-git-read` SSH deploy key with pinned GitHub host keys and `flux-system/nebius-sops-age` decryption identity. Once the first worker is Ready, install the source and kustomize controllers on the CPU pool using reviewed image digests.
+
+From a trusted clone, verify the intended deployment commit was merged, then stage the reconciliation objects with the production operator kubeconfig. The renderer checks that the commit contains the production root.
+
+```bash
+set -euo pipefail
+git fetch origin main
+git merge-base --is-ancestor "$DEPLOYMENT_COMMIT" origin/main
+k=(kubectl --kubeconfig "$HOME/.kube/nebius-prod" --context prod-nebius)
+python3 bootstrap/nebius/management/render-flux-source.py --suspend "$DEPLOYMENT_COMMIT" |
+  "${k[@]}" apply --server-side --dry-run=server --field-manager=nebius-flux-bootstrap -f -
+```
+
+Use the same suspended render to stage the objects. Before activation, verify the signed image release, approved image-to-role mapping, DNS policy, pull credentials and the deployment diff against the target. Check retained namespaces and claims explicitly. After the worker is Ready, remove `--suspend` and apply the same commit. Confirm both Flux resources become Ready and `status.lastAppliedRevision` matches the source artifact revision and intended SHA. Verify workload health separately because the initial storage claims wait for a consumer. For rollback, render the prior verified deployment and review its prune diff before changing the Git pin.
+
 ## Credentials and plan
 
 On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebius.env`. The existing CLI profile is `ml-prod`. Run from this directory. Set `NEBIUS_SA_ID` and `NEBIUS_AUTHORIZED_KEY_ID` to the IDs supplied by IAM. The command wrapper points the provider at the protected private key in `~/.config/ml-infra/nebius-private.pem` and maps the workspace's owner-only S3 credential file into the subprocess environment. Override the paths with `NEBIUS_PRIVATE_KEY_FILE` or `ML_INFRA_ENV_FILE`. Keep these files on the runner.
