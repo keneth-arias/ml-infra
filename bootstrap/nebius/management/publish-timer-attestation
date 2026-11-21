@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 
 TERRAFORM_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TERRAFORM_ROOT))
+from control_storage import control_bucket, publish_timer_proof
 from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_inventory
 
 STATE_KEY = "prod/mk8s/terraform.tfstate"
@@ -53,6 +54,7 @@ def main(run):
     host = {"bm": "bm", "fw13pro": "fw13"}[socket.gethostname()]
     root = Path("/etc/nebius-cleanup")
     scope = json.loads((root / f"{run}-scope.json").read_bytes())
+    control_bucket(scope)
     target = tuple(os.environ[k] for k in ("PROJECT_ID", "CLUSTER_ID", "CUTOFF"))
     if (
         target != tuple(scope[k] for k in ("project_id", "cluster_id", "cutoff"))
@@ -201,14 +203,7 @@ def main(run):
     import boto3
 
     store = boto3.client("s3", region_name="eu-south1", endpoint_url=ENDPOINT)
-    version = store.put_object(
-        Bucket=scope["state_bucket"],
-        Key=f"prod/mk8s/release-control/timers/{run}/{scope['stage']}/{host}.json",
-        ContentType="application/json",
-        Body=json.dumps(proof).encode(),
-    ).get("VersionId")
-    if not version or version == "null":
-        raise ValueError("Expected a versioned timer attestation")
+    version = publish_timer_proof(store, scope, host, proof)
     print(host, run, "timer attestation", version)
 
 

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 
+from control_storage import STORAGE_FIELDS, verify_bucket_projects
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
 from gpu_window import EPOCH, bounds, check_projection, fit_projection, whole
 from worker_plan import amount, timestamp
@@ -140,8 +141,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         scope["stage"] != "gpu"
         or cluster != scope["cluster_id"]
         or any(
-            approval[k] != scope[k]
-            for k in ("cluster_id", "project_id", "start", "cutoff", "other_cost_usd")
+            approval.get(k) != scope[k]
+            for k in ("cluster_id", "start", "cutoff", "other_cost_usd", *STORAGE_FIELDS)
         )
         or approval["request"] != request
         or approval["measurements_sha256"] != digest(measurements)
@@ -214,7 +215,7 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         reserved_at=now.astimezone(timezone.utc).isoformat(),
     )
     ledger.setdefault("fit_attempts", []).append(hold)
-    revision, version = write_reservation(s3, scope["state_bucket"], current, ledger, hold)
+    revision, version = write_reservation(s3, scope, current, ledger, hold)
     return {
         "attempt_id": attempt_id,
         "revision": revision,
@@ -252,6 +253,7 @@ def main():
         print(json.dumps(request, sort_keys=True))
         return
     scope = json.loads(Path(os.environ["NEBIUS_FIT_SCOPE"]).read_bytes())
+    verify_bucket_projects(scope)
     timing = Path(os.environ["NEBIUS_FIT_MEASUREMENTS"]).read_bytes()
     print(
         json.dumps(

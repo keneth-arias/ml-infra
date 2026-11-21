@@ -60,7 +60,7 @@ class KindBackup(unittest.TestCase):
                 with self.subTest(changes=changes), patch.dict(obj, changes), self.assertRaises(ValueError):
                     read()
 
-    def test_cutoff_remains_effective_after_preallocation_proofs_expire(self):
+    def test_cutoff_remains_effective_without_control_storage_after_proofs_expire(self):
         with TemporaryDirectory() as folder:
             path = Path(folder)
             inventory = json.dumps({"project_id": "project", "cluster_id": "cluster"}).encode()
@@ -80,6 +80,12 @@ class KindBackup(unittest.TestCase):
                     "--inventory", str(path/"inventory.json")], check=True)
                 scheduler.assert_not_called()
                 release.reset_mock()
+                # A new proof requires the split, even on the same persisted legacy scope.
+                scope["fw13_attest_until"] = scope["cutoff"]
+                (path / "scope.json").write_text(json.dumps(scope))
+                with self.assertRaisesRegex(ValueError, "control_bucket"):
+                    tick.run_tick("r", "pilot", False, scope_dir=path)
+                release.assert_not_called()
                 (path/"inventory.json").write_bytes(inventory + b" ")
                 with self.assertRaises(ValueError):
                     tick.run_tick("r", "pilot", False, scope_dir=path)
