@@ -11,7 +11,7 @@ import re
 
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
 from gpu_window import EPOCH, bounds, check_projection, fit_projection, whole
-from worker_plan import amount
+from worker_plan import amount, timestamp
 
 
 def digest(data):
@@ -62,6 +62,7 @@ def describe(preflight, task):
         "seed": int(arg("seed")),
         "attempt": int(arg("attempt")),
         "ceiling": int(arg("step")),
+        "save_interval_seconds": int(arg("save-seconds")),
         "pair": pair,
         "deadline_seconds": deadline + grace,
         "resume": "--resume" in cmd,
@@ -114,6 +115,8 @@ def previous_attempts(ledger, request, purpose, max_attempts):
         ):
             raise ValueError("Logical run or immutable paired inputs changed")
         if same_arm:
+            if prev["ceiling"] != request["ceiling"]:
+                raise ValueError("Retry must retain the original training schedule")
             group.append(entry)
     if {a for a in attempts if a.startswith("paired-")} != seen:
         raise ValueError("Incomplete paired attempt history")
@@ -181,13 +184,19 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
             if progress["terminal"] or progress["step"] <= 0:
                 raise ValueError("Selected arm already terminal or checkpoint has no completed update")
             checkpoint = f"{progress['step']}:{progress['checkpoint_sha256']}"
-        projection = fit_projection(timing, ledger)["projected_hours"]
+        seconds = (timestamp(scope["cutoff"]) - now).total_seconds()
+        fit = fit_projection(timing, ledger, window_seconds=seconds)
+        if request["save_interval_seconds"] != fit["save_interval_seconds"]:
+            raise ValueError("Rendered save interval differs from the measured checkpoint policy")
+        projection = fit["projected_hours"]
     elif group:
         checkpoint = group[-1].get("qualification_checkpoint")
         if checkpoint is not None and not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", checkpoint):
             raise ValueError("Qualification closeout has an invalid recovery pin")
     if request["resume"] != bool(checkpoint) or request["checkpoint"] != checkpoint:
         raise ValueError("Resume must name the funded generation; start fresh with zero credited progress")
+    if group and checkpoint is None and not sha(group[-1].get("fresh_state_sha256")):
+        raise ValueError("Fresh replay requires fenced, verified empty run storage")
     check_projection(limits, projection)
     check_projection(limits, Decimal(request["deadline_seconds"]) / 3600)
     hold = dict(
@@ -214,12 +223,28 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     }
 
 
+def inspect_fresh(directory, attempt_id):
+    # Run on the retained claim after the old writer has been fenced. Hidden
+    # stage receipts and step directories are both significant for a fresh run.
+    if directory.is_symlink() or not directory.is_dir() or any(directory.iterdir()):
+        raise ValueError("Expected an empty, prepared state directory for fresh replay")
+    return {"after_attempt": attempt_id, "state_path": str(directory.resolve()), "empty": True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("describe", "reserve"))
-    parser.add_argument("preflight", type=Path)
-    parser.add_argument("task", type=Path)
+    sub = parser.add_subparsers(dest="action", required=True)
+    fresh = sub.add_parser("check-fresh", help="Attest an empty previously fenced replay directory")
+    fresh.add_argument("directory", type=Path)
+    fresh.add_argument("--after-attempt", required=True)
+    for action in ("describe", "reserve"):
+        command = sub.add_parser(action)
+        command.add_argument("preflight", type=Path)
+        command.add_argument("task", type=Path)
     args = parser.parse_args()
+    if args.action == "check-fresh":
+        print(json.dumps(inspect_fresh(args.directory, args.after_attempt), sort_keys=True))
+        return
     request = describe(args.preflight.read_bytes(), args.task.read_bytes())
     if request is None:
         return

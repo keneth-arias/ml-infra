@@ -15,6 +15,7 @@ import unittest
 
 from test_gpu_plan import NOW, ledger, scope, timings, utc
 from fit_attempt import check_seed_28, describe, digest, reserve_fit
+from gpu_window import fit_projection
 
 ROOT = Path(__file__).resolve().parents[1]
 SKY = ROOT / "workloads/sky"
@@ -200,6 +201,60 @@ class FitAttemptTests(unittest.TestCase):
                     reserve_fit(s3, sc, req, timing, "other" if case == "target" else "c", NOW)
                 self.assertEqual(digest(s3.raw), sc["ledger_sha256"])
 
+    def test_rendered_save_cadence_is_funded_for_the_full_pair(self):
+        _, req, _ = inputs("job", "--save-seconds", "0")
+        sc, funds, timing = fixture(req)
+
+        def consume():
+            s3 = Storage(funds)
+            sc["ledger_sha256"] = digest(s3.raw)
+            reserve_fit(s3, sc, req, timing, "c", NOW)
+
+        with self.assertRaisesRegex(ValueError, "save interval"):
+            consume()
+        observations = dict(timings(), save_interval_seconds=0)
+        price = fit_projection(observations, funds)
+        self.assertGreaterEqual(price["timed_checkpoint_upper_bound"], 28168)
+        timing = json.dumps(observations).encode()
+        funds["fit_approval"]["measurements_sha256"] = digest(timing)
+        with self.assertRaisesRegex(ValueError, "Projected work exceeds"):
+            consume()
+
+    def test_qualification_resume_preserves_checkpoint_schedule(self):
+        _, req, _ = inputs("job", "--step", "500", "--schedule", "500")
+        sc, funds, timing = fixture(req)
+        funds["fit_approval"]["purpose"] = "qualification"
+        s3 = Storage(funds)
+        sc["ledger_sha256"] = digest(s3.raw)
+        reserve_fit(s3, sc, req, timing, "c", NOW)
+        funds = json.loads(s3.raw)
+        pin = "300:" + "f" * 64
+        funds["active_reservation"] = None
+        funds["fit_attempts"][0].update(
+            closeout_sha256="a" * 64, writer_fenced=True, qualification_checkpoint=pin
+        )
+        for ceiling in (501, 500):
+            _, retry, _ = inputs(
+                "sky",
+                "--step",
+                str(ceiling),
+                "--schedule",
+                str(ceiling),
+                "--attempt",
+                "2",
+                "--resume",
+                "--resume-checkpoint",
+                pin,
+            )
+            funds["fit_approval"]["request"] = retry
+            s3 = Storage(funds)
+            sc["ledger_sha256"] = digest(s3.raw)
+            if ceiling == 501:
+                with self.assertRaisesRegex(ValueError, "training schedule"):
+                    reserve_fit(s3, sc, retry, timing, "c", NOW)
+            else:
+                reserve_fit(s3, sc, retry, timing, "c", NOW)
+
     def test_seed_28_uses_both_completed_exports_and_the_preregistered_scores(self):
         exports = {"control": "c" * 64, "candidate": "d" * 64}
         gate = dict(
@@ -230,8 +285,16 @@ class FitAttemptTests(unittest.TestCase):
         # Stand-ins for the identity probe, two submitters and versioned storage
         # keep the native and SkyPilot paths entirely local.
         for mode in ("job", "sky"):
-            args, request, task = inputs(mode)
-            for outcome in ("approved", "preflight-failed", "budget-stop", "ambiguous"):
+            for outcome in (
+                "approved",
+                "preflight-failed",
+                "budget-stop",
+                "ambiguous",
+                "dirty-retry",
+                "fresh-retry",
+            ):
+                retry = outcome.endswith("-retry")
+                args, request, task = inputs(mode, *(("--attempt", "2") if retry else ()))
                 with self.subTest(mode=mode, outcome=outcome), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
 
@@ -285,6 +348,33 @@ def client(*a, **kw):
     return Storage()
 """)
                     sc, funds, timing = fixture(request, datetime.now(timezone.utc))
+                    if retry:
+                        _, original, _ = inputs(mode)
+                        now = datetime.now(timezone.utc)
+                        sc, funds, timing = fixture(original, now)
+                        storage = Storage(funds)
+                        sc["ledger_sha256"] = digest(storage.raw)
+                        receipt = reserve_fit(storage, sc, original, timing, "c", now)
+                        funds = json.loads(storage.raw)
+                        funds.update(active_reservation=None)
+                        previous = funds["fit_attempts"][0]
+                        previous.update(closeout_sha256="b" * 64, writer_fenced=True)
+                        state = root / "state"
+                        (state / "step-00000500").mkdir(parents=True)
+                        check = [
+                            sys.executable,
+                            ROOT / "bootstrap/nebius/fit_attempt.py",
+                            "check-fresh",
+                            state,
+                            "--after-attempt",
+                            receipt["attempt_id"],
+                        ]
+                        self.assertNotEqual(subprocess.run(check, capture_output=True).returncode, 0)
+                        if outcome == "fresh-retry":
+                            state.rename(root / "quarantined")
+                            state.mkdir()
+                            previous["fresh_state_sha256"] = digest(subprocess.check_output(check))
+                        funds["fit_approval"]["request"] = request
                     if outcome == "budget-stop":
                         funds["tax_remaining_usd"] = 100
                     raw = json.dumps(funds).encode()
@@ -308,7 +398,7 @@ def client(*a, **kw):
                     )
                     submitted = root / "submitted"
                     hold = json.loads((root / "ledger.json").read_bytes())["active_reservation"]
-                    if outcome == "approved":
+                    if outcome in ("approved", "fresh-retry"):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(submitted.read_bytes(), task)
                         self.assertEqual(hold["request"]["task_sha256"], digest(submitted.read_bytes()))

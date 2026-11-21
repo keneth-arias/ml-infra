@@ -15,6 +15,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+from worker_plan import timestamp
 from gpu_reservation import reserve_remote
 from gpu_window import BudgetStop, bounds, check_projection, check_stage, fit_projection
 
@@ -184,8 +185,9 @@ def project(args):
         raise ValueError("Fit scope references a different ledger revision")
     ledger = json.loads(raw)
     observations = args.measurements.read_bytes()
-    fit = fit_projection(json.loads(observations), ledger)
     now = datetime.now(timezone.utc)
+    seconds = max(0, (timestamp(scope["cutoff"]) - now).total_seconds())
+    fit = fit_projection(json.loads(observations), ledger, window_seconds=seconds)
     result = {
         "run_id": scope["run_id"],
         "ledger_revision": ledger["revision"],
