@@ -74,3 +74,5 @@ if __name__ == "__main__":
         validate_cluster(cluster.parent, production=cluster.parent.name.startswith("prod-"))
     validate_cluster(Path("platform/overlays/prod"), production=True)
     validate_cluster(Path("platform/overlays/prod/sky-cpu"), production=True)
+    validate_cluster(Path("platform/hami/system"), production=True)
+    validate_cluster(Path("platform/hami/workloads"), production=True)

@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  generateName: hami-cuda-overlap-
+  namespace: hami-workloads
+  labels:
+    app.kubernetes.io/name: hami-cuda-overlap
+spec:
+  serviceAccountName: hami-workload
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 180
+  terminationGracePeriodSeconds: 2
+  schedulerName: hami-scheduler
+  runtimeClassName: nvidia
+  nodeSelector:
+    gpu: "on"
+    airaware.training/gpu-mode: hami
+  tolerations:
+    - key: airaware.training/gpu-mode
+      operator: Equal
+      value: hami
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: cuda-probe
+      image: ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+          ephemeral-storage: 512Mi
+          hami.io/gpu: "1"
+          hami.io/gpumem: "4096"
+          hami.io/gpucores: "25"
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 1Gi
+          hami.io/gpu: "1"
+          hami.io/gpumem: "4096"
+          hami.io/gpucores: "25"
+      command: [/opt/conda/bin/python, -u, -c]
+      args:
+        - |
+          import json
+          import time
+          import torch
+
+          if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+              raise RuntimeError("Expected one visible CUDA device")
+          actual_image_runtime = torch.version.cuda
+          _, total = torch.cuda.mem_get_info()
+          if not 0 < total <= 4096 * 1024**2:
+              raise RuntimeError(f"CUDA did not report the 4 GiB allocation bound: {total}")
+
+          a = torch.ones((1024, 1024), device="cuda")
+          result = a @ a
+          torch.cuda.synchronize()
+          if not result.is_cuda or result[0, 0].item() != 1024:
+              raise RuntimeError("CUDA matrix product failed")
+
+          start = time.monotonic_ns()
+          deadline = start + 45 * 10**9
+          updates = 0
+          while time.monotonic_ns() < deadline:
+              result = a @ a
+              torch.cuda.synchronize()
+              updates += 1
+              time.sleep(0.05)
+          end = time.monotonic_ns()
+          if not result.is_cuda or result[0, 0].item() != 1024 or updates < 2:
+              raise RuntimeError("CUDA overlap loop failed")
+          print(json.dumps(dict(
+              event="hami_cuda_overlap", start_ns=start, end_ns=end, updates=updates,
+              total_memory_bytes=total, torch_cuda=actual_image_runtime,
+          )), flush=True)

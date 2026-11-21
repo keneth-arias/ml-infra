@@ -1,0 +1,890 @@
+# Generated from upstream HAMi chart 2.11.0 by render.py.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hami-device-plugin
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-device-plugin
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hami-device-plugin
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-device-plugin
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+data:
+  config.json: |
+    {
+      "nodeconfig": [
+        {
+          "name": "your-node-name",
+          "operatingmode": "hami-core",
+          "devicememoryscaling": 1,
+          "devicecorescaling": null,
+          "devicesplitcount": 10,
+          "preconfigureddevicememory": 0,
+          "libcudaloglevel": null,
+          "enablenumatopology": false,
+          "reportnodecapacity": null,
+          "migstrategy": "none",
+          "filterdevices": {
+            "uuid": [],
+            "index": []
+          },
+          "enablegetpreferredallocation": false
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: hami-scheduler
+      resourceNamespace: hami-system
+    profiles:
+    - schedulerName: hami-scheduler
+    extenders:
+    - urlPrefix: https://127.0.0.1:9444
+      enableHTTPS: true
+      tlsConfig:
+        insecure: true
+      filterVerb: filter
+      bindVerb: bind
+      nodeCacheCapable: true
+      weight: 1
+      httpTimeout: 30s
+      managedResources:
+      - ignoredByScheduler: true
+        name: hami.io/gpu
+      - ignoredByScheduler: true
+        name: hami.io/gpumem
+      - ignoredByScheduler: true
+        name: hami.io/gpucores
+      - ignoredByScheduler: true
+        name: hami.io/gpumem-percentage
+      - ignoredByScheduler: true
+        name: hami.io/priority
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hami-scheduler-device
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+data:
+  device-config.yaml: |-
+    nvidia:
+      resourceCountName: hami.io/gpu
+      resourceMemoryName: hami.io/gpumem
+      resourceMemoryPercentageName: hami.io/gpumem-percentage
+      resourceCoreName: hami.io/gpucores
+      resourcePriorityName: hami.io/priority
+      overwriteEnv: false
+      defaultMemory: 0
+      defaultCores: 0
+      defaultGPUNum: 0
+      preConfiguredDeviceMemory: 0
+      memoryFactor: 1
+      deviceSplitCount: 4
+      deviceMemoryScaling: 1
+      deviceCoreScaling: 1
+      enableNumaTopology: false
+      gpuCorePolicy: default
+      libCudaLogLevel: 1
+      limitDelivery: file
+      runtimeClassName: "nvidia"
+      adoptExistingMIGInstances: false
+      migProfileAllowlist:
+        - models:
+          - A30
+          profiles:
+          - 1g.6gb
+          - 2g.12gb
+          - 4g.24gb
+        - models:
+          - A100-SXM4-40GB
+          - A100-40GB-PCIe
+          - A100-PCIE-40GB
+          profiles:
+          - 1g.5gb
+          - 2g.10gb
+          - 3g.20gb
+          - 4g.20gb
+          - 7g.40gb
+        - models:
+          - A100-SXM4-80GB
+          - A100-80GB-PCIe
+          - A100-PCIE-80GB
+          - A100 80GB PCIe
+          profiles:
+          - 1g.10gb
+          - 2g.20gb
+          - 3g.40gb
+          - 4g.40gb
+          - 7g.79gb
+        - models:
+          - H100-PCIE-80GB
+          - H100-SXM5-80GB
+          - H100 80GB HBM3
+          - H100 PCIe
+          profiles:
+          - 1g.10gb
+          - 2g.20gb
+          - 3g.40gb
+          - 4g.40gb
+          - 7g.80gb
+        - models:
+          - H100-PCIE-94GB
+          - H100-SXM5-94GB
+          - H100 NVL
+          profiles:
+          - 1g.12gb
+          - 2g.24gb
+          - 3g.47gb
+          - 4g.47gb
+          - 7g.94gb
+        - models:
+          - H20
+          - H100 on GH200
+          profiles:
+          - 1g.12gb
+          - 2g.24gb
+          - 3g.48gb
+          - 4g.48gb
+          - 7g.96gb
+        - models:
+          - H200 NVL
+          - H200-SXM5
+          profiles:
+          - 1g.18gb
+          - 2g.35gb
+          - 3g.71gb
+          - 4g.71gb
+          - 7g.141gb
+        - models:
+          - B200
+          profiles:
+          - 1g.23gb
+          - 2g.45gb
+          - 3g.90gb
+          - 4g.90gb
+          - 7g.180gb
+        - models:
+          - RTX PRO 6000 Blackwell Server Edition
+          profiles:
+          - 1g.24gb
+          - 2g.48gb
+          - 4g.96gb
+    cambricon:
+      resourceCountName: cambricon.com/vmlu
+      resourceMemoryName: cambricon.com/mlu.smlu.vmemory
+      resourceCoreName: cambricon.com/mlu.smlu.vcore
+    hygon:
+      resourceCountName: hygon.com/hcunum
+      resourceMemoryName: hygon.com/hcumem
+      resourceCoreName: hygon.com/hcucores
+      memoryFactor: 1
+    metax:
+      resourceCountName: metax-tech.com/gpu
+      resourceVCountName: metax-tech.com/sgpu
+      resourceVMemoryName: metax-tech.com/vmemory
+      resourceVCoreName: metax-tech.com/vcore
+      sgpuTopologyAware: false
+    enflame:
+      resourceNameGCU: enflame.com/gcu
+      resourceNameDRSGCU: enflame.com/drs-gcu
+      resourceNameGCUMemory: enflame.com/gcu-memory
+      resourceNameGCUCore: enflame.com/gcu-core
+    mthreads:
+      resourceCountName: mthreads.com/vgpu
+      resourceMemoryName: mthreads.com/sgpu-memory
+      resourceCoreName: mthreads.com/sgpu-core
+      memoryPerCard:
+        - 96
+    iluvatars:
+      - chipName: MR-V100
+        commonWord: MR-V100
+        resourceCoreName: iluvatar.ai/MR-V100.vCore
+        resourceCountName: iluvatar.ai/MR-V100-vgpu
+        resourceMemoryName: iluvatar.ai/MR-V100.vMem
+      - chipName: MR-V50
+        commonWord: MR-V50
+        resourceCoreName: iluvatar.ai/MR-V50.vCore
+        resourceCountName: iluvatar.ai/MR-V50-vgpu
+        resourceMemoryName: iluvatar.ai/MR-V50.vMem
+      - chipName: BI-V150
+        commonWord: BI-V150
+        resourceCoreName: iluvatar.ai/BI-V150.vCore
+        resourceCountName: iluvatar.ai/BI-V150-vgpu
+        resourceMemoryName: iluvatar.ai/BI-V150.vMem
+      - chipName: BI-V100
+        commonWord: BI-V100
+        resourceCoreName: iluvatar.ai/BI-V100.vCore
+        resourceCountName: iluvatar.ai/BI-V100-vgpu
+        resourceMemoryName: iluvatar.ai/BI-V100.vMem
+    kunlun:
+      resourceCountName: kunlunxin.com/xpu
+      resourceVCountName: kunlunxin.com/vxpu
+      resourceVMemoryName: kunlunxin.com/vxpu-memory
+    awsneuron:
+      resourceCountName: aws.amazon.com/neuron
+      resourceCoreName: aws.amazon.com/neuroncore
+    amd:
+      resourceCountName: amd.com/gpu
+      resourceCoreName: amd.com/gpucores
+      resourceMemoryName: amd.com/gpumem
+      defaultGPUNum: 1
+      defaultMemory: 0
+      defaultCores: 0
+      resourceMemoryPercentageName: amd.com/gpumem-percentage
+      runtimeClassName: ""
+    vastai:
+      resourceCountName: vastaitech.com/va
+    biren:
+      resourceCountName: birentech.com/gpu
+    vnpus:
+      deviceSplitCount: 10
+      hamiVnpuMode: "template"
+      enpuPolicy: "elastic"
+      overwriteEnv: false
+      runtimeClassName: ""
+      configs:
+        - aiCore: 30
+          chipName: 910A
+          commonWord: Ascend910A
+          memoryAllocatable: 32768
+          memoryCapacity: 32768
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend910A-core
+          resourceMemoryName: huawei.com/Ascend910A-memory
+          resourceName: huawei.com/Ascend910A
+          templates:
+          - aiCore: 2
+            memory: 2184
+            name: vir02
+          - aiCore: 4
+            memory: 4369
+            name: vir04
+          - aiCore: 8
+            memory: 8738
+            name: vir08
+          - aiCore: 16
+            memory: 17476
+            name: vir16
+        - aiCPU: 6
+          aiCore: 24
+          chipName: 910B2
+          commonWord: Ascend910B2
+          memoryAllocatable: 65536
+          memoryCapacity: 65536
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend910B2-core
+          resourceMemoryName: huawei.com/Ascend910B2-memory
+          resourceName: huawei.com/Ascend910B2
+          templates:
+          - aiCPU: 1
+            aiCore: 3
+            memory: 8192
+            name: vir03_1c_8g
+          - aiCPU: 1
+            aiCore: 6
+            memory: 16384
+            name: vir06_1c_16g
+          - aiCPU: 3
+            aiCore: 12
+            memory: 32768
+            name: vir12_3c_32g
+        - aiCPU: 7
+          aiCore: 20
+          chipName: 910B3
+          commonWord: Ascend910B3
+          memoryAllocatable: 65536
+          memoryCapacity: 65536
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend910B3-core
+          resourceMemoryName: huawei.com/Ascend910B3-memory
+          resourceName: huawei.com/Ascend910B3
+          templates:
+          - aiCPU: 1
+            aiCore: 5
+            memory: 16384
+            name: vir05_1c_16g
+          - aiCPU: 3
+            aiCore: 10
+            memory: 32768
+            name: vir10_3c_32g
+        - aiCPU: 7
+          aiCore: 20
+          chipName: 910B4-1
+          commonWord: Ascend910B4-1
+          memoryAllocatable: 65536
+          memoryCapacity: 65536
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend910B4-1-core
+          resourceMemoryName: huawei.com/Ascend910B4-1-memory
+          resourceName: huawei.com/Ascend910B4-1
+          templates:
+          - aiCPU: 1
+            aiCore: 5
+            memory: 16384
+            name: vir05_1c_16g
+          - aiCPU: 3
+            aiCore: 10
+            memory: 32768
+            name: vir10_3c_32g
+        - aiCPU: 7
+          aiCore: 20
+          chipName: 910B4
+          commonWord: Ascend910B4
+          memoryAllocatable: 32768
+          memoryCapacity: 32768
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend910B4-core
+          resourceMemoryName: huawei.com/Ascend910B4-memory
+          resourceName: huawei.com/Ascend910B4
+          templates:
+          - aiCPU: 1
+            aiCore: 5
+            memory: 8192
+            name: vir05_1c_8g
+          - aiCPU: 3
+            aiCore: 10
+            memory: 16384
+            name: vir10_3c_16g
+        - aiCPU: 7
+          aiCore: 8
+          chipName: 310P3
+          commonWord: Ascend310P
+          memoryAllocatable: 21527
+          memoryCapacity: 24576
+          memoryFactor: 1
+          resourceCoreName: huawei.com/Ascend310P-core
+          resourceMemoryName: huawei.com/Ascend310P-memory
+          resourceName: huawei.com/Ascend310P
+          templates:
+          - aiCPU: 1
+            aiCore: 1
+            memory: 3072
+            name: vir01
+          - aiCPU: 2
+            aiCore: 2
+            memory: 6144
+            name: vir02
+          - aiCPU: 4
+            aiCore: 4
+            memory: 12288
+            name: vir04
+        - aiCPU: 7
+          aiCore: 20
+          chipName: Ascend910
+          commonWord: Ascend910C
+          memoryAllocatable: 65536
+          memoryCapacity: 65536
+          resourceCoreName: huawei.com/Ascend910C-core
+          resourceMemoryName: huawei.com/Ascend910C-memory
+          resourceName: huawei.com/Ascend910C
+          superPod: true
+          templates:
+          - aiCPU: 1
+            aiCore: 5
+            memory: 16384
+            name: vir05_1c_16g
+          - aiCPU: 3
+            aiCore: 10
+            memory: 32768
+            name: vir10_3c_32g
+        - aiCore: 32
+          chipName: Ascend950DT
+          commonWord: Ascend950DT
+          memoryAllocatable: 98304
+          memoryCapacity: 98304
+          resourceName: huawei.com/Ascend950DT
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hami-device-plugin-monitor
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-device-plugin
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+  - name: monitorport
+    port: 31992
+    targetPort: 9394
+    protocol: TCP
+  selector:
+    app.kubernetes.io/component: hami-device-plugin
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 443
+    targetPort: 9443
+    protocol: TCP
+  selector:
+    app.kubernetes.io/component: hami-scheduler
+    hami.io/scheduler-role: leader
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hami-device-plugin
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-device-plugin
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+spec:
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: hami-device-plugin
+      app.kubernetes.io/name: hami
+      app.kubernetes.io/instance: hami
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: hami-device-plugin
+        hami.io/webhook: ignore
+        app.kubernetes.io/name: hami
+        app.kubernetes.io/instance: hami
+      annotations:
+        checksum/hami-scheduler-config: 8057e7fd36b2f4615f9d1a1209bfc0f6140cef29c17f27784470886bea82590c
+        checksum/hami-scheduler-device-config: ef79da7ca6f68ad0fee5fde3215066117190f455230db3957cfb954d33c6b06e
+    spec:
+      runtimeClassName: nvidia
+      serviceAccountName: hami-device-plugin
+      hostPID: true
+      hostNetwork: false
+      containers:
+      - name: device-plugin
+        image: docker.io/projecthami/hami:v2.11.0@sha256:caab978ed50e53163c31ed7c4650c4e6e5d8facf157f377c26e021ff5fa3e5ce
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - /k8s-vgpu/bin/vgpu-init.sh /usr/local/vgpu/
+        command:
+        - nvidia-device-plugin
+        - --config-file=/device-config.yaml
+        - --mig-strategy=none
+        - --disable-core-limit=false
+        - --report-node-capacity=false
+        - -v=4
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NVIDIA_MIG_MONITOR_DEVICES
+          value: all
+        - name: DEVICE_LIST_STRATEGY
+          value: envvar
+        - name: HOOK_PATH
+          value: /usr/local
+        - name: HAMI_VGPU_CACHE_ROOT
+          value: /usr/local/vgpu/containers
+        - name: HAMI_VGPU_CACHE_GRACE_PERIOD
+          value: 5m
+        - name: PASS_DEVICE_SPECS
+          value: 'true'
+        - name: NVIDIA_DRIVER_ROOT
+          value: auto
+        - name: DISABLE_HAMI_CORE_FOR_WHOLE_GPU
+          value: 'true'
+        securityContext:
+          allowPrivilegeEscalation: true
+          capabilities:
+            add:
+            - SYS_ADMIN
+            drop:
+            - ALL
+          privileged: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: device-plugin
+          mountPath: /var/lib/kubelet/device-plugins
+        - name: lib
+          mountPath: /usr/local/vgpu
+        - name: ctrs
+          mountPath: /usr/local/vgpu/containers
+        - name: usrbin
+          mountPath: /usrbin
+        - name: deviceconfig
+          mountPath: /config
+        - name: hosttmp
+          mountPath: /tmp
+        - name: device-config
+          mountPath: /device-config.yaml
+          subPath: device-config.yaml
+        - name: cdi-root
+          mountPath: /var/run/cdi
+        - name: dynamic-mig-state
+          mountPath: /var/run/hami/dynamic-mig-state
+        - name: nvidia-validations
+          mountPath: /run/nvidia/validations
+          readOnly: true
+      - name: vgpu-monitor
+        image: docker.io/projecthami/hami:v2.11.0@sha256:caab978ed50e53163c31ed7c4650c4e6e5d8facf157f377c26e021ff5fa3e5ce
+        imagePullPolicy: IfNotPresent
+        command:
+        - vGPUmonitor
+        - -v=4
+        - --metrics-bind-address=:9394
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - SYS_ADMIN
+            drop:
+            - ALL
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_MIG_MONITOR_DEVICES
+          value: all
+        - name: HOOK_PATH
+          value: /usr/local/vgpu
+        - name: HAMI_RESYNC_INTERVAL
+          value: 5m
+        - name: DISABLE_HAMI_CORE_FOR_WHOLE_GPU
+          value: 'true'
+        - name: NVIDIA_DRIVER_ROOT
+          value: auto
+        - name: HAMI_VGPU_CACHE_ROOT
+          value: /usr/local/vgpu/containers
+        ports:
+        - name: metrics
+          containerPort: 9394
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 15
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: ctrs
+          mountPath: /usr/local/vgpu/containers
+        - name: dockers
+          mountPath: /run/docker
+        - name: containerds
+          mountPath: /run/containerd
+        - name: sysinfo
+          mountPath: /sysinfo
+        - name: hostvar
+          mountPath: /hostvar
+        - name: hosttmp
+          mountPath: /tmp
+      volumes:
+      - name: ctrs
+        hostPath:
+          path: /usr/local/vgpu/containers
+      - name: hosttmp
+        hostPath:
+          path: /tmp
+      - name: dockers
+        hostPath:
+          path: /run/docker
+      - name: containerds
+        hostPath:
+          path: /run/containerd
+      - name: device-plugin
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+      - name: lib
+        hostPath:
+          path: /usr/local/vgpu
+      - name: nvidia-validations
+        hostPath:
+          path: /run/nvidia/validations
+          type: DirectoryOrCreate
+      - name: cdi-root
+        hostPath:
+          path: /var/run/cdi
+          type: DirectoryOrCreate
+      - name: dynamic-mig-state
+        hostPath:
+          path: /var/run/hami/dynamic-mig-state
+          type: DirectoryOrCreate
+      - name: usrbin
+        hostPath:
+          path: /usr/bin
+      - name: sysinfo
+        hostPath:
+          path: /sys
+      - name: hostvar
+        hostPath:
+          path: /var
+      - name: deviceconfig
+        configMap:
+          name: hami-device-plugin
+      - name: device-config
+        configMap:
+          name: hami-scheduler-device
+      nodeSelector:
+        airaware.training/gpu-mode: hami
+        gpu: 'on'
+      tolerations:
+      - effect: NoSchedule
+        key: airaware.training/gpu-mode
+        operator: Equal
+        value: hami
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: hami-scheduler
+      app.kubernetes.io/name: hami
+      app.kubernetes.io/instance: hami
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: hami-scheduler
+        app.kubernetes.io/name: hami
+        app.kubernetes.io/instance: hami
+        hami.io/webhook: ignore
+      annotations:
+        checksum/hami-scheduler-config: 8057e7fd36b2f4615f9d1a1209bfc0f6140cef29c17f27784470886bea82590c
+        checksum/hami-scheduler-device-config: ef79da7ca6f68ad0fee5fde3215066117190f455230db3957cfb954d33c6b06e
+    spec:
+      serviceAccountName: hami-scheduler
+      containers:
+      - name: kube-scheduler
+        image: registry.k8s.io/kube-scheduler:v1.36.3@sha256:128fc07d278d64c4f2cce416ed0a9f37b23a30cdde6f97873d18c9c78e259df4
+        imagePullPolicy: IfNotPresent
+        command:
+        - kube-scheduler
+        - --config=/config/config.yaml
+        - --bind-address=127.0.0.1
+        - -v=2
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: scheduler-config
+          mountPath: /config
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      - name: vgpu-scheduler-extender
+        image: docker.io/projecthami/hami:v2.11.0@sha256:caab978ed50e53163c31ed7c4650c4e6e5d8facf157f377c26e021ff5fa3e5ce
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: HAMI_NODELOCK_EXPIRE
+          value: 5m
+        command:
+        - scheduler
+        - --http_bind=0.0.0.0:9443
+        - --cert_file=/tls/tls.crt
+        - --key_file=/tls/tls.key
+        - --extender-bind=127.0.0.1:9444
+        - --scheduler-name=hami-scheduler
+        - --metrics-bind-address=127.0.0.1:9395
+        - --profiling-bind-address=127.0.0.1:6060
+        - --node-scheduler-policy=binpack
+        - --gpu-scheduler-policy=spread
+        - --node-affinity-score-weight=0
+        - --force-overwrite-default-scheduler=true
+        - --device-config-file=/device-config.yaml
+        - --leader-elect=true
+        - --leader-elect-resource-name=hami-scheduler
+        - --leader-elect-resource-namespace=hami-system
+        - --device-plugin-namespace=hami-system
+        - --device-plugin-service-account=hami-device-plugin
+        - --node-label-selector=airaware.training/gpu-mode=hami,gpu=on
+        - -v=2
+        ports:
+        - name: https
+          containerPort: 9443
+          protocol: TCP
+        - name: metrics
+          containerPort: 9395
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: device-config
+          mountPath: /device-config.yaml
+          subPath: device-config.yaml
+        - name: tls-config
+          mountPath: /tls
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: https
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app.kubernetes.io/component
+                  operator: In
+                  values:
+                  - hami-scheduler
+              topologyKey: kubernetes.io/hostname
+      volumes:
+      - name: tls-config
+        secret:
+          secretName: hami-scheduler-tls
+      - name: scheduler-config
+        configMap:
+          name: hami-scheduler
+      - name: device-config
+        configMap:
+          name: hami-scheduler-device
+      nodeSelector:
+        airaware.training/pool: training-cpu
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
