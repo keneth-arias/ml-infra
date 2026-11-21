@@ -484,7 +484,7 @@ class ReservationTests(unittest.TestCase):
         import io
         import json
         from unittest.mock import Mock
-        from gpu_reservation import reserve
+        from gpu_reservation import reserve, reserve_remote
         from worker_cleanup import cleanup_digest, scope_digest
 
         root = Path(gpu_window.__file__).parent
@@ -531,12 +531,14 @@ class ReservationTests(unittest.TestCase):
 
         def run(case):
             s3 = Mock()
+            s3.put_object.return_value = {"VersionId": "null" if case == "unversioned-write" else "new-version"}
 
             def read(**req):
                 if req["Key"].endswith("/ledger.json"):
                     return {
                         "Body": io.BytesIO(raw if case != "stale" else b"{}"),
                         "ETag": '"current"',
+                        "VersionId": "null" if case == "unversioned-ledger" else "funded-version",
                     }
                 host = req["Key"].split("/")[-1][:-5]
                 data = dict(
@@ -574,11 +576,34 @@ class ReservationTests(unittest.TestCase):
                     data["next_tick"] = utc(NOW - timedelta(seconds=1))
                 return {
                     "Body": io.BytesIO(json.dumps(data).encode()),
-                    "VersionId": "evidence",
+                    "VersionId": "null" if case == "unversioned" and host == "fw13" else "evidence",
                 }
 
             s3.get_object.side_effect = read
-            if case in (
+            if case == "conflict":
+                from botocore.exceptions import ClientError
+                from unittest.mock import patch
+
+                s3.put_object.side_effect = ClientError(
+                    {"Error": {"Code": "PreconditionFailed"}, "ResponseMetadata": {"HTTPStatusCode": 412}},
+                    "PutObject",
+                )
+                with patch("boto3.client", return_value=s3), patch("gpu_reservation.datetime") as clock:
+                    clock.now.return_value = NOW
+                    with self.assertRaisesRegex(ValueError, "inspect the off-host ledger") as caught:
+                        reserve_remote(sc, "a" * 64, 3)
+                self.assertIsInstance(caught.exception.__cause__, ClientError)
+                self.assertEqual(s3.put_object.call_count, 1)
+                self.assertEqual(s3.put_object.call_args.kwargs["IfMatch"], '"current"')
+            elif case == "unversioned-write":
+                with self.assertRaisesRegex(ValueError, "inspect the off-host ledger"):
+                    reserve(s3, sc, "a" * 64, 3, NOW)
+                s3.put_object.assert_called_once()
+            elif case in (
+                "unversioned-ledger",
+                "unversioned",
+                "held",
+                "consumed",
                 "timer",
                 "expired",
                 "stale",
@@ -586,7 +611,13 @@ class ReservationTests(unittest.TestCase):
                 "old-code",
                 "unrehearsed",
             ):
-                with self.assertRaises(ValueError):
+                expected = {
+                    "unversioned-ledger": "Funding ledger requires a versioned object",
+                    "unversioned": "Timer attestation requires a versioned object",
+                    "held": "previously consumed reservation",
+                    "consumed": "previously consumed reservation",
+                }.get(case, ".")
+                with self.assertRaisesRegex(ValueError, expected):
                     reserve(s3, sc, "a" * 64, 3, NOW)
                 s3.put_object.assert_not_called()
             else:
@@ -605,6 +636,10 @@ class ReservationTests(unittest.TestCase):
             sc.update(stage=stage, cutoff=utc(NOW + timedelta(hours=7)))
             for case in (
                 "ok",
+                "unversioned-ledger",
+                "unversioned-write",
+                "conflict",
+                "unversioned",
                 "timer",
                 "expired",
                 "stale",
@@ -614,6 +649,15 @@ class ReservationTests(unittest.TestCase):
             ):
                 with self.subTest(stage=stage, case=case):
                     run(case)
+
+        for case, previous in (
+            ("held", {"active_reservation": {"attempt_id": "previous"}}),
+            ("consumed", {"attempt_ids": [sc["attempt_id"]]}),
+        ):
+            raw = json.dumps(dict(ledger(), remaining_gpu_hours=100, cleanup_access=grants, **previous)).encode()
+            sc["ledger_sha256"] = hashlib.sha256(raw).hexdigest()
+            with self.subTest(case=case):
+                run(case)
 
         # The live ledger carries evidence of provider deletion authority separately
         # from the cleanup process that can only demonstrate a read-only rehearsal.

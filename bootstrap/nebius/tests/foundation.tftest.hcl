@@ -1,4 +1,7 @@
 mock_provider "nebius" {
+  mock_resource "nebius_mk8s_v1_cluster" {
+    defaults = { id = "mk8scluster-e07testonly000000000001" }
+  }
   mock_data "nebius_billing_v1_pricing_policy" {
     defaults = {
       parent_id             = "project-e07testonly000000000001"
@@ -169,4 +172,41 @@ run "reject_gpu_in_cpu_pool" {
     node_pools = { cpu = { platform = "gpu-rtx6000-a", preset = "1gpu-24vcpu-218gb", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" } }
   }
   expect_failures = [var.node_pools]
+}
+
+
+run "reject_second_cpu" {
+  command = plan
+  variables {
+    node_pools = { cpu = { platform = "cpu-d3", preset = "4vcpu-16gb", count = 2, disk_gib = 128, disk_type = "NETWORK_SSD" } }
+  }
+  expect_failures = [var.node_pools]
+}
+
+run "reject_blank_existing_pricing_policy" {
+  command = plan
+  variables { existing_pricing_policy_id = " " }
+  expect_failures = [var.existing_pricing_policy_id]
+}
+
+run "gpu_on_owned_foundation" {
+  command = apply
+  variables {
+    node_pools = { gpu = { platform = "gpu-rtx6000-a", preset = "1gpu-24vcpu-218gb", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" } }
+  }
+  override_resource {
+    target = nebius_billing_v1_pricing_policy.training[0]
+    values = {
+      id     = "pricingpolicy-e07testonly000000000001"
+      status = { scheduling_state = "SCHEDULING_STATE_ALLOWED" }
+    }
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.training["gpu"].parent_id == nebius_mk8s_v1_cluster.training[0].id &&
+      nebius_mk8s_v1_node_group.training["gpu"].template.spot_pricing_policy.id == nebius_billing_v1_pricing_policy.training[0].id &&
+      nebius_mk8s_v1_node_group.training["gpu"].fixed_node_count == 1
+    )
+    error_message = "The owned cluster must attach one GPU to its approved managed policy."
+  }
 }

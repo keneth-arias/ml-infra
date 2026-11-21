@@ -67,6 +67,16 @@ class ExpiryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check_release()
 
+    def test_refuse_owned_noop_and_wrong_cutoff_delete(self):
+        change = self.plan["resource_changes"][0]["change"]
+        change["actions"] = ["no-op"]
+        with self.assertRaisesRegex(ValueError, "Unexpected change"):
+            self.check_release()
+        change["actions"] = ["delete"]
+        self.before["labels"]["airaware-cutoff"] = "20261120090000"
+        with self.assertRaisesRegex(ValueError, "Unexpected change"):
+            self.check_release()
+
     def test_wrong_cluster_or_concurrent_changes(self):
         self.before["parent_id"] = "another-cluster"
         with self.assertRaises(ValueError):

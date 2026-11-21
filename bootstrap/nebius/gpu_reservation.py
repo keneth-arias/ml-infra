@@ -26,6 +26,8 @@ def reserve(s3, scope, plan_digest, state_serial, now):
     ):
         raise ValueError("Invalid stage or inventory digest")
     current = s3.get_object(Bucket=bucket, Key=LEDGER_KEY)
+    if not isinstance(current.get("VersionId"), str) or current["VersionId"] in ("", "null"):
+        raise ValueError("Funding ledger requires a versioned object")
     raw = current["Body"].read()
     if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
         raise ValueError("Live ledger changed since approval")
@@ -162,7 +164,10 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         ContentType="application/json",
         Body=json.dumps(ledger, sort_keys=True).encode(),
     )
-    return ledger["revision"], result.get("VersionId")
+    version = result.get("VersionId")
+    if not isinstance(version, str) or version in ("", "null"):
+        raise ValueError("Unversioned reservation write; inspect the off-host ledger before retry")
+    return ledger["revision"], version
 
 
 def reserve_remote(scope, plan_digest, state_serial):

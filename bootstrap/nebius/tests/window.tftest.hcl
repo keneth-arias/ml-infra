@@ -38,7 +38,7 @@ run "reject_over_budget_window" {
 run "reject_unfunded_retention" {
   command = plan
   variables {
-    worker_run = { id = "retention", start = "2030-01-01T00:00:00Z", cutoff = "2030-01-02T00:00:00Z", other_cost_usd = 215 }
+    worker_run = { id = "retention", start = "2030-01-01T00:00:00Z", cutoff = "2030-01-01T01:00:00Z", other_cost_usd = 100.01 }
   }
   expect_failures = [var.worker_run]
 }

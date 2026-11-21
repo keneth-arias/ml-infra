@@ -33,14 +33,14 @@ variable "worker_run" {
       can(regex("^[a-z0-9][a-z0-9-]{0,39}$", var.worker_run.id)) &&
       endswith(var.worker_run.start, "Z") && endswith(var.worker_run.cutoff, "Z") &&
       timecmp(var.worker_run.cutoff, var.worker_run.start) > 0 &&
-      var.worker_run.other_cost_usd >= 0 &&
+      var.worker_run.other_cost_usd >= 0 && var.worker_run.other_cost_usd <= 100 &&
       timecmp(var.worker_run.cutoff, timeadd(var.worker_run.start, "99h")) <= 0 &&
       timecmp(var.worker_run.cutoff, timeadd(var.worker_run.start,
         format("%ds", floor((250 - var.worker_run.other_cost_usd) / 1.5 * 3600) - 3600)
       )) <= 0,
       false
     )
-    error_message = "Price all non-GPU charges and tax, allow one extra GPU-hour for release, and fit the UTC allocation window inside 99 hours and $250."
+    error_message = "Keep non-GPU charges including tax within $100, allow one extra GPU-hour for release, and fit the UTC allocation window inside 99 hours and $250."
   }
 }
 
@@ -61,8 +61,8 @@ variable "node_pools" {
     error_message = "Every enabled node pool needs a positive whole count and a positive disk size."
   }
   validation {
-    condition     = var.node_pools.cpu == null ? true : startswith(var.node_pools.cpu.platform, "cpu-")
-    error_message = "The CPU pool must use a CPU-only Nebius platform."
+    condition     = var.node_pools.cpu == null ? true : (var.node_pools.cpu.count == 1 && startswith(var.node_pools.cpu.platform, "cpu-"))
+    error_message = "The budgeted CPU pool supports one worker on a CPU-only Nebius platform."
   }
   validation {
     condition = var.node_pools.gpu == null ? true : (
@@ -122,6 +122,10 @@ variable "existing_pricing_policy_id" {
   description = "Reuse a project-owned RTX PRO 6000 policy capped at $1.50/GPU-hour."
   type        = string
   default     = null
+  validation {
+    condition     = var.existing_pricing_policy_id == null ? true : trimspace(var.existing_pricing_policy_id) != ""
+    error_message = "Supply an existing pricing policy ID or leave it unset."
+  }
 }
 
 data "nebius_billing_v1_pricing_policy" "existing" {
