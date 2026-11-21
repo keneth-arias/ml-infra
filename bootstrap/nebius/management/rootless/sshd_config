@@ -11,7 +11,8 @@ KbdInteractiveAuthentication no
 UsePAM no
 PermitUserEnvironment no
 AllowAgentForwarding no
-AllowTcpForwarding local
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
 GatewayPorts no
 X11Forwarding no
 MaxSessions 32

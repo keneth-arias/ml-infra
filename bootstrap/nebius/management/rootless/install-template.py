@@ -21,7 +21,7 @@ POD = """          command: ["/usr/bin/tini", "--", "/bin/bash", "-ec"]
               SKYPILOT_SSH_KEY_EOF
               {{ ray_head_start_command | replace(rootless_prlimit, 'true;') }}
               touch /tmp/sky-cpu-ready
-              exec sleep infinity
+              exec /usr/sbin/sshd -D -e -f /opt/sky-cpu/sshd_config
 
 """
 SETUP = """setup_commands:
@@ -46,16 +46,22 @@ def install_file(target, expected_hash, transform, check):
     adapted = transform(source.decode()).encode()
     if target.read_bytes() == adapted:
         return
-    if check or target.read_bytes() != source:
-        raise ValueError(f"Unexpected installed SkyPilot component: {target.name}")
+    if target.read_bytes() != source:
+        raise ValueError(f"{target.name} has unrecognized changes. Recreate the dedicated virtualenv from the lock.")
+    if check:
+        raise ValueError(f"{target.name} still has the stock implementation. Run the installer without --check.")
     if not backup.exists():
         with backup.open("xb") as f:
             f.write(source)
     with NamedTemporaryFile(dir=target.parent, delete=False) as f:
-        f.write(adapted)
-        os.fchmod(f.fileno(), target.stat().st_mode & 0o777)
         temp = Path(f.name)
-    temp.replace(target)
+        try:
+            f.write(adapted)
+            os.fchmod(f.fileno(), target.stat().st_mode & 0o777)
+            f.flush()
+            temp.replace(target)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def adapt_pod(text, prlimit):
@@ -115,4 +121,7 @@ print(json.dumps([str(d.locate_file('sky/templates/kubernetes-ray.yml.j2')), RAY
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        raise SystemExit(str(error)) from None

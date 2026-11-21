@@ -1,6 +1,6 @@
 # Rootless CPU worker for SkyPilot 0.14.3
 
-This image and server adapter support one CPU head on linux/amd64 under Kubernetes Restricted Pod Security. The worker runs as UID/GID 1000, starts an ephemeral SSH host key and uses the Ray and SkyPilot dependencies installed at build time. The pod needs a writable home and temp directory and the pod-local `net.ipv4.ip_unprivileged_port_start=22` sysctl. The server uses Kubernetes exec and port-forward to reach the worker.
+This image and server adapter support one CPU head on linux/amd64 under Kubernetes Restricted Pod Security. The worker runs as UID/GID 1000, starts an ephemeral SSH host key and uses the Ray and SkyPilot dependencies installed at build time. The pod needs a writable home and temp directory and the pod-local `net.ipv4.ip_unprivileged_port_start=22` sysctl. Keep the image’s /run/sshd directory available. Ray uses the runtime file-descriptor limit at the qualified one-CPU scale. The server uses Kubernetes exec and port-forward to reach the worker.
 
 Build from a reviewed commit and keep the OCI archive through qualification and registry promotion. Supply a new output directory on a filesystem with space for the image. The build records the Git commit and repository in the image configuration. Its metadata file contains the immutable index digest. Requalify the emitted digest after a rebuild, including when the Debian package repositories have changed.
 
@@ -19,7 +19,7 @@ python3 bootstrap/nebius/management/rootless/install-template.py --check "$serve
 
 Qualify the image on the local Kubernetes worker with one token-free pod, UID 1000, `allowPrivilegeEscalation: false`, all capabilities dropped and `RuntimeDefault` seccomp. Record the resolved index, platform manifest and config digest. Exercise job completion, logs, authenticated SSH over port-forward, job cancellation and teardown before promoting the identical OCI bytes to the private registry.
 
-The [qualification task](qualification-task.yaml) contains the pilot's placement, resource limits, runtime checks and pod security settings. Its service account is precreated. The worker uses its writable container home and temporary storage. Keep high availability disabled for this single head (pod restart policy `Never`). Set the dedicated API server’s configuration as follows.
+The [qualification task](qualification-task.yaml) contains the pilot's placement, resource limits, runtime checks and pod security settings. The pod has a 15-minute qualification deadline and a 30-second termination grace period. Its service account is precreated. The worker starts the SSH server in the foreground after Ray initialization. SSH errors reach the pod log and server exit ends the head. Operators reach port 22 through the Kubernetes API. SSH-level TCP and Unix-socket forwarding are disabled. The worker uses its writable container home and temporary storage. Keep high availability disabled for this single head (pod restart policy `Never`). Set the dedicated API server’s configuration as follows.
 
 ```yaml
 allowed_clouds: [kubernetes]

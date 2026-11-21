@@ -13,6 +13,7 @@ out=$(realpath "$2")
 path=bootstrap/nebius/management/rootless
 git -C "$repo" archive "$sha:$path" | docker buildx build \
   --platform linux/amd64 --provenance=mode=min \
+  --annotation "index:org.opencontainers.image.source=https://github.com/keneth-arias/ml-infra" \
   --label "org.opencontainers.image.source=https://github.com/keneth-arias/ml-infra" \
   --label "org.opencontainers.image.revision=$sha" \
   --tag "ghcr.io/keneth-arias/ml-infra-sky-cpu:git-$sha" \
