@@ -1,0 +1,23 @@
+[Unit]
+Description=Authenticated TLS endpoint for the production SkyPilot CPU pilot
+After=network-online.target sky-cpu.service
+BindsTo=sky-cpu.service
+
+[Service]
+User=sky-cpu-proxy
+Group=sky-cpu-proxy
+StateDirectory=sky-cpu-proxy
+Environment=HOME=/var/lib/sky-cpu-proxy
+EnvironmentFile=/etc/sky-cpu/proxy.env
+ExecStart=/opt/sky-cpu-proxy/bin/caddy run --config /etc/sky-cpu/Caddyfile --adapter caddyfile
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target
