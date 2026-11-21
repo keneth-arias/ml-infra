@@ -97,12 +97,32 @@ class TrainingStorageTest(unittest.TestCase):
                     detached()
                 disk[scope][key] = original
 
+    def test_provider_size_units_are_exact_and_consistent(self):
+        for field, value in (
+            ("size_bytes", "137438953472"), ("size_kibibytes", 134217728),
+            ("size_mebibytes", "131072"), ("size_gibibytes", 128), ("size_gibibytes", "128"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertEqual(handoff.disk_size_gib({
+                    "spec": {field: value}, "status": {"size_bytes": "137438953472"},
+                }), 128)
+        for spec in (
+            {}, {"size_gibibytes": 128, "size_bytes": 129 << 30},
+            {"size_bytes": (128 << 30) + 1}, {"size_mebibytes": 129},
+            {"size_gibibytes": True}, {"size_gibibytes": -1}, {"size_gibibytes": 0},
+            {"size_gibibytes": 128.0}, {"size_gibibytes": "128.0"},
+        ):
+            with self.subTest(spec=spec), self.assertRaises(ValueError):
+                handoff.disk_size_gib({"spec": spec})
+        with self.assertRaisesRegex(ValueError, "differs"):
+            handoff.disk_size_gib({"spec": {"size_gibibytes": 128}, "status": {"size_bytes": "17179869184"}})
+
     def test_handoff_polls_provider_until_detached(self):
         binding = ("pvc-uid", "pv-uid", "computedisk-provider")
         disk = {
             "metadata": {"id": binding[2], "parent_id": "project-training"},
-            "spec": {"type": "NETWORK_SSD", "size_gibibytes": "128"},
-            "status": {"state": "READY"},
+            "spec": {"type": "NETWORK_SSD", "size_bytes": "137438953472"},
+            "status": {"state": "READY", "size_bytes": "137438953472"},
         }
         attached = {**disk, "status": {"state": "READY", "reconciling": True}}
         with tempfile.TemporaryDirectory() as directory:

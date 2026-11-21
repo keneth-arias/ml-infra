@@ -15,6 +15,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "bootstrap/nebius"), str(ROOT / "workloads/sky")]
+from nebius_disk import GIB, disk_size_gib
 from private_api import pinned_kubeconfig_ca
 from worker_cleanup import cloud_items
 from worker_plan import amount
@@ -24,7 +25,6 @@ CLASS = "airaware-network-retain-immediate"
 DRIVER = "compute.csi.nebius.com"
 OWNER = "airaware.storage/reservation"
 CLAIMS = {("tracking", "postgres"): 16, ("training", "airaware-checkpoints"): 128}
-GIB = 1024**3
 WORKER_BOOT_DISKS = 2
 WORKER_BOOT_GIB = 128
 DB = ("tracking", "postgres")
@@ -113,7 +113,7 @@ def reconcile(phase, approval, storage_class, claims, volumes, disks, attachment
         disk = disks[handle]
         status = disk["status"]
         if (disk["metadata"]["parent_id"] != project or disk["spec"]["type"] != "NETWORK_SSD"
-                or int(disk["spec"]["size_gibibytes"]) != size or status["state"] != "READY"
+                or disk_size_gib(disk) != size or status["state"] != "READY"
                 or status.get("reconciling") or status.get("managed_by") or status.get("read_write_attachment")
                 or status.get("read_only_attachments")):
             raise ValueError("Expected the exact Ready and detached workload-project Network SSD")
@@ -272,7 +272,7 @@ def capture(args, approval, approval_hash):
     state = observe(args, approval)
     n = ["nebius", "-p", args.profile, "--no-browser"]
     disks = state["disks"]
-    owned_gib = sum(int(disk["spec"]["size_gibibytes"]) for disk in disks)
+    owned_gib = sum(disk_size_gib(disk) for disk in disks)
     quota = disk_quota(n, approval["tenant_id"], len(disks), owned_gib)
     if state["namespace_uids"] != approval["namespace_uids"]:
         raise ValueError("The namespace identities differ from the approved scope")

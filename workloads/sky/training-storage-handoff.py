@@ -10,6 +10,7 @@ import subprocess
 import sys
 from time import monotonic, sleep
 
+from nebius_disk import disk_size_gib
 from private_api import pinned_kubeconfig_ca
 
 
@@ -75,7 +76,7 @@ def approved_binding(path, digest, cluster):
 def provider_detached(disk, project, disk_id):
     metadata, spec, status = disk["metadata"], disk["spec"], disk["status"]
     if (metadata["id"] != disk_id or metadata["parent_id"] != project
-            or spec["type"] != "NETWORK_SSD" or int(spec["size_gibibytes"]) != 128):
+            or spec["type"] != "NETWORK_SSD" or disk_size_gib(disk) != 128):
         raise ValueError("Nebius returned a disk different from the funded training disk")
     # Nebius CLI JSON omits unset protobuf scalar fields.
     return (status["state"] == "READY" and status.get("reconciling", False) is False
