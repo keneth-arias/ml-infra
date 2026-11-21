@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Build exactly the committed worker sources and retain the OCI index for promotion.
+set -euo pipefail
+if (( $# != 2 )); then
+  echo "Usage: build-worker GIT_COMMIT NEW_OUTPUT_DIRECTORY" >&2
+  exit 2
+fi
+repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+sha=$(git -C "$repo" rev-parse --verify --end-of-options "$1^{commit}")
+umask 077
+mkdir -- "$2"
+out=$(realpath "$2")
+path=bootstrap/nebius/management/rootless
+git -C "$repo" archive "$sha:$path" | docker buildx build \
+  --platform linux/amd64 --provenance=mode=min \
+  --label "org.opencontainers.image.source=https://github.com/keneth-arias/ml-infra" \
+  --label "org.opencontainers.image.revision=$sha" \
+  --tag "ghcr.io/keneth-arias/ml-infra-sky-cpu:git-$sha" \
+  --metadata-file "$out/build.json" --output "type=oci,dest=$out/worker.tar" -
