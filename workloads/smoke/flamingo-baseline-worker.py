@@ -57,4 +57,7 @@ def collect(image_digest, output):
 
 
 if __name__ == "__main__":
-    collect(sys.argv[1], Path("/output"))
+    output = Path("/output")
+    if os.geteuid() != 1000 or output.stat().st_uid != 1000 or any(output.iterdir()):
+        raise ValueError("Expected the staged, empty baseline output owned by UID 1000")
+    collect(sys.argv[1], output)

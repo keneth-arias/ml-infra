@@ -11,12 +11,51 @@ python3 workloads/smoke/render-flamingo-baseline.py \
 
 The review record contains the exact proposed Job JSON and its SHA-256. The bounded Job first runs the packaged AWS parity comparator against the same pinned base. Budget the sequential reference and candidate loads, both language reference processes and the freeze comparison in its deadline. The comparator verifies prompt IDs, observation masks, latents, logits and generated IDs and publishes a distinct reference-parity.json receipt. Its SHA-256 is in freeze.json alongside the two independent language receipt hashes. The Job publishes the two original receipt files and freeze.json together under `flamingo-baselines/<run>/baseline` on the training claim. Each process has a distinct receipt identity. Freeze reports their ordered digests and the measured repeat tolerance. Preserve the report, both receipts, Job and Pod UIDs, observed node, provider and image ID in the attended closeout.
 
-## Pending release requirements
+## Fund and submit the baseline
 
-* Promote the paired trainer built with `FORECAST_BACKBONE=flamingo` from the committed OpenTSLM probe, plus its matching preflight image. Bind the signed release to the managed cluster and exact deployment commit.
-* Add a separately reviewed, GPU-window-only admission path for these exact Job bytes or an equivalently constrained image entrypoint. The current `episode-submit-inputs` policy holds native submissions closed and its activated grammar only accepts `episode_job.py`. Bind the baseline code, arguments, resources, node placement, environment, writable output and read-only weights. Keep native fit, CPU-only session, and held-policy restrictions intact. Validate the effective Deny binding and scoped submitter with positive and negative server dry-runs.
-* Extend the guarded launcher and off-host ledger with a baseline-specific reservation. Bind the Job digest, cluster, deployment, worker/VM, attempt, deadline and termination grace to the current approved GPU interval. Check available hour, dollar, cutoff and cleanup bounds. Reserve atomically before a create, reconcile uncertain creation by UID, and close out before another attempt. The paired-fit reservation requires a direct objective and does not fund this probe.
-* Recheck target, deployment, enrolled storage, placement, cutoff and both shutdown schedulers at dispatch. Prepare the dedicated output directory for UID 1000, attest it empty and verify the staged base. Use the same released image and qualified target runtime for subsequent restore comparisons.
+Use the signed deployment checkout, its pinned Flamingo candidate, the **original** GPU allocation scope installed on bm, the enrolled all-bound receipt and the Kubernetes UID of the approved worker. Keep all inputs in an owner-only directory. Use a fresh run name for a new authorization. Set `umask 077` before rendering the review. The staging operator verifies all weight manifest entries on the funded training disk and prepares the empty `flamingo-baselines/<run>` directory owned by UID 1000. After fencing the staging writer, preserve an owner-only JSON receipt containing the following fields and its supporting evidence.
+
+```json
+{
+  "cluster_id": "<managed cluster ID>",
+  "run": "<baseline run name>",
+  "disk_id": "<enrolled training disk ID>",
+  "weights_manifest_sha256": "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f",
+  "output_subpath": "flamingo-baselines/<baseline run name>",
+  "output_uid": 1000,
+  "output_empty": true,
+  "writer_fenced": true
+}
+```
+
+From the repo root on bm, generate the exact funding request. Use Python with the existing management host PyYAML and boto3 dependencies.
+
+```bash
+umask 077
+tool=bootstrap/nebius/management/flamingo-baseline.py
+inputs=(--scope "$original_gpu_scope" --binding "$all_bound_receipt" --review baseline-review.json
+        --staging "$staging_receipt" --node-uid "$approved_node_uid"
+        --expected-deployment "$deployment_sha256")
+python3 "$tool" describe "${inputs[@]}" > baseline-approval.json
+```
+
+The funding owner settles the preceding attempt, retains the same open VM interval, refreshes the existing accounting and publishes the resulting approval ledger with `baseline_approval` equal to this JSON object and `active_reservation` null. Record the resulting immutable ledger VersionId and exact byte SHA-256 independently. Keep the same installed cutoff and scope on both shutdown hosts. The launcher checks bm's active timer and installed scope hash and the live fw13 CronJob UID, spec, image and last successful tick.
+
+```bash
+bootstrap/nebius/with-credentials python3 "$tool" submit "${inputs[@]}" \
+  --ledger-sha256 "$approved_ledger_sha256" --ledger-version "$approved_ledger_version" \
+  --field-manager "$policy_manager" --session "$new_private_session" > baseline-submitted.json
+```
+
+The launcher verifies the managed API and operator, signed release, Ready worker UID and provider ID, detached training disk and unconditional Deny hold. A versioned ledger compare-and-swap reserves the deadline and termination grace within the remaining hour, dollar, drain and cutoff limits. The operator enrolls the reviewed Job with `suspend: true` and the reservation revision label, and compares its admitted spec to the renderer. The baseline policy permits one transition on the issued Job UID with the entire pod template preserved. The temporary role grants get and patch on this single name. The launcher exercises positive and negative server dry-runs, rechecks funding and placement, issues a UID/resourceVersion-tested patch and closes the native session. The printed receipt identifies the resulting off-host ledger version, exact Job UID and funding version.
+
+If interrupted, retain the session and active hold. Once `intent.json` exists, use the existing native close command with the same operator, target and session to revoke any credential and restore the held policy. If `release-started.json` exists and the exact UID is running or complete, run the following before removing the Job to reconcile the release and publish its receipt idempotently.
+
+```bash
+bootstrap/nebius/with-credentials python3 "$tool" record --session "$new_private_session" --scope "$original_gpu_scope"
+```
+
+For an uncertain reservation or enrollment, inspect the versioned ledger and audit the exact name, reservation label and UID. A suspended or missing Job requires attended reconciliation before any fresh approval. The funding owner retains the hold through terminal Job and Pod evidence, storage writer fencing, receipt validation and accounting closeout. Preserve the reference parity report, freeze report, both receipts and their ordered digests for selection.
 
 ## Promote the approved pair
 
