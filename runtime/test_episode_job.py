@@ -84,6 +84,18 @@ class BundleTest(unittest.TestCase):
                 publish_verified()
                 self.assertTrue((root / ".fit.receipt.json").exists())
 
+    def test_removed_armed_shutdown_file(self):
+        from episode_job import stop_requested
+
+        with tempfile.TemporaryDirectory() as folder:
+            requested = Path(folder) / "requested"
+            requested.touch()
+            self.assertFalse(stop_requested(requested))
+            requested.write_bytes(b"1")
+            self.assertTrue(stop_requested(requested))
+            requested.unlink()
+            self.assertTrue(stop_requested(requested))
+
     def test_unlisted_weight_file_is_rejected(self):
         from episode_job import verify_base
 

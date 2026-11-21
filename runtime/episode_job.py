@@ -232,6 +232,14 @@ def verify_fields(names, phase, head):
         raise ValueError("Fields outside phase schema")
 
 
+def stop_requested(path):
+    """An armed request file that disappears also stops the trainer."""
+    try:
+        return path.stat().st_size > 0
+    except FileNotFoundError:
+        return True
+
+
 def training_metrics(event):
     metrics = {
         k: float(v)
@@ -329,7 +337,7 @@ def main():
         requested = arm(control, args.stop_after_seconds)
 
     def stop_before_launch():
-        if control and requested.stat().st_size:
+        if control and stop_requested(requested):
             acknowledge(control, "stopped-before-launch")
             raise SystemExit(75)
 
@@ -603,7 +611,7 @@ def main():
                         interrupted = 0
                     if control and isinstance(event, dict) and "interrupted_at_step" in event:
                         interrupted = int(event["interrupted_at_step"])
-                    if control and requested.stat().st_size:
+                    if control and stop_requested(requested):
                         continue
                     if isinstance(event, dict) and "peak_bytes_per_rank" in event:
                         log_metrics({"peak_gpu_allocated_bytes": max(v[0] for v in event["peak_bytes_per_rank"])}, event["step"])
@@ -614,10 +622,10 @@ def main():
                 if proc.wait():
                     raise subprocess.CalledProcessError(proc.returncode, command)
             if interrupted is not None:
-                if interrupted == 0 and requested.stat().st_size:
+                if interrupted == 0 and stop_requested(requested):
                     acknowledge(control, "stopped-before-update")
                     raise SystemExit(75)
-                if not requested.stat().st_size or not 0 < interrupted < args.step:
+                if not stop_requested(requested) or not 0 < interrupted < args.step:
                     raise ValueError("Unexpected trainer interruption")
                 generation = work / f"step-{interrupted:08d}"
                 verify_result(generation)
