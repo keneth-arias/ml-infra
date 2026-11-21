@@ -1,0 +1,8 @@
+allowed_clouds: [kubernetes]
+kubernetes:
+  allowed_contexts: [prod-nebius]
+  namespace: sky-cpu
+  remote_identity: NONE
+  context_configs:
+    prod-nebius:
+      ports: podip

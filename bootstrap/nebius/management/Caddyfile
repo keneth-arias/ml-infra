@@ -1,0 +1,18 @@
+{
+	admin off
+	auto_https disable_redirects
+	grace_period 10s
+}
+
+https://sky-cpu.localhost:46582 {
+	bind 127.0.0.1
+	tls {$SKY_CPU_CERT} {$SKY_CPU_KEY}
+	basic_auth {
+		import /etc/sky-cpu/operators.caddy
+	}
+	reverse_proxy 127.0.0.1:46581 {
+		header_up -Authorization
+		header_up -X-Auth-Request-User
+		header_up -X-Auth-Request-Email
+	}
+}
