@@ -47,11 +47,20 @@ run "reject_unfunded_retention" {
 run "allocate_mock_worker" {
   command = apply
   variables {
-    worker_run = { id = "expiry-drill", start = timeadd(timestamp(), "-1h"), cutoff = timeadd(timestamp(), "1h"), other_cost_usd = 100 }
+    worker_run = {
+      id             = "expiry-drill"
+      start          = timeadd(timestamp(), "-1h")
+      cutoff         = format("%sT18:45:29Z", substr(timeadd(timestamp(), "24h"), 0, 10))
+      other_cost_usd = 100
+    }
   }
   assert {
     condition     = nebius_mk8s_v1_node_group.training["cpu"].labels["airaware-run"] == "expiry-drill"
     error_message = "Cleanup needs a cloud-level ownership label on the worker group."
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.training["cpu"].labels["airaware-cutoff"] == replace(var.worker_run.cutoff, "/[-:TZ]/", "")
+    error_message = "The expiry guard expects the exact UTC date and 24-hour time, including afternoon hours."
   }
   assert {
     condition = (

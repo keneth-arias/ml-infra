@@ -62,10 +62,9 @@ def main():
                 "apply", "-input=false", "-lock-timeout=60s", "-no-color", str(saved)
             )
     if orphans:
-        print(
-            "Run-owned groups absent from Terraform state:",
-            ", ".join(sorted(orphans)),
-            flush=True,
+        raise SystemExit(
+            "Keep cleanup armed and reconcile run-owned groups absent from Terraform state: "
+            + ", ".join(sorted(orphans))
         )
     if args.inventory and (args.apply or not releases):
         verify_inventory(
@@ -73,10 +72,6 @@ def main():
             args.project_id,
             args.cluster_id,
             json.loads(args.inventory.read_text()),
-        )
-    if orphans:
-        raise SystemExit(
-            "Keep cleanup armed and reconcile the listed live groups through the provider."
         )
 
 

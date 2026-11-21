@@ -48,8 +48,9 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         )
     accounts = scope["cleanup_accounts"]
     if (
-        set(accounts) != {"bm", "fw13"}
-        or not all(accounts.values())
+        not isinstance(accounts, dict)
+        or set(accounts) != {"bm", "fw13"}
+        or not all(isinstance(account, str) and account.strip() for account in accounts.values())
         or len(set(accounts.values())) != 2
     ):
         raise ValueError("Expected distinct identities for both cleanup hosts")

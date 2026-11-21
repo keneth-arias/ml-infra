@@ -595,6 +595,11 @@ class ReservationTests(unittest.TestCase):
                 self.assertIsInstance(caught.exception.__cause__, ClientError)
                 self.assertEqual(s3.put_object.call_count, 1)
                 self.assertEqual(s3.put_object.call_args.kwargs["IfMatch"], '"current"')
+            elif case == "invalid-cleanup-account":
+                bad_scope = dict(sc, cleanup_accounts={"bm": ["primary"], "fw13": "backup"})
+                with self.assertRaisesRegex(ValueError, "distinct identities"):
+                    reserve(s3, bad_scope, "a" * 64, 3, NOW)
+                s3.put_object.assert_not_called()
             elif case == "unversioned-write":
                 with self.assertRaisesRegex(ValueError, "inspect the off-host ledger"):
                     reserve(s3, sc, "a" * 64, 3, NOW)
@@ -636,6 +641,7 @@ class ReservationTests(unittest.TestCase):
             sc.update(stage=stage, cutoff=utc(NOW + timedelta(hours=7)))
             for case in (
                 "ok",
+                "invalid-cleanup-account",
                 "unversioned-ledger",
                 "unversioned-write",
                 "conflict",

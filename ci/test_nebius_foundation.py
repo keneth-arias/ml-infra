@@ -220,9 +220,13 @@ class LiveCleanupTest(unittest.TestCase):
                     "--cutoff",
                     "2020-01-01T00:00:00Z",
                     "--apply",
+                    "--inventory",
+                    "baseline.json",
+                    "--project-id",
+                    "project",
                 ],
             ),
-            self.assertRaisesRegex(SystemExit, "reconcile"),
+            self.assertRaisesRegex(SystemExit, "Keep cleanup armed.*gpu-orphan"),
         ):
             main()
         self.assertEqual(apply.call_count, 1)
