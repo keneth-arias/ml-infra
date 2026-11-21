@@ -1,0 +1,230 @@
+# Generated from upstream HAMi chart 2.11.0 by render.py.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hami-device-plugin-monitor
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - watch
+  - list
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - list
+  - create
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hami-scheduler
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - pods/binding
+  verbs:
+  - create
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - create
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - resourcequotas
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hami-device-plugin
+  labels:
+    app.kubernetes.io/component: hami-device-plugin
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hami-device-plugin-monitor
+subjects:
+- kind: ServiceAccount
+  name: hami-device-plugin
+  namespace: hami-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hami-scheduler-kube
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-scheduler
+subjects:
+- kind: ServiceAccount
+  name: hami-scheduler
+  namespace: hami-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hami-scheduler-volume
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+- kind: ServiceAccount
+  name: hami-scheduler
+  namespace: hami-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hami-scheduler
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hami-scheduler
+subjects:
+- kind: ServiceAccount
+  name: hami-scheduler
+  namespace: hami-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - list
+  - watch
+  - get
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hami-scheduler
+  namespace: hami-system
+  labels:
+    app.kubernetes.io/component: hami-scheduler
+    helm.sh/chart: hami-2.11.0
+    app.kubernetes.io/name: hami
+    app.kubernetes.io/instance: hami
+    app.kubernetes.io/version: 2.11.0
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hami-scheduler
+subjects:
+- kind: ServiceAccount
+  name: hami-scheduler
+  namespace: hami-system

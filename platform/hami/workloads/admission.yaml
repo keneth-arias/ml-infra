@@ -1,0 +1,157 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hami-workload-boundary
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods, pods/ephemeralcontainers, pods/resize]
+  matchConditions:
+    - name: pilot-or-hami-intent
+      expression: >-
+        request.namespace == 'hami-workloads'
+        || (has(object.metadata.annotations) && object.metadata.annotations.exists(k, k.startsWith('hami.io/')))
+        || (has(object.spec.schedulerName) && object.spec.schedulerName == 'hami-scheduler')
+        || (has(object.spec.containers) && object.spec.containers.exists(c,
+        has(c.resources) &&
+        ((has(c.resources.limits) && c.resources.limits.exists(k, k.startsWith('hami.io/')))
+        || (has(c.resources.requests) && c.resources.requests.exists(k, k.startsWith('hami.io/'))))))
+        || (has(object.spec.initContainers) && object.spec.initContainers.exists(c,
+        has(c.resources) &&
+        ((has(c.resources.limits) && c.resources.limits.exists(k, k.startsWith('hami.io/')))
+        || (has(c.resources.requests) && c.resources.requests.exists(k, k.startsWith('hami.io/'))))))
+  variables:
+    - name: optedIn
+      expression: request.namespace == 'hami-workloads'
+    - name: callerIsHAMi
+      expression: >-
+        request.userInfo.username in ['system:serviceaccount:hami-system:hami-scheduler',
+        'system:serviceaccount:hami-system:hami-device-plugin']
+    - name: currentAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: previousAnnotations
+      expression: "oldObject != null && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: allocatorKeys
+      expression: >-
+        ['hami.io/vgpu-time', 'hami.io/vgpu-node', 'hami.io/bind-time', 'hami.io/bind-phase',
+        'hami.io/vgpu-devices-allocated', 'hami.io/vgpu-devices-to-allocate']
+    - name: controls
+      expression: "['nvidia.com/use-gputype', 'nvidia.com/nouse-gputype', 'nvidia.com/use-gpuuuid', 'nvidia.com/nouse-gpuuuid', 'nvidia.com/numa-bind', 'nvidia.com/vgpu-mode']"
+    - name: baseKeys
+      expression: "['cpu', 'memory', 'ephemeral-storage']"
+    - name: shareKeys
+      expression: "['hami.io/gpu', 'hami.io/gpumem', 'hami.io/gpumem-percentage', 'hami.io/gpucores']"
+    - name: containers
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
+  validations:
+    - expression: "variables.optedIn"
+      message: Only hami-workloads may use the HAMi scheduler, resources or annotations.
+    - expression: >-
+        variables.currentAnnotations.all(k, !k.startsWith('hami.io/')
+        || (k in variables.previousAnnotations && variables.currentAnnotations[k] == variables.previousAnnotations[k])
+        || (variables.optedIn && variables.callerIsHAMi && request.operation == 'UPDATE' && k in variables.allocatorKeys))
+        && variables.previousAnnotations.all(k, !k.startsWith('hami.io/') || k in variables.currentAnnotations
+        || (variables.optedIn && variables.callerIsHAMi && k in variables.allocatorKeys))
+      message: HAMi allocator and policy annotations are reserved for the pilot runtime.
+    - expression: "!variables.optedIn || variables.currentAnnotations.all(k, !(k in variables.controls))"
+      message: Pilot workloads cannot override HAMi allocation policy.
+    - expression: >-
+        !variables.optedIn || (object.spec.schedulerName == 'hami-scheduler'
+        && has(object.spec.nodeSelector) && size(object.spec.nodeSelector) == 2
+        && 'gpu' in object.spec.nodeSelector && object.spec.nodeSelector['gpu'] == 'on'
+        && 'airaware.training/gpu-mode' in object.spec.nodeSelector
+        && object.spec.nodeSelector['airaware.training/gpu-mode'] == 'hami'
+        && (!has(object.spec.nodeName) || (oldObject != null && has(oldObject.spec.nodeName)
+        && object.spec.nodeName == oldObject.spec.nodeName))
+        && (!has(object.spec.affinity) || !has(object.spec.affinity.nodeAffinity))
+        && has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'nvidia')
+      message: Require the dedicated HAMi pool, scheduler and NVIDIA runtime. Direct node assignment is reserved for the scheduler.
+    - expression: >-
+        !variables.optedIn || (has(object.spec.tolerations)
+        && object.spec.tolerations.exists(t, t.key == 'airaware.training/gpu-mode'
+        && t.operator == 'Equal' && t.value == 'hami' && t.effect == 'NoSchedule')
+        && object.spec.tolerations.all(t, has(t.key) && ((t.key == 'airaware.training/gpu-mode'
+        && t.operator == 'Equal' && t.value == 'hami' && t.effect == 'NoSchedule')
+        || (t.key == 'nvidia.com/gpu' && t.operator == 'Exists' && t.effect == 'NoSchedule')
+        || (t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'] && t.effect == 'NoExecute'))))
+      message: Pilot workloads may tolerate only the dedicated HAMi pool and standard node unavailability taints.
+    - expression: >-
+        !variables.optedIn || (object.spec.serviceAccountName == 'hami-workload'
+        && has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken
+        && has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds > 0
+        && object.spec.activeDeadlineSeconds <= 14400
+        && object.spec.restartPolicy in ['Never', 'OnFailure']
+        && (!has(object.spec.volumes) || object.spec.volumes.all(v,
+        (has(v.emptyDir) && has(v.emptyDir.sizeLimit)) || has(v.configMap)
+        || (has(v.persistentVolumeClaim) && has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly)))
+        && (!has(object.spec.resourceClaims) || size(object.spec.resourceClaims) == 0)
+        && (!has(object.spec.resources) || ((!has(object.spec.resources.requests) || size(object.spec.resources.requests) == 0)
+        && (!has(object.spec.resources.limits) || size(object.spec.resources.limits) == 0)))
+        && (!has(object.spec.ephemeralContainers) || size(object.spec.ephemeralContainers) == 0)
+        && (!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0))
+      message: Require the token-free workload account, a bounded lifetime and approved volume types.
+    - expression: >-
+        !variables.optedIn || variables.containers.all(c,
+        c.image.matches('@sha256:[0-9a-f]{64}$')
+        && (!has(c.envFrom) || size(c.envFrom) == 0)
+        && (!has(c.env) || c.env.all(e, !e.name.startsWith('NVIDIA_') && !e.name.startsWith('CUDA_')
+        && !e.name.startsWith('VGPU_') && !e.name.startsWith('HAMI_')
+        && e.name != 'LD_PRELOAD' && (!has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))))
+        && has(c.resources) && has(c.resources.requests) && has(c.resources.limits)
+        && variables.baseKeys.all(k, k in c.resources.requests && k in c.resources.limits)
+        && c.resources.requests.all(k, k in variables.baseKeys || k in variables.shareKeys)
+        && c.resources.limits.all(k, k in variables.baseKeys || k in variables.shareKeys))
+      message: Require digest-pinned images, bounded CPU, memory and storage, and the supported HAMi resource keys.
+    - expression: >-
+        !variables.optedIn || (object.spec.containers.exists(c, 'hami.io/gpu' in c.resources.limits)
+        && variables.containers.all(c, !c.resources.limits.exists(k, k in variables.shareKeys)
+        || ('hami.io/gpu' in c.resources.limits
+        && quantity(string(c.resources.limits['hami.io/gpu'])).isGreaterThan(quantity('0'))
+        && 'hami.io/gpucores' in c.resources.limits
+        && quantity(string(c.resources.limits['hami.io/gpucores'])).isGreaterThan(quantity('0'))
+        && quantity(string(c.resources.limits['hami.io/gpucores'])).isLessThan(quantity('100'))
+        && (('hami.io/gpumem' in c.resources.limits && !('hami.io/gpumem-percentage' in c.resources.limits)
+        && quantity(string(c.resources.limits['hami.io/gpumem'])).isGreaterThan(quantity('0')))
+        || ('hami.io/gpumem-percentage' in c.resources.limits && !('hami.io/gpumem' in c.resources.limits)
+        && quantity(string(c.resources.limits['hami.io/gpumem-percentage'])).isGreaterThan(quantity('0'))
+        && quantity(string(c.resources.limits['hami.io/gpumem-percentage'])).isLessThan(quantity('100')))))))
+      message: Require a positive HAMi device count, fractional cores and exactly one positive memory allocation.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hami-workload-boundary
+spec:
+  policyName: hami-workload-boundary
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hami-workload-binding
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods/binding, bindings]
+  matchConditions:
+    - name: pilot-namespace
+      expression: "request.namespace == 'hami-workloads'"
+  validations:
+    - expression: "request.userInfo.username == 'system:serviceaccount:hami-system:hami-scheduler'"
+      message: Only the HAMi scheduler may bind a pilot Pod.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hami-workload-binding
+spec:
+  policyName: hami-workload-binding
+  validationActions: [Deny]
