@@ -13,7 +13,6 @@ import ssl
 import subprocess
 import sys
 import time
-from threading import Event
 from tempfile import TemporaryDirectory
 from urllib.request import Request, urlopen
 
@@ -222,8 +221,13 @@ def stop_worker(child, control, *, grace=75, terraform_binary="/usr/local/bin/te
 
 
 def supervise(argv, *, timeout=600):
-    stopping = Event()
-    previous = {sig: signal.signal(sig, lambda *_: stopping.set())
+    stopping = False
+
+    def request_stop(*_):
+        nonlocal stopping
+        stopping = True
+
+    previous = {sig: signal.signal(sig, request_stop)
                 for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         with TemporaryDirectory() as folder:
@@ -233,9 +237,10 @@ def supervise(argv, *, timeout=600):
             until = time.monotonic() + timeout
             while child.poll() is None:
                 remaining = until - time.monotonic()
-                if remaining <= 0 or stopping.wait(min(0.25, remaining)):
+                if remaining <= 0 or stopping:
                     stop_worker(child, control)
                     raise RuntimeError("Backup interrupted; check state lock and inventory")
+                time.sleep(min(0.25, remaining))
             if child.returncode:
                 raise RuntimeError("Backup process failed")
     finally:
