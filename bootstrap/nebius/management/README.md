@@ -25,6 +25,25 @@ Install the backend kubeconfig atomically with owner `sky-cpu` and mode 0600. Gi
 
 Revoke the old session with `"${issuer[@]}" revoke "$sessions/backend-a"`. The delete is conditional on the original marker UID. When the issued kubeconfig is available the command waits up to 75 seconds for its own SelfSubjectReview to return HTTP 401 before removing it. Verify the new session still works. If a request times out or the API returns an inconclusive status, retain the session directory and retry closeout. At closure stop the attended services, revoke each remaining session, remove delivered credential copies and capture the inventory. If the issue process lost the marker-create response, `intent.json` identifies the marker to reconcile with the operator context. Verify its name, session label, UID and immutable empty contents before removing that orphan. A run interrupted after `marker.json` was written can be closed directly with `revoke`. An unattended token broker remains a separate deployment.
 
+## Qualify the native CPU Job
+
+Use the private `cpu-submit` kubeconfig from the attended session. The [native pilot](../../../workloads/smoke/native-cpu-pilot.py) checks the managed API endpoint, CA, context, namespace and effective submitter before contacting the Jobs API. Its default operation is a strict server-side admission dry run. Before funding, a placeholder node name exercises admission with zero scheduled pods.
+
+```bash
+export NEBIUS_SUBMIT_KUBECONFIG="$sessions/native/kubeconfig"
+python3 workloads/smoke/native-cpu-pilot.py admission-check --node cpu-pilot-placeholder
+```
+
+During the funded CPU window, use the operator inventory to match the private Compute instance and its Ready Kubernetes node, confirm the CPU pool label, zero GPU groups and Ready managed CoreDNS endpoints, and record the node name in `CPU_NODE`. Use a unique run name and capture the JSON receipt outside the worker. The Job requires that exact node through the default scheduler, a single CPU and 2 GiB, and has a three-minute deadline.
+
+```bash
+python3 workloads/smoke/native-cpu-pilot.py "$run_id" --node "$CPU_NODE" --execute > "$receipts/native-job.json"
+```
+
+A successful receipt binds the returned Job and Pod UIDs to the node, the admitted image reference, the container runtime's image ID, and the in-pod checks. The probe checks that cluster DNS returns the Kubernetes Service IP and that a direct TCP connection to that IP on port 443 is blocked. It also checks UID 65532, an empty effective capability set, seccomp filtering, disabled privilege escalation and absence of a service account token. The runner deletes its Job using a UID precondition and checks that its Pods have gone before emitting success. If a create response is lost, inspect the named Job and its owner-linked Pods before retrying. A finished orphan Job expires after fifteen minutes.
+
+The native probe uses the admitted public Python image. Qualify the separate signed rootless image through the [SkyPilot worker procedure](rootless/README.md) during the same window and collect its namespace pull, logs, cancellation and teardown evidence. Cloud worker costs continue through node-group release.
+
 ## Check the allocation
 
 Keep the reviewed source, backend key, provider lock and off-host ledger under operator control. Write the scope JSON in a private file. The guard expects these keys.
