@@ -5,10 +5,12 @@ LABEL org.opencontainers.image.revision=$INFRA_SOURCE_REVISION
 USER 1000:1000
 
 FROM ghcr.io/keneth-arias/ml-infra-qwen@sha256:32b27ab5bc82060bde95e565348dd7fd54b004015cc2dddd7df0747653fbe1d9
+COPY reader/pyproject.toml reader/uv.lock /opt/reader/
+RUN --mount=type=cache,target=/root/.cache/uv UV_LINK_MODE=copy uv sync --project /opt/reader --locked --python /opt/reader-python/bin/python3.13
+COPY reader/ /opt/reader/
 COPY forecast/src/opentslm/ /opt/forecast/src/opentslm/
 COPY forecast/scripts/train_qwen_forecast.py /opt/forecast/train_qwen_forecast.py
-COPY reader/ /opt/reader/
-RUN uv sync --project /opt/reader --locked --python /opt/reader-python/bin/python3.13
+COPY episode_stop.py /opt/ml-infra/
 COPY --from=input-staging /opt/ml-infra/ /opt/ml-infra/
 ARG INFRA_SOURCE_REVISION
 ENV INFRA_SOURCE_REVISION=${INFRA_SOURCE_REVISION}
