@@ -1,0 +1,55 @@
+name: cpu-rootless-cpu
+num_nodes: 1
+resources:
+  infra: k8s/prod-nebius
+  cpus: 1
+  memory: 2
+  image_id: docker:REPLACE_WITH_QUALIFIED_DIGEST_REFERENCE
+config:
+  kubernetes:
+    remote_identity: NONE
+    pod_config:
+      spec:
+        nodeSelector:
+          airaware.training/pool: training-cpu
+        automountServiceAccountToken: false
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+          sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: '22'
+          runAsUser: 1000
+        containers:
+        - name: ray-node
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+          resources:
+            requests:
+              cpu: '1'
+              memory: 2Gi
+            limits:
+              cpu: '1'
+              memory: 2Gi
+        imagePullSecrets:
+        - name: sky-cpu-pull
+        activeDeadlineSeconds: 900
+        terminationGracePeriodSeconds: 30
+envs:
+  PILOT_RUN: rootless-cpu
+run: |-
+  timeout -k 5s 60s python3 - <<'PYTHON'
+  import os, socket
+  assert not os.path.exists('/var/run/secrets/kubernetes.io/serviceaccount/token')
+  assert os.geteuid() != 0
+  with open('/proc/self/status') as status:
+      fields = dict(line.rstrip().split(':', 1) for line in status if ':' in line)
+  assert int(fields['CapEff'], 16) == 0
+  assert int(fields['NoNewPrivs']) == 1 and int(fields['Seccomp']) == 2
+  print('CPU_PILOT_OK', os.environ['PILOT_RUN'], socket.gethostname(), flush=True)
+  PYTHON

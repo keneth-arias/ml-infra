@@ -1,0 +1,4 @@
+skypilot[kubernetes,remote]==0.14.3
+ray[default]==2.56.1
+pydantic-core==2.41.1
+click<8.3

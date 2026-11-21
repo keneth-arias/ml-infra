@@ -1,7 +1,21 @@
 project_id         = "REPLACE_WITH_PROJECT_ID"
 subnet_id          = "REPLACE_WITH_SUBNET_ID"
-kubernetes_version = "REPLACE_WITH_SUPPORTED_VERSION"
-node_pools = {
-  cpu = { platform = "REPLACE", preset = "REPLACE", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
-  gpu = { platform = "REPLACE", preset = "REPLACE", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
-}
+kubernetes_version = "1.36"
+
+# Worker-free foundation. For a separately owned cluster, also set existing_cluster_id.
+node_pools = {}
+
+# For bm management, set the one approved real egress IPv4 address in private tfvars.
+# public_api_allowed_cidrs = ["203.0.113.42/32"]
+
+# Later, after selecting and pricing a run, set worker_run and enable pools in stages.
+# worker_run = {
+#   id             = "episode-pilot"
+#   start          = "REPLACE_WITH_UTC_START"
+#   cutoff         = "REPLACE_WITH_UTC_CUTOFF"
+#   other_cost_usd = 100 # Replace with the itemized estimate through expiry.
+# }
+# node_pools = {
+#   cpu = { platform = "cpu-d3", preset = "4vcpu-16gb", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
+#   gpu = { platform = "gpu-rtx6000-a", preset = "1gpu-24vcpu-218gb", count = 1, disk_gib = 128, disk_type = "NETWORK_SSD" }
+# }

@@ -1,0 +1,56 @@
+name: Verify private rootless worker
+on:
+  pull_request:
+    paths:
+      - .github/workflows/rootless-candidate.yaml
+      - bootstrap/nebius/management/rootless/**
+      - bootstrap/nebius/releases/**
+      - ci/verify-rootless-image.py
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  pull-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prepare verification tools
+        run: |
+          set -euo pipefail
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends skopeo
+          fi
+          curl --fail --silent --show-error --location --retry 2 \
+            https://github.com/sigstore/cosign/releases/download/v2.6.2/cosign-linux-amd64 -o "$RUNNER_TEMP/cosign"
+          echo "d437b8f0d30f5dec169337607fcfa0238de1348503e175f1bb5b94330b1ee409  $RUNNER_TEMP/cosign" | sha256sum --check
+          chmod 700 "$RUNNER_TEMP/cosign"
+      - name: Cold pull the OCI index and verify the candidate
+        env:
+          REGISTRY_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d)
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          receipt=bootstrap/nebius/releases/rootless-candidate.json
+          commit=$(jq -er .build_commit "$receipt")
+          digest=$(jq -er .index "$receipt")
+          [[ $commit =~ ^[0-9a-f]{40}$ && $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(git rev-parse --verify "refs/tags/rootless-build-$commit^{commit}")" = "$commit"
+          git diff --exit-code "$commit" HEAD -- bootstrap/nebius/management/rootless \
+            ':(exclude)bootstrap/nebius/management/rootless/README.md'
+          image="ghcr.io/keneth-arias/ml-infra-sky-cpu@$digest"
+          printf '%s' "$REGISTRY_READ_TOKEN" | skopeo login --authfile "$DOCKER_CONFIG/config.json" -u "$GITHUB_ACTOR" --password-stdin ghcr.io
+          unset REGISTRY_READ_TOKEN
+          skopeo copy --all --preserve-digests --authfile "$DOCKER_CONFIG/config.json" \
+            "docker://$image" "oci:$RUNNER_TEMP/pulled:qualified"
+          python3 ci/verify-rootless-image.py "$receipt" "$RUNNER_TEMP/pulled"
+          "$RUNNER_TEMP/cosign" verify --key bootstrap/nebius/releases/qualification.pub \
+            --insecure-ignore-tlog=true -a role=rootless-cpu -a "build_commit=$commit" "$image"

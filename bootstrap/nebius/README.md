@@ -1,12 +1,14 @@
 # Nebius managed training cluster
 
-This root manages one MK8s control plane and two fixed-size worker groups. It consumes an existing project, subnet and S3 state bucket. Both worker groups use private addresses. Arrange egress for nodes pulling images and private network reachability for the operator and Flux bootstrap. Confirm the selected GPU image and device support for the target SKU before scheduling training. Pool counts and disk sizes in the example are illustrative.
+This root manages a worker-free MK8s foundation and optionally a private, fixed-size CPU or spot GPU group. Use a versioned, locked S3 backend per cluster. The CPU pilot uses one `cpu-d3 / 4vcpu-16gb` worker with a 128 GiB boot SSD. The fit uses one CPU support worker and one `gpu-rtx6000-a / 1gpu-24vcpu-218gb` worker with a $1.50/hour maximum spot bid. The cumulative experiment limits are $250, $100 in non-GPU costs and 100 allocated GPU-hours.
+
+A new managed cluster starts with a private API. For public access, set the approved operator egress IPv4 /32 in private tfvars. Existing-cluster mode reads the supplied cluster and capped spot policy from their IDs. The CPU pilot and paired GPU experiment use the owned foundation. Review the state lineage and existing groups before changing any deployed configuration. Previously provisioned pools must be reconciled before adopting timed allocation windows.
 
 ## Credentials and plan
 
 On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebius.env`. The existing CLI profile is `ml-prod`. Run from this directory. Set `NEBIUS_SA_ID` and `NEBIUS_AUTHORIZED_KEY_ID` to the IDs supplied by IAM. The command wrapper points the provider at the protected private key in `~/.config/ml-infra/nebius-private.pem` and maps the workspace's owner-only S3 credential file into the subprocess environment. Override the paths with `NEBIUS_PRIVATE_KEY_FILE` or `ML_INFRA_ENV_FILE`. Keep these files on the runner.
 
-1. Copy `terraform.tfvars.example` to `terraform.tfvars` and enter the project, subnet, Kubernetes version and regional pool settings. Confirm available GPU quota and price. Copy `backend.tfbackend.example` to `prod.tfbackend` and enter the private, versioned state bucket and regional endpoint.
+1. Copy `terraform.tfvars.example` to `terraform.tfvars` and enter the project, subnet and Kubernetes version. Keep the foundation's `node_pools` empty. Confirm available GPU quota and price. Copy `backend.tfbackend.example` to `prod.tfbackend` and enter the private, versioned state bucket and regional endpoint.
 2. Configure a named CLI profile using the same registered key. The final command below queries the cluster list.
 
    ```bash
@@ -26,7 +28,7 @@ On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebi
    terraform show mk8s.tfplan
    ```
 
-4. After approving the reviewed plan and its cost, run `./with-credentials terraform apply mk8s.tfplan`. From a runner with subnet reachability, retrieve credentials into a dedicated kubeconfig before bootstrapping Flux.
+4. For an approved worker-free foundation run `./with-credentials ./apply-foundation --apply mk8s.tfplan`. Use the [guarded worker commands](management/README.md) for every subsequent allocation. Both cleanup hosts need live project and state access before worker provisioning. For the private API, from a runner with subnet reachability, retrieve credentials into a dedicated kubeconfig before bootstrapping Flux.
 
    ```bash
    cluster_id=$(./with-credentials terraform output -raw cluster_id)

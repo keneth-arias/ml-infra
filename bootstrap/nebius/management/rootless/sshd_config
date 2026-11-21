@@ -1,0 +1,19 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /home/sky/.ssh/host_ed25519
+AuthorizedKeysFile /home/sky/.ssh/authorized_keys
+PidFile /home/sky/.ssh/sshd.pid
+AllowUsers sky
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PermitUserEnvironment no
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+X11Forwarding no
+MaxSessions 32
+Subsystem sftp internal-sftp
