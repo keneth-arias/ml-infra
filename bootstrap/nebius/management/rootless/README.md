@@ -46,3 +46,15 @@ skopeo inspect --authfile "$private_authfile" --raw "docker://$repository@$index
 ```
 
 Compare the registry index against the build receipt. Use separate pull-only credentials to fetch the index, platform manifest and blobs before pinning the approved digest in the production admission policy.
+
+### Refresh the worker lock
+
+Resolve on linux/amd64 with CPython 3.11 and the base image's pip. SkyPilot 0.14.3 requires Click below 8.2, which tightens the top-level cap. The qualified Pydantic 2.12.0 distribution requires exactly pydantic-core 2.41.1. Keep those versions together during updates. Downloading the committed hashes replays the qualified wheel set. For a dependency update, generate a fresh resolver report in a disposable environment and emit one wheel hash per resolved package. Preserve the separate build tools, review the diff, run the image's `pip check`, then repeat qualification.
+
+```bash
+dir=bootstrap/nebius/management/rootless
+python3.11 -m pip install --dry-run --ignore-installed --only-binary=:all: \
+  --report "$output/resolver.json" -r "$dir/requirements.in" setuptools wheel packaging
+jq -r '.install[] | "\(.metadata.name | ascii_downcase | gsub("[-_.]+"; "-"))==\(.metadata.version) --hash=sha256:\(.download_info.archive_info.hashes.sha256)"' \
+  "$output/resolver.json" | LC_ALL=C sort > "$output/requirements.proposed.txt"
+```
