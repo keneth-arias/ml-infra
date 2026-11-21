@@ -74,12 +74,6 @@ python3 "$stack/backup-artifacts.py" snapshot --bucket "$tracking_bucket" --pref
 (cd "$work" && sha256sum metadata.dump artifacts/manifest.json > backup.sha256)
 ```
 
-Copy the backup and its digests to the approved private recovery location before releasing the original disk. Exercise restore into a fresh database and a separate, empty versioned bucket. Budget their temporary lifetime. Verify both digests against the independently retained receipt before restore. Use the restore operator for the isolated bucket, provision its own application role, and keep the original database and bucket quiescent or isolated.
+Copy the backup and digests to the approved private recovery location. Follow the [restore and cutback procedure](recovery.md#rehearse-recovery-on-the-existing-database-disk) to verify the same run against fresh database and artifact stores and again after returning to the original. Use the [management reporting command](recovery.md#read-the-private-tracking-service-from-bm) to export final curves before releasing the support worker.
 
-```bash
-(cd "$work" && sha256sum --check backup.sha256)
-python3 "$stack/backup-artifacts.py" restore --bucket "$restore_bucket" --prefix artifacts/ \
-  --directory "$work/artifacts" --max-bytes 1073741824 --max-objects 8192
-```
-
-Restore the dump with `pg_restore --exit-on-error --single-transaction` into the empty database with the application role available. Start the isolated TLS proxy and MLflow against the restored stores. From the verified trainer, pass the original inner tracking receipt to `tracking-roundtrip.py --read-receipt`. Record matching run, metric and artifact digest and denials for missing and invalid credentials. Re-enable production MLflow if the experiment continues. At final close, retire the service and its credentials, record the retained PV and exact artifact versions with their owners and expiry, and reconcile their cost through deletion. The worker cutoff controls continue throughout.
+At final close, retire the service and its credentials, record the retained PV and exact artifact versions with their owners and expiry, and reconcile their cost through deletion. The worker cutoff controls continue throughout.
