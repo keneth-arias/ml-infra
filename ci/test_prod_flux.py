@@ -146,7 +146,12 @@ class ProductionFluxTests(unittest.TestCase):
                 verb, resource = argv[3:5]
                 if "--subresource=exec" in argv:
                     seen.add((namespace, verb, resource))
-                allowed = released and (namespace, verb, resource) == ("training", "create", "jobs.batch")
+                rule = (verb, resource, next((arg for arg in argv if arg.startswith("--subresource=")), ""))
+                allowed = released and namespace == "training" and rule in {
+                    ("create", "jobs.batch", ""), ("get", "jobs.batch", ""),
+                    ("list", "jobs.batch", ""), ("watch", "jobs.batch", ""),
+                    ("get", "pods", ""), ("list", "pods", ""), ("get", "pods", "--subresource=log"),
+                }
                 return subprocess.CompletedProcess(argv, 0 if allowed else 1, "yes" if allowed else "no", "")
 
             with patch.object(subprocess, "run", side_effect=respond), patch("builtins.print"):
