@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from episode_job import verify_fit_result
+from episode_job import sha256, verify_fit_result, verify_resume_checkpoint
 from opentslm.forecast_checkpoint import finish_direct, publish
 
 
@@ -22,10 +22,11 @@ class DirectReceiptTest(unittest.TestCase):
                         direct_objective="physical-mae", input_manifest_sha256="fit", validation_manifest_sha256="validation")
         history = []
         for step, outcome in ((500, "running"), (1000, "early-stopped")):
-            history.append(dict(step=step, outcome=outcome, best_step=500, best_mae=1.0))
+            history.append(dict(step=step, outcome=outcome, best_step=500, best_mae=1.0,
+                                next_eval_step=1000 if step == 500 else None, patience=0))
             stage = self.root / ".saving"
             stage.mkdir()
-            (stage / "training.pt.json").write_text(json.dumps({"evaluations": history}))
+            (stage / "training.pt.json").write_text(json.dumps({"evaluations": history, "scheduler": {}}))
             publish(self.root, stage, step, identity)
         self.receipt = finish_direct(self.root, identity, 1000, history)
 
@@ -41,6 +42,23 @@ class DirectReceiptTest(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.artifact.write_text(json.dumps({**self.receipt, field: value}))
                 self.verify()
+
+    def test_funded_resume_matches_the_recoverable_generation(self):
+        def pin(step):
+            return f'{step}:{sha256(self.root / f"step-{step:08d}" / "manifest.json")}'
+
+        self.args.resume_checkpoint = pin(1000)
+        verify_resume_checkpoint(self.root, self.artifact, self.args, self.spec)
+        self.args.resume_checkpoint = pin(500)
+        with self.assertRaisesRegex(ValueError, "different generation"):
+            verify_resume_checkpoint(self.root, self.artifact, self.args, self.spec)
+        self.args.resume_checkpoint = pin(1000)
+        (self.root / "step-00000500/training.pt.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "different generation"):
+            verify_resume_checkpoint(self.root, self.artifact, self.args, self.spec)
+        self.args.resume_checkpoint = "1000:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "manifest differs"):
+            verify_resume_checkpoint(self.root, self.artifact, self.args, self.spec)
 
     def test_wrong_best_pointer(self):
         (self.root / "best").write_text("step-00001000")

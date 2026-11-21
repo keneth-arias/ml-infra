@@ -35,9 +35,7 @@ receipt=$("${kube[@]}" create -f "$tmp/pre.json" -o name)
   exit 1
 }
 python3 "$base/episode-profile.py" "$mode" "$@" --target "$target" > "$tmp/task.yaml"
-if [[ "$mode" == job ]]; then
-  "${kube[@]}" create -f "$tmp/task.yaml"
-else
+if [[ "$mode" == sky ]]; then
   cluster_name=$3
   if [[ $target == prod-nebius ]]; then cluster_name="nebius-$3"; fi
   owned=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config"]["kubernetes"]["pod_config"]["metadata"]["labels"].get("airaware.training/sky-cluster",""))' "$tmp/task.yaml")
@@ -48,5 +46,12 @@ else
       exit 1
     }
   fi
+fi
+if [[ "$target" == prod-nebius ]]; then
+  python3 "$base/../../bootstrap/nebius/fit_attempt.py" reserve "$tmp/pre.json" "$tmp/task.yaml"
+fi
+if [[ "$mode" == job ]]; then
+  "${kube[@]}" create -f "$tmp/task.yaml"
+else
   sky launch -y -c "$cluster_name" "$tmp/task.yaml"
 fi
