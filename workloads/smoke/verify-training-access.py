@@ -79,8 +79,20 @@ def main():
         trainer = invalid if mode == "job" else args.trainer_image
         preflight = invalid if mode == "preflight" else args.preflight_image
         check(render_job(mode, trainer, preflight), "unapproved-" + mode, "approved image")
+        check(render_job(mode, args.preflight_image, args.trainer_image), "swapped-" + mode, "approved image")
         check(render_job(mode, args.trainer_image, args.preflight_image), mode)
         check(render_job(mode, args.trainer_image, args.preflight_image, paired=True), "paired-" + mode)
+    for pool in (None, "training-gpu"):
+        job = render_job("preflight", args.trainer_image, args.preflight_image)
+        pod = job["spec"]["template"]["spec"]
+        if pool is None:
+            del pod["nodeSelector"]
+        else:
+            pod["nodeSelector"]["airaware.training/pool"] = pool
+        check(job, "misplaced-preflight", "matching CPU or GPU training pool")
+    job = render_job("preflight", args.trainer_image, args.preflight_image)
+    job["spec"]["activeDeadlineSeconds"] = 601
+    check(job, "overlong-preflight", "at most 600 seconds")
     for label, field, value, message in (
         ("other-account", "serviceAccountName", "default", "token-free"),
         ("mounted-token", "automountServiceAccountToken", True, "token-free"),

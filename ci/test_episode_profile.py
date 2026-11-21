@@ -167,7 +167,7 @@ class ProfileTest(unittest.TestCase):
 
 
 class NebiusRenderTest(unittest.TestCase):
-    def render(self, mode):
+    def render(self, mode, *options):
         import json
         import subprocess
 
@@ -175,7 +175,7 @@ class NebiusRenderTest(unittest.TestCase):
         args = [str(script), mode, "fit", "direct", "cloud-run", "--image",
                 "ghcr.io/example/trainer@sha256:" + "a" * 64, "--bundle-sha256",
                 "b" * 64, "--schedule", "4", "--step", "4", "--target", "prod-nebius"]
-        return json.loads(subprocess.check_output(["python3", *args]))
+        return json.loads(subprocess.check_output(["python3", *args, *options]))
 
     def test_cloud_fit_and_cpu_preflight(self):
         for mode in ("job", "preflight"):
@@ -187,13 +187,20 @@ class NebiusRenderTest(unittest.TestCase):
             self.assertTrue(inputs["persistentVolumeClaim"]["readOnly"])
             if mode == "preflight":
                 self.assertNotIn("tolerations", pod)
-                self.assertNotIn("nodeSelector", pod)
+                self.assertEqual(pod["nodeSelector"], {"airaware.training/pool": "training-cpu"})
             else:
                 self.assertEqual(pod["nodeSelector"]["airaware.training/pool"], "training-gpu")
                 self.assertEqual(pod["containers"][0]["resources"]["limits"]["nvidia.com/gpu"], 1)
                 env = {item["name"]: item for item in pod["containers"][0]["env"]}
                 self.assertIn("secretKeyRef", env["MLFLOW_TRACKING_TOKEN"]["valueFrom"])
                 self.assertIn("configMapKeyRef", env["MLFLOW_TRACKING_URI"]["valueFrom"])
+
+    def test_cloud_preflight_deadline_on_first_attempt_and_retry(self):
+        for attempt, deadline, expected in (("1", "14400", 600), ("2", "120", 120)):
+            job = self.render("preflight", "--attempt", attempt, "--deadline-seconds", deadline)
+            self.assertEqual(job["spec"]["activeDeadlineSeconds"], expected)
+            self.assertEqual(job["spec"]["template"]["spec"]["nodeSelector"], {"airaware.training/pool": "training-cpu"})
+        self.assertEqual(self.render("job", "--deadline-seconds", "14400")["spec"]["activeDeadlineSeconds"], 14400)
 
     def test_cloud_sky_context_and_deadline(self):
         task = self.render("sky")
