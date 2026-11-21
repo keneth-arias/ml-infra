@@ -56,3 +56,9 @@ If a create started and its response was lost, an absent object leaves the sessi
 Run close again. It checks live ownership first even when audit evidence is present. The completion checkpoint is `closed-reconciled.json`.
 
 The `check-held` command compares the live policy and binding on standard input with the canonical held configuration. It is a read-only diagnostic. If the managed API becomes unreachable, keep the worker shutdown schedulers armed, preserve the session directory and reconcile the grant, policy and workloads as soon as the API is reachable. Reconcile outstanding Jobs before ordinary worker release.
+
+## Flamingo direct forecast fits
+
+Build the committed OpenTSLM forecast code and private reader with the paired image builder. Set `FORECAST_BACKBONE=flamingo` for this build and supply both trainer and preflight image tags. This selects the Gemma 3 runtime. Promote both OCI digests through the existing signed deployment and native admission process on the verified Nebius managed cluster.
+
+Pass `--flamingo-binding-sha256` with the digest exported by AirAware to the staging Job and to `launch-episode.sh --nebius job fit direct`. Use the binding’s original fit and inner-validation manifest hashes and its new base weights hash for the cache. The worker reconstructs and checks the exact binding, rehashes the mounted base, verifies both original cohort manifests and supplies the binding file to the trainer. Provision an independent funded fit request for these artifact and render hashes. Use the seed screen, cooperative shutdown, tracking and checkpoint recovery flow described above.

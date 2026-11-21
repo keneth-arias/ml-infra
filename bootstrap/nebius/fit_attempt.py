@@ -54,6 +54,8 @@ def describe(preflight, task):
         "preflight_image": validator["image"],
         "trainer_image": next(v["value"] for v in validator["env"] if v["name"] == "EPISODE_IMAGE"),
     }
+    if "--flamingo-binding-sha256" in cmd:
+        pair["flamingo_binding"] = arg("flamingo-binding-sha256")
     return {
         "mode": mode,
         "task_sha256": digest(task),

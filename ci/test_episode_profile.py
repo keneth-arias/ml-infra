@@ -143,6 +143,26 @@ class ProfileTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("gpu_worker.py", (repo / path).read_text())
 
+    def test_flamingo_selects_native_nebius_and_binds_its_funding_request(self):
+        import sys
+        repo = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(repo / "bootstrap/nebius"))
+        from fit_attempt import describe
+
+        script = repo / "workloads/sky/episode-profile.py"
+        pin = "f" * 64
+        args = ["fit", "direct", "flamingo-control", "--target", "prod-nebius",
+                "--image", "trainer@sha256:" + "a"*64, "--preflight-image", "preflight@sha256:" + "b"*64,
+                "--cached-weights-sha256", "e"*64, "--bundle-sha256", "c"*64,
+                "--validation-sha256", "d"*64, "--step", "14084", "--schedule", "14084",
+                "--direct-objective", "normalized-mse", "--graceful-stop", "--flamingo-binding-sha256", pin]
+        pre, job = (subprocess.check_output([sys.executable, script, mode, *args]) for mode in ("preflight", "job"))
+        self.assertEqual(describe(pre, job)["pair"]["flamingo_binding"], pin)
+        for target, mode in (("dev-bm", "job"), ("prod-nebius", "sky")):
+            with self.subTest(target=target, mode=mode):
+                args[args.index("--target") + 1] = target
+                self.assertNotEqual(subprocess.run([sys.executable, script, mode, *args], capture_output=True).returncode, 0)
+
     def test_paired_roles_have_separate_immutable_mounts_in_each_format(self):
         import json
         import subprocess

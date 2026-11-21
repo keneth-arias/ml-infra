@@ -20,6 +20,28 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+FLAMINGO_WEIGHTS = "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f"
+COHORT_WEIGHTS = "1d76cc3cfd4c15f9c749372611e5ca6e0b6f910b1fcf0551ce9157e9bfef29c1"
+
+
+def flamingo_binding(digest, fit, validation):
+    """Reconstruct the independently pinned AirAware binding without mounting extra data."""
+    if not all(re.fullmatch("[a-f0-9]{64}", value or "") for value in (digest, fit, validation)) or fit == validation:
+        raise ValueError("Expected distinct pinned trainer roles and a Flamingo binding digest")
+    record = {
+        "schema": "airaware-flamingo-binding-v1",
+        "model": "opentime/tslm-nov26",
+        "revision": "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983",
+        "weights_manifest_sha256": FLAMINGO_WEIGHTS,
+        "cohort_weights_manifest_sha256": COHORT_WEIGHTS,
+        "roles": {"fit": fit, "inner_validation": validation},
+    }
+    raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("Flamingo binding differs from the approved base and role digests")
+    return raw
+
+
 def bundle_manifest(manifest, digest, phase, head, *, paired=False):
     if manifest.is_symlink() or sha256(manifest) != digest:
         raise ValueError("Phase manifest checksum mismatch")
@@ -290,6 +312,8 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
     if args.direct_objective:
         expected.update(logical_run=args.run_id, direct_objective=args.direct_objective,
                         input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
+        if getattr(args, "flamingo_binding_sha256", None):
+            expected.update(backbone="flamingo", binding_sha256=args.flamingo_binding_sha256)
         if result is not None and result["identity"] != identity:
             raise ValueError("Terminal result carries another run identity")
     if "point_control_of" in spec:
@@ -328,6 +352,7 @@ def main():
     parser.add_argument("--seed", type=int, default=27)
     parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
     parser.add_argument("--validation-sha256")
+    parser.add_argument("--flamingo-binding-sha256")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     parser.add_argument("--resume", action="store_true")
@@ -337,6 +362,11 @@ def main():
     parser.add_argument("--graceful-stop", action="store_true")
     parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
+    binding = None
+    if args.flamingo_binding_sha256 is not None:
+        if not args.direct_objective:
+            parser.error("Flamingo requires a paired direct forecast fit")
+        binding = flamingo_binding(args.flamingo_binding_sha256, args.bundle_sha256, args.validation_sha256)
     if args.resume_checkpoint is not None and (not args.direct_objective or not args.resume or
             not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", args.resume_checkpoint)):
         parser.error("Checkpoint pin requires a paired resume and STEP:SHA256")
@@ -370,6 +400,8 @@ def main():
         from opentslm.forecast_inputs import direct_cohorts
 
         spec = bundle_manifest(root / "manifest.json", args.bundle_sha256, "fit", "direct", paired=True)
+        if binding and spec["weights_manifest_sha256"] != COHORT_WEIGHTS:
+            raise ValueError("Flamingo requires the original Qwen cohort manifest")
         validation_root = Path("/validation")
         fit_rows, validation_rows = direct_cohorts(
             root / "manifest.json", args.bundle_sha256, validation_root / "manifest.json",
@@ -381,6 +413,10 @@ def main():
     else:
         spec = bundle(root, args.bundle_sha256, args.phase, args.head)
     bundle_verified = time.monotonic()
+    if binding:
+        # direct_cohorts already verified both original immutable role manifests.
+        # Bind the runtime receipt and checkpoint verification to the actual model base.
+        spec = {**spec, "weights_manifest_sha256": FLAMINGO_WEIGHTS}
     verify_base(weights, spec["weights_manifest_sha256"])
     weights_verified = time.monotonic()
     matched = "point_control_of" in spec
@@ -541,12 +577,18 @@ def main():
     identity = {
         k: v
         for k, v in vars(args).items()
-        if (v is not None or k not in ("direct_objective", "validation_sha256"))
+        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256"))
         and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]
     experiment = mlflow.set_experiment("airaware-pm25")
     with ExitStack() as stack:
+        if binding:
+            staged = stack.enter_context(NamedTemporaryFile(prefix="flamingo-binding-", suffix=".json"))
+            staged.write(binding)
+            staged.flush()
+            command.extend(["--backbone", "flamingo", "--flamingo-binding", staged.name,
+                            "--flamingo-binding-sha256", args.flamingo_binding_sha256])
         reused, publish_verified = stack.enter_context(
             stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
         )

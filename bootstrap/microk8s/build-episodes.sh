@@ -4,6 +4,10 @@ if (( $# < 3 || $# > 4 )) || [[ "${4:-}" == "$3" ]]; then
   echo 'Usage: build-episodes.sh OpenTSLM_CHECKOUT AIR_AWARE_CHECKOUT TRAINER_TAG [DISTINCT_PREFLIGHT_TAG]' >&2
   exit 2
 fi
+case "${FORECAST_BACKBONE:-qwen}" in
+  qwen|flamingo) backbone="${FORECAST_BACKBONE:-qwen}" ;;
+  *) echo 'FORECAST_BACKBONE must be qwen or flamingo.' >&2; exit 2 ;;
+esac
 infra=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 forecast_sha=$(git -C "$1" rev-parse HEAD)
 reader_sha=$(git -C "$2" rev-parse HEAD)
@@ -14,7 +18,7 @@ git -C "$1" archive "$forecast_sha" src/opentslm scripts/train_qwen_forecast.py 
 git -C "$2" archive "$reader_sha:tools/timenet-smoke" | tar --same-permissions -x -C "$stage/reader"
 infra_sha=$(git -C "$infra" rev-parse HEAD)
 git -C "$infra" archive "$infra_sha:runtime" episode_job.py episode_stop.py stage_episode_inputs.py versioned_episode_inputs.py Dockerfile.episodes Dockerfile.preflight | tar --same-permissions -x -C "$stage"
-docker build --build-arg "INFRA_SOURCE_REVISION=$infra_sha" -f "$stage/Dockerfile.episodes" -t "$3" \
+docker build --build-arg "FORECAST_BACKBONE=$backbone" --build-arg "INFRA_SOURCE_REVISION=$infra_sha" -f "$stage/Dockerfile.episodes" -t "$3" \
   --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" --build-arg "AIRAWARE_SOURCE_REVISION=$reader_sha" "$stage"
 docker image inspect "$3" --format '{{json .RepoDigests}}'
 if (( $# == 4 )); then

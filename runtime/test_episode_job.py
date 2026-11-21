@@ -7,6 +7,24 @@ from episode_job import bundle, sha256
 
 
 class BundleTest(unittest.TestCase):
+    def test_flamingo_binding_binds_both_cohorts_and_frozen_backbone(self):
+        import hashlib
+        from episode_job import COHORT_WEIGHTS, FLAMINGO_WEIGHTS, flamingo_binding
+
+        fit, validation = "c" * 64, "d" * 64
+        record = {
+            "schema": "airaware-flamingo-binding-v1", "model": "opentime/tslm-nov26",
+            "revision": "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983",
+            "weights_manifest_sha256": FLAMINGO_WEIGHTS, "cohort_weights_manifest_sha256": COHORT_WEIGHTS,
+            "roles": {"fit": fit, "inner_validation": validation},
+        }
+        expected = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        digest = hashlib.sha256(expected).hexdigest()
+        self.assertEqual(flamingo_binding(digest, fit, validation), expected)
+        for pin, left, right in [(digest, validation, fit), (digest, fit, fit), ("0" * 64, fit, validation)]:
+            with self.assertRaises(ValueError):
+                flamingo_binding(pin, left, right)
+
     def test_stage_identity_and_exact_files(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
