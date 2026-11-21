@@ -9,6 +9,8 @@ Group=sky-cpu
 UMask=0077
 StateDirectoryMode=0700
 StateDirectory=sky-cpu
+RuntimeDirectory=sky-cpu-target
+RuntimeDirectoryMode=0755
 Environment=HOME=/var/lib/sky-cpu
 Environment=PATH=/opt/sky-cpu/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PIP_NO_INDEX=1

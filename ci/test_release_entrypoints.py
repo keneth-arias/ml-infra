@@ -26,6 +26,25 @@ def entrypoint(script):
 
 
 class ReleaseEntrypointTest(unittest.TestCase):
+    def test_healthy_sky_backend_must_match_cluster_ca_and_namespace(self):
+        from production_target import require_sky
+        url = "https://pilot.example"
+        env = {"NEBIUS_CPU_SKY_URL": url, "SKYPILOT_API_SERVER_ENDPOINT": url,
+               "NEBIUS_TRAINING_CLUSTER_ID": "mk8scluster-test", "NEBIUS_CA_BUNDLE_SHA256": "a" * 64,
+               "NETRC": "/fixture/reader", "REQUESTS_CA_BUNDLE": "/fixture/ca"}
+        info = {"server": {"url": url, "status": "healthy", "version": "0.14.3"}, "client": {"version": "0.14.3"}}
+        target = {"cluster_id": env["NEBIUS_TRAINING_CLUSTER_ID"], "ca_sha256": "a" * 64, "namespace": "sky-cpu"}
+        for change in ({}, {"cluster_id": "other"}, {"ca_sha256": "b" * 64}, {"namespace": "dev"}):
+            with self.subTest(change=change), patch.dict(os.environ, env), patch.object(
+                subprocess, "check_output", side_effect=[json.dumps(info), json.dumps(target | change)]
+            ) as call:
+                if change:
+                    with self.assertRaisesRegex(ValueError, "different Kubernetes target"):
+                        require_sky("sky-cpu")
+                else:
+                    require_sky("sky-cpu")
+                self.assertIn(url + "/.well-known/nebius-target", call.call_args.args[0])
+
     def test_probe_and_launch_reject_unapproved_cpu_image_before_contact(self):
         main = entrypoint("smoke/check-cpu-admission.py")
         with (

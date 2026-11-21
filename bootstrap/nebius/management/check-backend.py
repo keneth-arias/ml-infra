@@ -1,6 +1,7 @@
 """Validate the dedicated SkyPilot service environment before opening its listener."""
 
 import hashlib
+import json
 from importlib.metadata import version
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ import yaml
 
 MANAGEMENT = Path(__file__).resolve().parent
 sys.path.insert(0, str(MANAGEMENT.parents[2] / "workloads/sky"))
-from production_target import kubectl_client
+from production_target import backend_target, kubectl_client
 
 
 def check_config(env, contexts, installed_version):
@@ -68,6 +69,12 @@ def main():
     check_config(os.environ, contexts, version("skypilot"))
     check_wheels(os.environ, MANAGEMENT / "rootless/build-wheels.txt")
     kubectl_client("sky-cpu", "sky-backend", direct=True)
+    # The authenticated proxy serves this nonsecret record while the unit is running.
+    directory = Path(os.environ["RUNTIME_DIRECTORY"])
+    target = directory / "target.json.new"
+    target.write_text(json.dumps(backend_target("sky-cpu")))
+    target.chmod(0o644)
+    target.replace(directory / "target.json")
 
 
 if __name__ == "__main__":

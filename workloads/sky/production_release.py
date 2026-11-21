@@ -75,7 +75,7 @@ def current_release():
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     git = ["/usr/bin/git", "--no-replace-objects", "-C", str(REPO)]
     commit = subprocess.check_output([*git, "rev-parse", "--verify", "HEAD"], env=env, text=True).strip()
-    subprocess.run([*git, "diff", "--quiet", "HEAD", "--", "workloads", "bootstrap/nebius"],
+    subprocess.run([*git, "diff", "--quiet", "HEAD", "--", "workloads", "bootstrap/nebius", "platform/overlays/prod", "clusters/prod-nebius"],
                    env=env, check=True)
     return verify_release(TRUST, os.environ["NEBIUS_TRAINING_CLUSTER_ID"], commit)
 
@@ -111,7 +111,8 @@ def check_episode(images, preflight, task):
         if resources["infra"] != "k8s/prod-nebius":
             raise ValueError("Expected the managed SkyPilot target")
         container = single_container(task["config"]["kubernetes"]["pod_config"]["spec"])
-        require_image(images, "trainer", resources["image_id"].removeprefix("docker:"))
+        if resources["image_id"] != "docker:" + images["trainer"]:
+            raise ValueError("Image differs from the approved trainer role")
         if "image" in container:
             require_image(images, "trainer", container["image"])
         require_image(images, "trainer", task["envs"]["EPISODE_IMAGE"])

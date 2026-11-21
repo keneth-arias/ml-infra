@@ -306,7 +306,7 @@ class FitAttemptTests(unittest.TestCase):
         # The real renderer, launcher, funding guard and SDK call signatures run.
         # Stand-ins for the identity and release checks, submitters and storage
         # keep the native and SkyPilot paths entirely local.
-        for mode in ("job", "sky"):
+        for mode in ("job", "sky", "preflight"):
             for outcome in (
                 "approved",
                 "early-release-denied",
@@ -319,8 +319,10 @@ class FitAttemptTests(unittest.TestCase):
                 "dirty-retry",
                 "fresh-retry",
             ):
+                if mode == "preflight" and outcome not in ("approved", "early-release-denied", "preflight-failed"):
+                    continue
                 retry = outcome.endswith("-retry")
-                args, request, task = inputs(mode, *(("--attempt", "2") if retry else ()))
+                args, request, task = inputs("job" if mode == "preflight" else mode, *(("--attempt", "2") if retry else ()))
                 with self.subTest(mode=mode, outcome=outcome), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
 
@@ -458,6 +460,14 @@ def client(*a, **kw):
                     )
                     submitted = root / "submitted"
                     hold = json.loads((root / "ledger.json").read_bytes())["active_reservation"]
+                    if mode == "preflight":
+                        self.assertEqual(result.returncode == 0, outcome == "approved", result.stderr)
+                        self.assertEqual((root / "preflight").exists(), outcome != "early-release-denied")
+                        self.assertTrue((root / "early-preflight").is_file())
+                        self.assertFalse((root / "funding-guard").exists())
+                        self.assertFalse((root / "s3-access").exists())
+                        self.assertFalse(submitted.exists())
+                        continue
                     for stage in ("early", "late"):
                         if stage == "late" and outcome in ("early-release-denied", "preflight-failed"):
                             self.assertFalse((root / "late-task").exists())

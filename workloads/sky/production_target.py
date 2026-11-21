@@ -83,6 +83,21 @@ def require_sky(namespace):
         raise ValueError("Unexpected SkyPilot endpoint, health or version")
 
 
+    identity = json.loads(subprocess.check_output(
+        ["/usr/bin/curl", "--disable", "--silent", "--show-error", "--fail", "--proto", "=https",
+         "--max-time", "10", "--cacert", os.environ["REQUESTS_CA_BUNDLE"],
+         "--netrc-file", os.environ["NETRC"], expected.rstrip("/") + "/.well-known/nebius-target"],
+        timeout=15,
+    ))
+    if identity != backend_target(namespace):
+        raise ValueError("The authenticated SkyPilot backend serves a different Kubernetes target")
+
+
+def backend_target(namespace):
+    return {"cluster_id": os.environ["NEBIUS_TRAINING_CLUSTER_ID"],
+            "ca_sha256": os.environ["NEBIUS_CA_BUNDLE_SHA256"], "namespace": namespace}
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--check-training-submit"]:
         kubectl_client("training", "episode-submit", direct=True)
