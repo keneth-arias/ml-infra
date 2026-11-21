@@ -181,14 +181,20 @@ def exercise_release(trainer_image, preflight_image, check):
     for label, field, value, message in (
         ("other-account", "serviceAccountName", "default", "token-free"),
         ("mounted-token", "automountServiceAccountToken", True, "token-free"),
-        ("other-claim", "volumes", [{"name": "inputs", "persistentVolumeClaim": {"claimName": "scoring-fixture"}},
-                                   {"name": "state", "emptyDir": {}}], "read-only training inputs"),
-        ("writable-input", "volumes", [{"name": "inputs", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}},
-                                      {"name": "state", "emptyDir": {}}], "read-only training inputs"),
     ):
         job = render_job("job", trainer_image, preflight_image)
         job["spec"]["template"]["spec"][field] = value
         check(job, label, message)
+    for label, change in (("other-claim", {"claimName": "scoring-fixture"}),
+                          ("writable-input", {"readOnly": False})):
+        job = render_job("job", trainer_image, preflight_image)
+        inputs = next(v for v in job["spec"]["template"]["spec"]["volumes"] if v["name"] == "inputs")
+        inputs["persistentVolumeClaim"].update(change)
+        check(job, label, "read-only training inputs")
+    job = render_job("job", trainer_image, preflight_image)
+    ca = next(v for v in job["spec"]["template"]["spec"]["volumes"] if v["name"] == "tracking-ca")
+    ca["configMap"]["name"] = "unapproved-ca"
+    check(job, "substituted-tracking-ca", "the tracking CA")
     job = render_job("job", trainer_image, preflight_image)
     job["spec"]["template"]["spec"]["containers"][0]["env"].append({
         "name": "FIXTURE", "valueFrom": {"secretKeyRef": {"name": "scoring-fixture", "key": "marker"}},
