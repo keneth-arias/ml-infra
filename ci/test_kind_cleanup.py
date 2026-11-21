@@ -86,8 +86,18 @@ class KindBackup(unittest.TestCase):
                 release.assert_not_called()
 
     def test_shutdown_unlocks_and_fences_future_terraform_commands(self):
+        import signal
         import subprocess
         import time
+
+        # Portable Python builds may omit the Linux pidfd bindings. Use the
+        # distribution interpreter for this Linux integration test in that case.
+        if not (hasattr(tick.os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")):
+            distro = Path("/usr/bin/python3")
+            self.assertFalse(distro.samefile(sys.executable), "The test host needs Linux pidfd support")
+            subprocess.run([str(distro), "-B", str(Path(__file__).resolve()),
+                            "KindBackup.test_shutdown_unlocks_and_fences_future_terraform_commands"], check=True)
+            return
         with TemporaryDirectory() as folder:
             control = Path(folder)
             lock = control / "state.lock"
@@ -137,3 +147,7 @@ time.sleep(30)
                     tick.supervise(["worker"], timeout=0 if expire else 10)
                 finally:
                     stop.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
