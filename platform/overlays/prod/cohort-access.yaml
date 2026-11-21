@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: episode-scoring
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: deny-ingress, namespace: episode-scoring}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: episode-worker, namespace: training}
+automountServiceAccountToken: false
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: episode-submit-inputs}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+  # Staging runs under separate operator credentials and can populate the input claim.
+  matchConditions:
+    - name: native-submitter
+      expression: "request.userInfo.username == 'system:serviceaccount:training:episode-submit'"
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: usesGPU
+      expression: >-
+        variables.pod.containers.exists(c, has(c.resources) &&
+          ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
+           (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
+  validations:
+    # The signed trainer and preflight release will replace this hold.
+    - expression: "false"
+      message: Native training submission is closed during CPU qualification.
+    - expression: >-
+        has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'episode-worker'
+        && has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
+      message: Require the token-free episode-worker account.
+    - expression: >-
+        !has(variables.pod.volumes) || variables.pod.volumes.all(v,
+        has(v.emptyDir) || (has(v.persistentVolumeClaim) &&
+        (v.persistentVolumeClaim.claimName == 'airaware-model-state' ||
+        (v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
+        has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly))))
+      message: Native training may mount only scratch, model state and read-only training inputs.
+    - expression: >-
+        size(variables.pod.containers) == 1 && !has(variables.pod.initContainers)
+        && !has(variables.pod.ephemeralContainers) && !has(variables.pod.resourceClaims)
+        && (!has(variables.pod.imagePullSecrets) || variables.pod.imagePullSecrets.all(s, s.name == 'ghcr-pull'))
+      message: Require one training container and its approved pull credential.
+    - expression: >-
+        variables.pod.containers.all(c, !has(c.envFrom) && (!has(c.env) ||
+        c.env.all(e, !has(e.valueFrom) || has(e.valueFrom.fieldRef) ||
+        (has(e.valueFrom.configMapKeyRef) && e.valueFrom.configMapKeyRef.name == 'episode-tracking'
+        && e.valueFrom.configMapKeyRef.key == 'https-uri') ||
+        (has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name == 'episode-tracking'
+        && e.valueFrom.secretKeyRef.key == 'token'))))
+      message: Permit only the training tracking URI and token as configuration references.
+    - expression: >-
+        (!has(variables.pod.nodeName) || variables.pod.nodeName == '') &&
+        (!has(variables.pod.schedulerName) || variables.pod.schedulerName == 'default-scheduler') &&
+        has(variables.pod.nodeSelector) && 'airaware.training/pool' in variables.pod.nodeSelector &&
+        variables.pod.nodeSelector['airaware.training/pool'] == (variables.usesGPU ? 'training-gpu' : 'training-cpu')
+      message: Require the default scheduler and the matching CPU or GPU training pool.
+    - expression: >-
+        variables.usesGPU ||
+        (has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 600 &&
+        (!has(variables.pod.tolerations) || size(variables.pod.tolerations) == 0))
+      message: CPU preflight requires a deadline of at most 600 seconds and no tolerations.
+    - expression: >-
+        !variables.usesGPU || variables.pod.containers.all(c,
+        has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests && c.resources.requests['nvidia.com/gpu'] == '1' &&
+        has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits && c.resources.limits['nvidia.com/gpu'] == '1' &&
+        (!has(c.command) || !('--preflight' in c.command)) && (!has(c.args) || !('--preflight' in c.args)))
+      message: GPU jobs must request and limit exactly one GPU and run training or inference.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: episode-submit-inputs}
+spec:
+  policyName: episode-submit-inputs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: training}}

@@ -36,6 +36,9 @@ def scope():
     return dict(
         run_id="fit",
         project_id="p",
+        state_bucket="state",
+        control_bucket="controls",
+        control_project_id="management-project",
         subnet_id="s",
         cluster_id="c",
         policy_id="policy",
@@ -477,6 +480,16 @@ class ProjectionCommandTest(unittest.TestCase):
                 self.assertIn("dollar_limit_hours", data["bounds"])
                 self.assertEqual(data["fit"]["updates"], 28168)
 
+            for bad_scope in (
+                {k: v for k, v in inputs.items() if k != "control_bucket"},
+                dict(inputs, control_bucket=inputs["state_bucket"]),
+            ):
+                bad_scope["ledger_sha256"] = hashlib.sha256(raw).hexdigest()
+                (root / "scope.json").write_text(json.dumps(bad_scope))
+                receipt = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(receipt.returncode, 1)
+                self.assertIn("control_bucket", receipt.stderr)
+
 
 class ReservationTests(unittest.TestCase):
     def test_atomic_consumption_requires_current_bytes_and_two_valid_hosts(self):
@@ -506,6 +519,11 @@ class ReservationTests(unittest.TestCase):
             state_lineage="lineage",
             baseline_sha256="b" * 64,
             cleanup_accounts={"bm": "primary", "fw13": "backup"},
+            fw13_cronjob={"uid": "cron-uid", "spec_sha256": "c" * 64,
+                          "image": "local/backup@sha256:" + "1" * 64},
+            fw13_public_key_id="fw13-key",
+            fw13_tfvars_sha256="d" * 64,
+            fw13_attest_until=utc(NOW + timedelta(minutes=3)),
         )
         grants = {
             host: dict(
@@ -513,6 +531,10 @@ class ReservationTests(unittest.TestCase):
                 public_key_id=host + "-key",
                 state_bucket="state",
                 state_key="prod/mk8s/terraform.tfstate",
+                control_bucket="controls",
+                control_project_id=sc["control_project_id"],
+                timer_prefix=f"prod/mk8s/release-control/timers/{host}/",
+                timer_write=True,
                 project_id="p",
                 cluster_id="c",
                 evidence_sha256="d" * 64,
@@ -534,13 +556,15 @@ class ReservationTests(unittest.TestCase):
             s3.put_object.return_value = {"VersionId": "null" if case == "unversioned-write" else "new-version"}
 
             def read(**req):
+                self.assertEqual(req["Bucket"], "controls")
                 if req["Key"].endswith("/ledger.json"):
                     return {
                         "Body": io.BytesIO(raw if case != "stale" else b"{}"),
                         "ETag": '"current"',
                         "VersionId": "null" if case == "unversioned-ledger" else "funded-version",
                     }
-                host = req["Key"].split("/")[-1][:-5]
+                host = req["Key"].split("/")[-3]
+                self.assertEqual(req["Key"], f"prod/mk8s/release-control/timers/{host}/fit/{sc['stage']}.json")
                 data = dict(
                     host=host,
                     stage=sc["stage"],
@@ -549,6 +573,9 @@ class ReservationTests(unittest.TestCase):
                     project_id="p",
                     cluster_id="c",
                     state_lineage="lineage",
+                    state_bucket="state",
+                    control_bucket="controls" if case != "wrong-control-proof" else "another",
+                    control_project_id=sc["control_project_id"],
                     state_serial=3,
                     baseline_sha256="b" * 64,
                     timer="worker-expiry@fit.timer",
@@ -564,6 +591,13 @@ class ReservationTests(unittest.TestCase):
                     account_id=sc["cleanup_accounts"][host],
                     provider_key_id=host + "-key",
                 )
+                if host == "fw13":
+                    data.update(timer="cronjob/expiry-fit", observed_at=utc(NOW), next_tick=utc(NOW + timedelta(minutes=1)),
+                                kind_cronjob=dict(sc["fw13_cronjob"], scheduled_at=utc(NOW), pod_uid="pod", job_uid="job"))
+                    if case == "old-host-timer":
+                        data["timer"] = "worker-expiry@fit.timer"
+                    if case == "swapped-cronjob":
+                        data["kind_cronjob"]["uid"] = "another"
                 if case == "timer" and host == "fw13":
                     data["run_id"] = "old"
                 if case == "old-code":
@@ -595,6 +629,16 @@ class ReservationTests(unittest.TestCase):
                 self.assertIsInstance(caught.exception.__cause__, ClientError)
                 self.assertEqual(s3.put_object.call_count, 1)
                 self.assertEqual(s3.put_object.call_args.kwargs["IfMatch"], '"current"')
+            elif case in ("missing-control", "same-control"):
+                bad_scope = dict(sc)
+                if case == "missing-control":
+                    bad_scope.pop("control_bucket")
+                else:
+                    bad_scope["control_bucket"] = bad_scope["state_bucket"]
+                with self.assertRaisesRegex(ValueError, "control_bucket"):
+                    reserve(s3, bad_scope, "a" * 64, 3, NOW)
+                s3.get_object.assert_not_called()
+                s3.put_object.assert_not_called()
             elif case == "invalid-cleanup-account":
                 bad_scope = dict(sc, cleanup_accounts={"bm": ["primary"], "fw13": "backup"})
                 with self.assertRaisesRegex(ValueError, "distinct identities"):
@@ -612,7 +656,10 @@ class ReservationTests(unittest.TestCase):
                 "timer",
                 "expired",
                 "stale",
+                "old-host-timer",
+                "swapped-cronjob",
                 "wrong-stage",
+                "wrong-control-proof",
                 "old-code",
                 "unrehearsed",
             ):
@@ -628,6 +675,7 @@ class ReservationTests(unittest.TestCase):
             else:
                 reserve(s3, sc, "a" * 64, 3, NOW)
                 entry = s3.put_object.call_args.kwargs
+                self.assertEqual(entry["Bucket"], "controls")
                 self.assertEqual(entry["IfMatch"], '"current"')
                 hold = json.loads(entry["Body"])["active_reservation"]
                 self.assertEqual(hold["plan_sha256"], "a" * 64)
@@ -642,6 +690,8 @@ class ReservationTests(unittest.TestCase):
             for case in (
                 "ok",
                 "invalid-cleanup-account",
+                "missing-control",
+                "same-control",
                 "unversioned-ledger",
                 "unversioned-write",
                 "conflict",
@@ -649,7 +699,10 @@ class ReservationTests(unittest.TestCase):
                 "timer",
                 "expired",
                 "stale",
+                "old-host-timer",
+                "swapped-cronjob",
                 "wrong-stage",
+                "wrong-control-proof",
                 "old-code",
                 "unrehearsed",
             ):
@@ -672,6 +725,9 @@ class ReservationTests(unittest.TestCase):
             ("valid_through", utc(NOW)),
             ("state_bucket", "other"),
             ("state_key", "other"),
+            ("control_bucket", "other"),
+            ("timer_prefix", "other"),
+            ("timer_write", False),
         ):
             bad = deepcopy(grants)
             bad["fw13"][key] = value
@@ -733,6 +789,12 @@ class ApplyConsumptionTests(unittest.TestCase):
             )
             applied = []
 
+            def bucket_record(argv, **kwargs):
+                name = argv[argv.index("--name") + 1]
+                project = argv[argv.index("--parent-id") + 1]
+                self.assertEqual({"state": "p", "controls": "management-project"}[name], project)
+                return json.dumps({"metadata": {"name": name, "parent_id": project}}).encode()
+
             def terraform(argv, **kwargs):
                 phase = argv[1]
                 if phase == "state":
@@ -740,6 +802,7 @@ class ApplyConsumptionTests(unittest.TestCase):
                 elif phase == "show":
                     out = json.dumps(plan)
                 elif phase == "init":
+                    self.assertIn("-backend-config=bucket=state", argv)
                     out = ""
                 elif phase == "apply":
                     self.assertNotEqual(Path(argv[-1]), saved)
@@ -764,6 +827,7 @@ class ApplyConsumptionTests(unittest.TestCase):
 
             with (
                 patch("subprocess.run", side_effect=terraform),
+                patch("subprocess.check_output", side_effect=bucket_record) as lookup,
                 patch.dict(check.__globals__, datetime=Clock),
             ):
                 with patch.dict(
@@ -778,4 +842,12 @@ class ApplyConsumptionTests(unittest.TestCase):
                     reserve_remote=lambda *args: ("revision-2", "version-2"),
                 ):
                     result = check(args)
+                self.assertEqual(applied, [result["plan_sha256"]])
+                self.assertEqual(result["control_bucket"], "controls")
+                self.assertEqual(lookup.call_count, 4)
+
+                lookup.side_effect = None
+                lookup.return_value = b'{"metadata": {"name": "state", "parent_id": "another"}}'
+                with self.assertRaisesRegex(ValueError, "Unexpected owning project"):
+                    check(args)
                 self.assertEqual(applied, [result["plan_sha256"]])

@@ -1,0 +1,10 @@
+#!/bin/sh
+# The worker executes Terraform commands serially. Publish the process that
+# will exec the CLI and fence subsequent commands once shutdown has begun.
+set -eu
+if [ -n "${CLEANUP_CONTROL:-}" ]; then
+    printf '%s\n' "$$" > "$CLEANUP_CONTROL/terraform.pid.tmp"
+    mv "$CLEANUP_CONTROL/terraform.pid.tmp" "$CLEANUP_CONTROL/terraform.pid"
+    [ ! -f "$CLEANUP_CONTROL/stopping" ] || exit 130
+fi
+exec /usr/local/bin/terraform "$@"

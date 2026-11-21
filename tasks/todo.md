@@ -42,4 +42,4 @@ The Nebius CLI and a Terraform data-source plan authenticated to the production 
 - [ ] **Hourly pilot.** Using a frozen release, replay an entire station-day including a late reading, a missing window and a retried trigger. Reconcile expected, emitted and abstained forecasts; verify one canonical issuance per feed/station/origin across revisions, original issue times and a verified rollback from a release protected from training rotation.
 - [ ] **External qualification.** After an approved costed Terraform plan, replay the same fixture on Nebius, verify numerical agreement and record actual cost and resource release. [Implementation order and dependencies](lima-episodes.md)
 
-**For every PR**, complete the [three-model review and follow-up](lima-episodes.md#review-before-merging-each-pr) before merging.
+**For every PR**, complete the [Codex review and follow-up](lima-episodes.md#review-before-merging-each-pr) before merging.

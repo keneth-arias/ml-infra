@@ -15,8 +15,10 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+from control_storage import control_bucket, verify_bucket_projects
 from gpu_reservation import reserve_remote
 from gpu_window import BudgetStop, bounds, check_projection, check_stage, fit_projection
+from worker_plan import timestamp
 
 SOURCES = ("main.tf", "versions.tf", ".terraform.lock.hcl")
 STATE_KEY = "prod/mk8s/terraform.tfstate"
@@ -62,6 +64,7 @@ def checked_plan(args):
         hashlib.sha256(b).hexdigest() for b in (scope_bytes, ledger_bytes)
     )
     scope, ledger = json.loads(scope_bytes), json.loads(ledger_bytes)
+    control = control_bucket(scope)
     if scope["ledger_sha256"] != ledger_hash:
         raise ValueError("Approved scope references a different ledger revision")
     # Prepare controls the backend embedded in the plan. Recheck requires that
@@ -100,9 +103,8 @@ def checked_plan(args):
                 stdout=subprocess.PIPE if capture else sys.stderr,
             ).stdout
 
+        verify_bucket_projects(scope)
         bucket = scope["state_bucket"]
-        if not isinstance(bucket, str) or not bucket:
-            raise ValueError("Missing approved state bucket")
         init = [
             "init",
             "-input=false",
@@ -145,6 +147,8 @@ def checked_plan(args):
             state_lineage=scope["state_lineage"],
             state_serial=serial,
             state_bucket=bucket,
+            control_bucket=control,
+            control_project_id=scope["control_project_id"],
             state_key=STATE_KEY,
             workspace="default",
             bounds={k: str(v) for k, v in limits.items()},
@@ -179,15 +183,20 @@ def project(args):
     scope = json.loads(scope_bytes)
     if scope.get("stage") == "pilot":
         raise ValueError("A CPU-only pilot cannot authorize a GPU fit")
+    control = control_bucket(scope)
     raw = args.ledger.read_bytes()
     if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
         raise ValueError("Fit scope references a different ledger revision")
     ledger = json.loads(raw)
     observations = args.measurements.read_bytes()
-    fit = fit_projection(json.loads(observations), ledger)
     now = datetime.now(timezone.utc)
+    seconds = max(0, (timestamp(scope["cutoff"]) - now).total_seconds())
+    fit = fit_projection(json.loads(observations), ledger, window_seconds=seconds)
     result = {
         "run_id": scope["run_id"],
+        "state_bucket": scope["state_bucket"],
+        "control_bucket": control,
+        "control_project_id": scope["control_project_id"],
         "ledger_revision": ledger["revision"],
         "scope_sha256": hashlib.sha256(scope_bytes).hexdigest(),
         "ledger_sha256": scope["ledger_sha256"],
@@ -233,7 +242,7 @@ def main():
         if args.command == "project":
             return project(args)
         print(json.dumps(checked_plan(args), sort_keys=True))
-    except (KeyError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (KeyError, ValueError, OSError, subprocess.SubprocessError) as exc:
         parser.exit(1, "Worker window refused: " + str(exc) + "\n")
 
 

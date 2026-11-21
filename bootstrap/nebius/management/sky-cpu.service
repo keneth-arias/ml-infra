@@ -1,0 +1,34 @@
+[Unit]
+Description=Attended SkyPilot CPU pilot on the Nebius management host
+Wants=network-online.target
+After=network-online.target sky-cpu-firewall.service
+BindsTo=sky-cpu-firewall.service
+[Service]
+User=sky-cpu
+Group=sky-cpu
+UMask=0077
+StateDirectoryMode=0700
+StateDirectory=sky-cpu
+RuntimeDirectory=sky-cpu-target
+RuntimeDirectoryMode=0755
+Environment=HOME=/var/lib/sky-cpu
+Environment=PATH=/opt/sky-cpu/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PIP_NO_INDEX=1
+Environment=PIP_FIND_LINKS=/opt/sky-cpu-build-wheels
+Environment=SKYPILOT_CONFIG=/etc/sky-cpu/config.yaml
+Environment=KUBECONFIG=/var/lib/sky-cpu/kubeconfig
+Environment=NEBIUS_SUBMIT_KUBECONFIG=/var/lib/sky-cpu/kubeconfig
+EnvironmentFile=/etc/sky-cpu/target.env
+UnsetEnvironment=SKYPILOT_ALLOW_ALL_KUBERNETES_CONTEXTS SKYPILOT_API_SERVER_ENDPOINT HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+WorkingDirectory=/var/lib/sky-cpu
+ExecStartPre=/opt/sky-cpu/bin/python -I /opt/ml-infra/bootstrap/nebius/management/rootless/install-template.py --check /opt/sky-cpu
+ExecStartPre=/opt/sky-cpu/bin/python -I /opt/ml-infra/bootstrap/nebius/management/check-backend.py
+ExecStart=/opt/sky-cpu/bin/sky api start --host 127.0.0.1 --port 46581 --foreground
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=multi-user.target

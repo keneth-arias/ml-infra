@@ -7,9 +7,10 @@ import json
 import os
 import re
 import subprocess
+import sys
 import shutil
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from pathlib import Path
 
@@ -156,13 +157,18 @@ def bind_file(path, value):
         os.fsync(tmp.fileno())
         try:
             os.link(tmp.name, path)
+            directory = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         except FileExistsError:
             if path.read_text() != payload:
                 raise ValueError(f"Published {path.name} belongs to another stage")
 
 
 @contextmanager
-def stage_attempt(root, key, identity, artifact, verify):
+def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False):
     with (root / ".episode-worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         intent = root / f".{key}.intent.json"
@@ -175,12 +181,19 @@ def stage_attempt(root, key, identity, artifact, verify):
         reuse = artifact.exists()
         if receipt.exists() and not reuse:
             raise ValueError("Published artifact missing")
+        published = False
+
+        def publish_verified():
+            nonlocal published
+            if not published:
+                verify()
+                bind_file(receipt, sha256(artifact))
+                published = True
+
         if reuse:
-            verify()
-            bind_file(receipt, sha256(artifact))
-        yield reuse
-        verify()
-        bind_file(receipt, sha256(artifact))
+            publish_verified()
+        yield (reuse, publish_verified) if with_publisher else reuse
+        publish_verified()
 
 
 def verify_base(weights, expected):
@@ -219,6 +232,14 @@ def verify_fields(names, phase, head):
         raise ValueError("Fields outside phase schema")
 
 
+def stop_requested(path):
+    """An armed request file that disappears also stops the trainer."""
+    try:
+        return path.stat().st_size > 0
+    except FileNotFoundError:
+        return True
+
+
 def training_metrics(event):
     metrics = {
         k: float(v)
@@ -231,9 +252,72 @@ def training_metrics(event):
     return metrics
 
 
-def main():
-    import numpy as np
+def verify_fit_result(artifact, args, spec, *, generation=None):
+    from opentslm.forecast_checkpoint import files, read_manifest
 
+    result = None
+    directory = generation or artifact.parent
+    if args.direct_objective and generation is None:
+        result = json.loads(artifact.read_bytes())
+        if (type(result["step"]) is not int or not 0 < result["step"] <= args.step or
+                type(result["best_step"]) is not int or not 0 < result["best_step"] <= result["step"] or
+                result["outcome"] != ("completed" if result["step"] == args.step else "early-stopped")):
+            raise ValueError("Unexpected terminal direct fit result")
+        directory = artifact.parent / f"step-{result['step']:08d}"
+        selected = artifact.parent / f"step-{result['best_step']:08d}"
+        best = read_manifest(selected)
+        if (not best or best["identity"] != result["identity"] or best["files"] != files(selected) or
+                sha256(selected / "manifest.json") != result["selected_manifest_sha256"] or
+                sha256(directory / "manifest.json") != result["latest_manifest_sha256"] or
+                (artifact.parent / "best").read_text().strip() != selected.name):
+            raise ValueError("Terminal direct checkpoint failed verification")
+        last = json.loads((directory / "training.pt.json").read_bytes())["evaluations"][-1]
+        if any(result.get(k) != v for k, v in last.items()):
+            raise ValueError("Terminal result differs from durable evaluation")
+
+    m = read_manifest(directory)
+    if (not m or not 0 < m["step"] <= args.step or m["files"] != files(directory)
+            or generation is None and result is None and m["step"] != args.step):
+        raise ValueError("Incomplete checkpoint")
+    identity = m["identity"]
+    expected = {
+        "data": spec["files"]["data.npz"],
+        "head": args.head,
+        "seed": args.seed,
+        "schedule": args.schedule,
+        "weights": spec["weights_manifest_sha256"],
+    }
+    if args.direct_objective:
+        expected.update(logical_run=args.run_id, direct_objective=args.direct_objective,
+                        input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
+        if result is not None and result["identity"] != identity:
+            raise ValueError("Terminal result carries another run identity")
+    if "point_control_of" in spec:
+        expected.update(matched_point="complete_epoch_v1", input_manifest_sha256=args.bundle_sha256)
+    if any(identity.get(k) != v for k, v in expected.items()):
+        raise ValueError("Published checkpoint does not match this fit")
+
+
+def verify_resume_checkpoint(work, artifact, args, spec):
+    from opentslm.forecast_checkpoint import read_manifest, recover
+
+    step_text, digest = args.resume_checkpoint.split(":")
+    step = int(step_text)
+    generation = work / f"step-{step:08d}"
+    manifest = read_manifest(generation)
+    if not manifest or sha256(generation / "manifest.json") != digest:
+        raise ValueError("Funded checkpoint manifest differs from the retained generation")
+    verify_fit_result(artifact, args, spec, generation=generation)
+    for path in work.glob("step-????????"):
+        other = read_manifest(path)
+        if other and other["identity"] != manifest["identity"]:
+            raise ValueError("Checkpoint directory contains multiple trainer identities")
+    if recover(work, manifest["identity"]) != (step, generation):
+        raise ValueError("The trainer would recover a different generation")
+
+
+def main():
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("fit", "infer"))
     parser.add_argument("head", choices=("direct", "quantile", "episode"))
@@ -242,17 +326,63 @@ def main():
     parser.add_argument("--step", type=int, required=True)
     parser.add_argument("--schedule", type=int)
     parser.add_argument("--seed", type=int, default=27)
+    parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
+    parser.add_argument("--validation-sha256")
     parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--attempt", type=int, default=1)
     parser.add_argument("--save-seconds", type=int, default=900)
+    parser.add_argument("--graceful-stop", action="store_true")
+    parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
+    if args.resume_checkpoint is not None and (not args.direct_objective or not args.resume or
+            not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", args.resume_checkpoint)):
+        parser.error("Checkpoint pin requires a paired resume and STEP:SHA256")
+    if args.stop_after_seconds is not None and (not args.graceful_stop or args.stop_after_seconds < 1):
+        parser.error("A soft deadline requires cooperative fit shutdown")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", args.run_id) or args.step < 1:
         parser.error("Invalid run ID or step")
+    if args.direct_objective or args.validation_sha256:
+        if (not args.direct_objective or not re.fullmatch("[0-9a-f]{64}", args.validation_sha256 or "")
+                or args.validation_sha256 == args.bundle_sha256 or (args.phase, args.head) != ("fit", "direct")
+                or args.batch != 16 or args.seed not in (27, 28) or args.step != args.schedule):
+            parser.error("Invalid paired direct fit")
+    control = None
+    if args.graceful_stop:
+        if args.preflight or args.phase != "fit":
+            parser.error("Cooperative stop requires a fit worker")
+        from episode_stop import acknowledge, arm, channel
+
+        control = channel(args.run_id, args.step, args.attempt)
+        requested = arm(control, args.stop_after_seconds)
+
+    def stop_before_launch():
+        if control and stop_requested(requested):
+            acknowledge(control, "stopped-before-launch")
+            raise SystemExit(75)
+
+    import numpy as np
+
     root, weights = Path("/bundle"), Path("/base/weights")
-    spec = bundle(root, args.bundle_sha256, args.phase, args.head)
+    if args.direct_objective:
+        from opentslm.forecast_inputs import direct_cohorts
+
+        spec = bundle_manifest(root / "manifest.json", args.bundle_sha256, "fit", "direct", paired=True)
+        validation_root = Path("/validation")
+        fit_rows, validation_rows = direct_cohorts(
+            root / "manifest.json", args.bundle_sha256, validation_root / "manifest.json",
+            args.validation_sha256, spec["weights_manifest_sha256"],
+        )
+        if (len(fit_rows["window_id"]) + args.batch - 1) // args.batch != args.schedule:
+            raise ValueError("Fit cohort does not match the scheduled epoch")
+        del fit_rows, validation_rows
+    else:
+        spec = bundle(root, args.bundle_sha256, args.phase, args.head)
+    bundle_verified = time.monotonic()
     verify_base(weights, spec["weights_manifest_sha256"])
+    weights_verified = time.monotonic()
     matched = "point_control_of" in spec
     if matched:
         if paired_recipe(root, spec) != {
@@ -261,21 +391,23 @@ def main():
             raise ValueError(
                 "Seed, batch, or schedule differs from the source quantile fit"
             )
-        options = subprocess.check_output(
-            ["/opt/conda/bin/python", "/opt/forecast/train_qwen_forecast.py", "--help"],
-            text=True,
-            env={**os.environ, "PYTHONPATH": "/opt/forecast/src"},
-        )
-        if "--matched-point" not in options:
-            raise ValueError(
-                "Rebuild with an OpenTSLM revision supporting matched point controls"
+        if not args.preflight or Path("/opt/conda/bin/python").exists():
+            options = subprocess.check_output(
+                ["/opt/conda/bin/python", "/opt/forecast/train_qwen_forecast.py", "--help"],
+                text=True,
+                env={**os.environ, "PYTHONPATH": "/opt/forecast/src"},
             )
+            if "--matched-point" not in options:
+                raise ValueError(
+                    "Rebuild with an OpenTSLM revision supporting matched point controls"
+                )
 
     data = root / "data.npz"
-    with np.load(data, allow_pickle=False) as archive:
-        verify_fields(archive.files, args.phase, args.head)
+    if not args.direct_objective:
+        with np.load(data, allow_pickle=False) as archive:
+            verify_fields(archive.files, args.phase, args.head)
     if matched or args.head in ("quantile", "episode"):
-        from opentslm.forecast_inference import verify_candidate_input
+        from opentslm.forecast_inputs import verify_candidate_input
 
         verify_candidate_input(
             data,
@@ -289,12 +421,18 @@ def main():
         checkpoint = Path("/checkpoint") / f"step-{args.step:08d}"
         if sha256(checkpoint / "manifest.json") != spec["checkpoint_sha256"]:
             raise ValueError("Selected checkpoint digest differs")
+    print(json.dumps({"event": "verified_inputs", "run": args.run_id, "attempt": args.attempt,
+                      "startup_and_bundle_seconds": bundle_verified - started,
+                      "weights_seconds": weights_verified - bundle_verified,
+                      "elapsed_seconds": time.monotonic() - started}), file=sys.stderr, flush=True)
+    stop_before_launch()
     if args.preflight:
         print(
             json.dumps(
                 {
                     "phase": args.phase,
                     "bundle_sha256": args.bundle_sha256,
+                    **({"validation_sha256": args.validation_sha256, "objective": args.direct_objective} if args.direct_objective else {}),
                     "verified": True,
                 }
             )
@@ -312,7 +450,7 @@ def main():
         "--batch",
         str(args.batch),
     ]
-    if matched or args.head in ("quantile", "episode"):
+    if matched or args.head in ("quantile", "episode") or args.direct_objective:
         common += [
             "--input-manifest",
             str(root / "manifest.json"),
@@ -333,8 +471,7 @@ def main():
             "--mode",
             "single",
             "--lora",
-            "--validate-at",
-            "final",
+            *([] if args.direct_objective else ["--validate-at", "final"]),
             "--run-dir",
             "/state",
             "--seed",
@@ -347,11 +484,15 @@ def main():
             str(args.schedule),
             *common,
         ]
+        if args.direct_objective:
+            command.extend(["--direct-objective", args.direct_objective, "--logical-run", args.run_id,
+                            "--validation", str(validation_root / "data.npz"), "--validation-manifest",
+                            str(validation_root / "manifest.json"), "--validation-manifest-sha256", args.validation_sha256])
         if matched:
             command.append("--matched-point")
         if args.resume:
             command.append("--resume")
-        artifact = Path("/state") / step_name / "manifest.json"
+        artifact = Path("/state") / ("direct-result.json" if args.direct_objective else step_name + "/manifest.json")
     else:
         checkpoint = Path("/checkpoint") / step_name
         artifact = Path("/output") / f"predictions-{step_name}.npz"
@@ -368,28 +509,9 @@ def main():
         ]
     work = Path("/state") if args.phase == "fit" else artifact.parent
 
-    def verify_result():
+    def verify_result(generation=None):
         if args.phase == "fit":
-            from opentslm.forecast_checkpoint import files, read_manifest
-
-            m = read_manifest(artifact.parent)
-            if not m or m["step"] != args.step or m["files"] != files(artifact.parent):
-                raise ValueError("Incomplete checkpoint")
-            identity = m["identity"]
-            expected = {
-                "data": spec["files"]["data.npz"],
-                "head": args.head,
-                "seed": args.seed,
-                "schedule": args.schedule,
-                "weights": spec["weights_manifest_sha256"],
-            }
-            if matched:
-                expected.update(
-                    matched_point="complete_epoch_v1",
-                    input_manifest_sha256=args.bundle_sha256,
-                )
-            if any(identity.get(k) != v for k, v in expected.items()):
-                raise ValueError("Published checkpoint does not match this fit")
+            verify_fit_result(artifact, args, spec, generation=generation)
         else:
             with (
                 np.load(data, allow_pickle=False) as inputs,
@@ -419,15 +541,50 @@ def main():
     identity = {
         k: v
         for k, v in vars(args).items()
-        if k not in ("attempt", "resume", "preflight", "save_seconds")
+        if (v is not None or k not in ("direct_objective", "validation_sha256"))
+        and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]
-    started = time.monotonic()
-    mlflow.set_experiment("airaware-pm25")
-    with mlflow.start_run(run_name=f"{args.run_id}-{args.phase}"):
+    experiment = mlflow.set_experiment("airaware-pm25")
+    with ExitStack() as stack:
+        reused, publish_verified = stack.enter_context(
+            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
+        )
+        if args.resume_checkpoint and not reused:
+            verify_resume_checkpoint(work, artifact, args, spec)
+        tracking_id = None
+        tags = {}
+        existing = []
+        if args.direct_objective:
+            key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+            tags["direct_fit_id"] = key
+            client = mlflow.MlflowClient()
+            existing = client.search_runs([experiment.experiment_id], f"tags.direct_fit_id = '{key}'", max_results=2)
+            if len(existing) > 1:
+                raise ValueError("Multiple tracking runs already own this paired fit")
+            if existing:
+                prior = existing[0]
+                tracking_id = prior.info.run_id
+                if reused and prior.info.status == "FINISHED" and prior.data.tags.get("artifact_sha256") == sha256(artifact):
+                    if control:
+                        selected_step = json.loads(artifact.read_bytes())["best_step"]
+                        acknowledge(control, "complete", work / f"step-{selected_step:08d}")
+                    return
+        run = stack.enter_context(mlflow.start_run(run_id=tracking_id, run_name=f"{args.run_id}-{args.phase}", tags=tags))
+        seen_steps = {}
+
+        def log_metrics(metrics, step):
+            if existing:
+                for name in metrics:
+                    if name not in seen_steps:
+                        seen_steps[name] = {entry.step for entry in client.get_metric_history(run.info.run_id, name)}
+                metrics = {k: v for k, v in metrics.items() if step not in seen_steps[k]}
+            if metrics:
+                mlflow.log_metrics(metrics, step=step)
+
         mlflow.log_params(
             {
-                **vars(args),
+                **(identity if args.direct_objective else vars(args)),
                 "infra_sha": os.environ["INFRA_SOURCE_REVISION"],
                 "trainer_sha": os.environ["FORECAST_SOURCE_REVISION"],
                 "airaware_sha": os.environ["AIRAWARE_SOURCE_REVISION"],
@@ -457,32 +614,60 @@ def main():
             {"schema": spec.get("schema", "legacy"), "unit": spec.get("unit", "ug/m3")}
         )
         env = {**os.environ, "PYTHONPATH": "/opt/forecast/src"}
-        with stage_attempt(
-            work, f"{args.phase}-{step_name}", identity, artifact, verify_result
-        ) as reused:
-            mlflow.set_tag("artifact_reused", str(reused))
-            if not reused:
-                with subprocess.Popen(
-                    command, stdout=subprocess.PIPE, text=True, env=env
-                ) as proc:
-                    for line in proc.stdout:
-                        print(line, end="", flush=True)
-                        try:
-                            event = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(event, dict) and "peak_bytes_per_rank" in event:
-                            mlflow.log_metric(
-                                "peak_gpu_allocated_bytes",
-                                max(v[0] for v in event["peak_bytes_per_rank"]),
-                                step=event["step"],
-                            )
-                        if isinstance(event, dict):
-                            metrics = training_metrics(event)
-                            if metrics:
-                                mlflow.log_metrics(metrics, step=event.get("step", 0))
-                    if proc.wait():
-                        raise subprocess.CalledProcessError(proc.returncode, command)
+        if control:
+            env["EPISODE_STOP_FILE"] = str(requested)
+        else:
+            env.pop("EPISODE_STOP_FILE", None)
+        mlflow.set_tag("artifact_reused", str(reused))
+        if not reused:
+            stop_before_launch()
+            interrupted = None
+            with subprocess.Popen(
+                command, stdout=subprocess.PIPE, text=True, env=env
+            ) as proc:
+                for line in proc.stdout:
+                    print(line, end="", flush=True)
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if control and isinstance(event, dict) and event.get("stopped_before_update") is True:
+                        interrupted = 0
+                    if control and isinstance(event, dict) and "interrupted_at_step" in event:
+                        interrupted = int(event["interrupted_at_step"])
+                    if control and stop_requested(requested):
+                        continue
+                    if isinstance(event, dict) and "peak_bytes_per_rank" in event:
+                        log_metrics({"peak_gpu_allocated_bytes": max(v[0] for v in event["peak_bytes_per_rank"])}, event["step"])
+                    if isinstance(event, dict):
+                        metrics = training_metrics(event)
+                        if metrics:
+                            log_metrics(metrics, event.get("step", 0))
+                if proc.wait():
+                    raise subprocess.CalledProcessError(proc.returncode, command)
+            if interrupted is not None:
+                if interrupted == 0 and stop_requested(requested):
+                    acknowledge(control, "stopped-before-update")
+                    raise SystemExit(75)
+                if not stop_requested(requested) or not 0 < interrupted < args.step:
+                    raise ValueError("Unexpected trainer interruption")
+                generation = work / f"step-{interrupted:08d}"
+                verify_result(generation)
+                acknowledge(control, "interrupted", generation)
+                raise SystemExit(75)
+        publish_verified()
+        selected_dir = artifact.parent
+        if args.direct_objective:
+            terminal = json.loads(artifact.read_bytes())
+            selected_dir = work / f"step-{terminal['best_step']:08d}"
+            mlflow.log_params({"actual_stop_step": terminal["step"], "selected_step": terminal["best_step"],
+                               "selected_manifest_sha256": terminal["selected_manifest_sha256"]})
+            mlflow.set_tag("fit_outcome", terminal["outcome"])
+            terminal_dir = work / f"step-{terminal['step']:08d}"
+            for name in ("manifest.json", "training.pt.json"):
+                mlflow.log_artifact(str(terminal_dir / name), "evaluations")
+            mlflow.log_artifact(str(validation_root / "manifest.json"), "inputs/inner_validation")
+            mlflow.log_param("recipe_sha256", terminal["identity"]["recipe_sha256"])
         mlflow.log_metrics(
             {
                 "duration_seconds": time.monotonic() - started,
@@ -497,13 +682,15 @@ def main():
             "state_path",
             f"episodes/{args.run_id}/"
             + (
-                "state/" + step_name
+                "state/" + (selected_dir.name if args.direct_objective else step_name)
                 if args.phase == "fit"
                 else "output/" + artifact.name
             ),
         )
         mlflow.log_artifact(str(artifact))
         mlflow.set_tag("artifact_sha256", sha256(artifact))
+    if control:
+        acknowledge(control, "complete", selected_dir)
 
 
 if __name__ == "__main__":

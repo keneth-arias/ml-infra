@@ -8,7 +8,7 @@
   "noDataState": "OK",
   "execErrState": "Error",
   "labels": {"service": "nebius-worker-cleanup"},
-  "annotations": {"summary": "Worker cleanup failed on {{ $labels.host_name }} for run {{ $labels.run_id }}. Check the cleanup journal and reconcile the Nebius inventory."},
+  "annotations": {"summary": "Worker cleanup failed on {{ $labels.host_name }} for run {{ $labels.run_id }}. Check the bm cleanup journal or the fw13 cleanup Job logs and reconcile the Nebius inventory."},
   "data": [
     {
       "refId": "A",

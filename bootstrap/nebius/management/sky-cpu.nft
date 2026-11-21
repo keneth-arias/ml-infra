@@ -1,0 +1,8 @@
+# Replace only this service's table in one atomic nftables transaction.
+destroy table inet sky_cpu
+table inet sky_cpu {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 127.0.0.1 tcp dport 46581 meta skuid != { "sky-cpu", "sky-cpu-proxy" } reject
+    }
+}

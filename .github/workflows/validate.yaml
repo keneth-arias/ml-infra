@@ -9,5 +9,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: uv run --python 3.13 --with numpy==2.5.5 python -m unittest discover -s runtime -p 'test_*.py'
-      - run: uv run --with PyYAML==6.0.3 --with boto3==1.40.72 --with-requirements bootstrap/nebius/management/otlp-requirements.txt python -m unittest discover -s ci -p 'test_*.py'
+      - run: uv run --with PyYAML==6.0.3 --with matplotlib==3.10.7 --with boto3==1.40.72 --with-requirements bootstrap/nebius/management/otlp-requirements.txt python -m unittest discover -s ci -p 'test_*.py'
       - run: uv run ci/check-manifests.py
+      - name: Check out the paired checkpoint producer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: keneth-arias/OpenTSLM
+          ref: 1313259efa6ebe94c9cd3e1ac37954f015e11d96
+          path: paired-trainer
+          persist-credentials: false
+          sparse-checkout: src/opentslm
+      - run: PYTHONPATH=runtime:paired-trainer/src python3 workloads/smoke/test_direct_receipt.py

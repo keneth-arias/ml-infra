@@ -45,3 +45,16 @@ class CleanupAlertTest(TestCase):
                     notify.send(url, "fixture-token", b"record")
                 conn.request.assert_called_once()
                 conn.close.assert_called_once()
+
+    def test_missing_private_ca_refuses_before_sending_bearer(self):
+        with patch.object(notify, "HTTPSConnection") as conn, self.assertRaises(FileNotFoundError):
+            notify.send("https://192.168.50.155:8443/insert/opentelemetry/v1/logs",
+                        "fixture", b"data", cafile="/missing/cleanup-fixture-ca.crt")
+        conn.assert_not_called()
+
+    def test_empty_preallocation_request_rejects_an_ingress_denial(self):
+        conn = Mock()
+        conn.getresponse.return_value.status = 403
+        with patch.object(notify, "HTTPSConnection", return_value=conn), self.assertRaisesRegex(ValueError, "403"):
+            notify.send("https://192.168.50.155:8443/insert/opentelemetry/v1/logs", "fixture", b"")
+        conn.request.assert_called_once()

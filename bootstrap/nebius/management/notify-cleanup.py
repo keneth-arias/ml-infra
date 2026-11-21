@@ -5,6 +5,7 @@ from http.client import HTTPException, HTTPSConnection
 import os
 from pathlib import Path
 import socket
+import ssl
 import sys
 import time
 from urllib.parse import urlsplit
@@ -38,7 +39,7 @@ def payload(run, host, event_id, rehearsal):
     return request.SerializeToString()
 
 
-def send(url, token, data):
+def send(url, token, data, *, cafile=None):
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -49,8 +50,8 @@ def send(url, token, data):
         or parsed.path != "/insert/opentelemetry/v1/logs"
     ):
         raise ValueError("Expected the HTTPS VictoriaLogs OTLP ingestion endpoint")
-    # Use the system CA store. Send the bearer only to the configured origin.
-    conn = HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=15)
+    context = ssl.create_default_context(cafile=cafile)
+    conn = HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=15, context=context)
     try:
         conn.request(
             "POST",
@@ -73,11 +74,11 @@ def send(url, token, data):
         conn.close()
 
 
-def main(run):
+def main(run, *, host=None, cafile=None):
     event_id = os.environ.get("MONITOR_INVOCATION_ID") or uuid.uuid4().hex
     data = payload(
         run,
-        socket.gethostname(),
+        host or socket.gethostname(),
         event_id,
         os.environ.get("CLEANUP_ALERT_REHEARSAL") == "1",
     )
@@ -87,7 +88,7 @@ def main(run):
         raise ValueError("Invalid VictoriaLogs bearer credential")
     for attempt in range(3):
         try:
-            send(os.environ["CLEANUP_OTLP_LOGS_URL"], token, data)
+            send(os.environ["CLEANUP_OTLP_LOGS_URL"], token, data, cafile=cafile)
         except (OSError, HTTPException):
             if attempt == 2:
                 raise

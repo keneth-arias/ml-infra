@@ -7,16 +7,44 @@ import re
 import uuid
 from pathlib import Path
 
-from worker_cleanup import cleanup_digest, scope_digest
-
+from control_storage import LEDGER_KEY, STORAGE_FIELDS, control_bucket, timer_key, timer_prefix
 from gpu_window import BID, RELEASE_HOURS, bounds, hours, pilot_bounds
+from worker_cleanup import cleanup_digest, scope_digest
 from worker_plan import amount, timestamp
 
-LEDGER_KEY = "prod/mk8s/release-control/ledger.json"
+
+def read_ledger(s3, scope):
+    current = s3.get_object(Bucket=control_bucket(scope), Key=LEDGER_KEY)
+    if not isinstance(current.get("VersionId"), str) or current["VersionId"] in ("", "null"):
+        raise ValueError("Funding ledger requires a versioned object")
+    raw = current["Body"].read()
+    if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
+        raise ValueError("Live ledger changed since approval")
+    ledger = json.loads(raw)
+    return current, ledger
+
+
+def write_reservation(s3, scope, current, ledger, reservation):
+    bucket = control_bucket(scope)
+    ledger.update(active_reservation=reservation, revision=uuid.uuid4().hex)
+    ledger.setdefault("attempt_ids", []).append(reservation["attempt_id"])
+    # Competing clients reading the same revision race on one S3 object. Only
+    # the successful writer may execute. On an ambiguous response leave the hold.
+    result = s3.put_object(
+        Bucket=bucket,
+        Key=LEDGER_KEY,
+        IfMatch=current["ETag"],
+        ContentType="application/json",
+        Body=json.dumps(ledger, sort_keys=True).encode(),
+    )
+    version = result.get("VersionId")
+    if not isinstance(version, str) or version in ("", "null"):
+        raise ValueError("Unversioned reservation write; inspect the off-host ledger before retry")
+    return ledger["revision"], version
 
 
 def reserve(s3, scope, plan_digest, state_serial, now):
-    bucket = scope["state_bucket"]
+    bucket = control_bucket(scope)
     run, attempt, stage = (scope[k] for k in ("run_id", "attempt_id", "stage"))
     for identifier in (run, attempt):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", identifier):
@@ -25,13 +53,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         "[0-9a-f]{64}", scope["baseline_sha256"]
     ):
         raise ValueError("Invalid stage or inventory digest")
-    current = s3.get_object(Bucket=bucket, Key=LEDGER_KEY)
-    if not isinstance(current.get("VersionId"), str) or current["VersionId"] in ("", "null"):
-        raise ValueError("Funding ledger requires a versioned object")
-    raw = current["Body"].read()
-    if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
-        raise ValueError("Live ledger changed since approval")
-    ledger = json.loads(raw)
+    current, ledger = read_ledger(s3, scope)
     gpu_hours = 0
     if stage == "pilot":
         pilot_bounds(scope, ledger, now)
@@ -62,9 +84,9 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         if (
             grant["account_id"] != account
             or not grant["public_key_id"]
-            or grant["state_bucket"] != bucket
+            or any(grant.get(field) != scope[field] for field in STORAGE_FIELDS)
+            or grant.get("timer_prefix") != timer_prefix(host)
             or grant["state_key"] != "prod/mk8s/terraform.tfstate"
-            or grant["project_id"] != scope["project_id"]
             or grant["cluster_id"] != scope["cluster_id"]
             or not re.fullmatch("[0-9a-f]{64}", grant["evidence_sha256"])
             or not timestamp(grant["checked_at"]) <= now
@@ -72,7 +94,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
             < timestamp(scope["cutoff"]) + timedelta(hours=1)
             or any(
                 grant.get(key) is not True
-                for key in ("node_group_delete", "state_write", "lock_write_delete")
+                for key in ("node_group_delete", "state_write", "lock_write_delete", "timer_write")
             )
         ):
             raise ValueError(
@@ -90,7 +112,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
     expected_source = cleanup_digest(root, units)
     versions = {}
     for host, account in accounts.items():
-        key = f"prod/mk8s/release-control/timers/{run}/{stage}/{host}.json"
+        key = timer_key(host, run, stage)
         obj = s3.get_object(Bucket=bucket, Key=key)
         proof = json.loads(obj["Body"].read())
         expected = {
@@ -99,7 +121,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
                 "stage",
                 "run_id",
                 "cutoff",
-                "project_id",
+                *STORAGE_FIELDS,
                 "cluster_id",
                 "state_lineage",
                 "baseline_sha256",
@@ -114,6 +136,24 @@ def reserve(s3, scope, plan_digest, state_serial, now):
             state_serial=state_serial,
             timer=f"worker-expiry@{run}.timer",
         )
+        if host == "fw13":
+            expected["timer"] = f"cronjob/expiry-{run}"
+            cron = scope["fw13_cronjob"]
+            live = proof.get("kind_cronjob", {})
+            if (
+                not isinstance(live, dict)
+                or not re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", cron["image"])
+                or not re.fullmatch("[0-9a-f]{64}", cron["spec_sha256"])
+                or not re.fullmatch("[0-9a-f]{64}", scope["fw13_tfvars_sha256"])
+                or scope["fw13_public_key_id"] != grants[host]["public_key_id"]
+                or not cron["uid"]
+                or any(live.get(k) != cron[k] for k in ("uid", "spec_sha256", "image"))
+                or not live.get("job_uid") or not live.get("pod_uid")
+                or not now <= timestamp(scope["fw13_attest_until"]) <= timestamp(scope["cutoff"])
+                or timestamp(live["scheduled_at"]) > timestamp(proof["observed_at"])
+                or timestamp(proof["next_tick"]) != timestamp(live["scheduled_at"]) + timedelta(minutes=1)
+            ):
+                raise ValueError("Expected fresh proof from the approved fw13 kind CronJob")
         if any(proof.get(k) != v for k, v in expected.items()) or not all(
             proof.get(k) is True
             for k in (
@@ -154,24 +194,10 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         ),
         "reserved_at": now.astimezone(timezone.utc).isoformat(),
     }
-    ledger.update(active_reservation=reservation, revision=uuid.uuid4().hex)
-    ledger.setdefault("attempt_ids", []).append(attempt)
-    # Competing clients reading the same revision race on one S3 object. Only
-    # the successful writer may execute. On an ambiguous response leave the hold.
-    result = s3.put_object(
-        Bucket=bucket,
-        Key=LEDGER_KEY,
-        IfMatch=current["ETag"],
-        ContentType="application/json",
-        Body=json.dumps(ledger, sort_keys=True).encode(),
-    )
-    version = result.get("VersionId")
-    if not isinstance(version, str) or version in ("", "null"):
-        raise ValueError("Unversioned reservation write; inspect the off-host ledger before retry")
-    return ledger["revision"], version
+    return write_reservation(s3, scope, current, ledger, reservation)
 
 
-def reserve_remote(scope, plan_digest, state_serial):
+def with_ledger_client(action, *args):
     import boto3
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, ClientError
@@ -185,14 +211,12 @@ def reserve_remote(scope, plan_digest, state_serial):
         ),
     )
     try:
-        return reserve(
-            client,
-            scope,
-            plan_digest,
-            state_serial,
-            datetime.now(timezone.utc),
-        )
+        return action(client, *args, datetime.now(timezone.utc))
     except (BotoCoreError, ClientError) as exc:
         raise ValueError(
             "Reservation unsuccessful or ambiguous; inspect the off-host ledger before retry"
         ) from exc
+
+
+def reserve_remote(scope, plan_digest, state_serial):
+    return with_ledger_client(reserve, scope, plan_digest, state_serial)
