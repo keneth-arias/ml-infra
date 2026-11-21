@@ -23,7 +23,7 @@ Supply both completed arms of each seed. The report command verifies the recorde
 
 Use a quiesced support-only interval with enough time remaining for recovery and cutback. Hold training and staging submissions, stop and reconcile pending clients, and keep the training-side Secret and ConfigMap pointed at the original deployment. Use the paired dump and versioned artifact snapshot made after stopping the original MLflow, and verify the hashes against the independently retained receipt. Record the live PVC, PV and cloud disk IDs. Use the existing 16 GiB retained PVC and a separate logical database on it. Confirm available filesystem space covers the restored tables and indexes, temporary files and WAL alongside the original database, using the backup size and measured restore footprint. If space or funded time is insufficient, leave the original intact and defer the rehearsal to an approved window. The rehearsal creates no PVC, disk or worker.
 
-Prepare a distinct empty, versioned artifact bucket, funded through its cleanup date. Use the restore operator credential for object copying. Use a fresh scoped MLflow credential for the restored artifact prefix. Verify the original writer cannot access the restore bucket and the restore writer cannot access the original bucket. Save proof of both denials. The restored MLflow uses a different bearer, and the ordinary training clients remain closed throughout this exercise.
+Prepare a distinct empty, versioned artifact bucket, funded through its cleanup date. If an object restore stops after its first write, keep the partial destination isolated, record its versions for cleanup, and start again in a fresh empty bucket. Use the restore operator credential for object copying. Use a fresh scoped MLflow credential for the restored artifact prefix. Verify the original writer cannot access the restore bucket and the restore writer cannot access the original bucket. Save proof of both denials. The restored MLflow uses a different bearer, and the ordinary training clients remain closed throughout this exercise.
 
 ```bash
 set -euo pipefail
@@ -153,7 +153,7 @@ Require matching run ID, experiment ID, metric and downloaded artifact digest, a
 
 ### Cut back to the original stores
 
-Perform cutback even when restore verification fails. Scale the restored deployment to zero and wait for all its pods to terminate. Switch back only if the live template still matches the recorded restore template. If the first switch failed and the live template still matches the recorded original, leave that template in place. On any unexpected template, leave MLflow at zero and reconcile the differences before proceeding.
+Perform cutback even when restore verification fails. In a new shell, restore the operator environment, namespace array, and original values of `work` and `recovery` from the window record. Reload the `quiesce_mlflow` and `switch_template` function definitions from this revision without rerunning the restore commands. Scale the restored deployment to zero and wait for all its pods to terminate. Switch back only if the live template still matches the recorded restore template. If the first switch failed and the live template still matches the recorded original, leave that template in place. On any unexpected template, leave MLflow at zero and reconcile the differences before proceeding.
 
 ```bash
 quiesce_mlflow
