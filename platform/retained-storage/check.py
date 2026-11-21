@@ -402,9 +402,9 @@ def submit(args, approval, approval_hash):
         # Only the training stage has an already-verified disk, the database.
         owned = int(phase == "training")
         disk_quota(["nebius", "-p", args.profile, "--no-browser"], approval["tenant_id"], owned, owned * CLAIMS[DB])
-        now = datetime.now(timezone.utc)
-        funding(approval, now)
-        created.append(create_object(args, item, submission_seconds(approval, checked_at, now)))
+        funding(approval, datetime.now(timezone.utc))
+        seconds = submission_seconds(approval, checked_at, datetime.now(timezone.utc))
+        created.append(create_object(args, item, seconds))
     return receipt | dict(phase=args.phase, observed_at=datetime.now(timezone.utc).isoformat(), created_objects=created)
 
 

@@ -108,6 +108,35 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                 helper.submit(type("Args", (), {"phase": "submit-db"})(), approval, "a" * 64)
             create.assert_not_called()
 
+    def test_funding_read_cannot_outlive_the_last_create_deadline(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        start = datetime(2026, 10, 1, 20, 20, tzinfo=timezone.utc)
+        deadline = start + timedelta(seconds=30)
+        approval = {
+            "tenant_id": "tenant-test", "cluster_id": "mk8scluster-test",
+            "reservation_id": "test", "operator_username": "operator",
+            "acquisition_deadline": deadline.isoformat(),
+        }
+        args = type("Args", (), {"phase": "submit-db", "profile": "unused", "endpoint": "public",
+                                "ca_sha256": "a" * 64})()
+        with (patch.object(helper, "datetime", wraps=datetime) as clock,
+              patch.object(helper, "capture", return_value={}),
+              patch.object(helper, "kube", return_value=["kubectl"]),
+              patch.object(helper, "pinned_kubeconfig_ca"),
+              patch.object(helper, "query", return_value={"status": {"userInfo": {"username": "operator"}}}),
+              patch.object(helper, "disk_quota"), patch.object(helper, "funding") as funding,
+              patch.object(helper, "create_object") as create):
+            clock.now.return_value = start
+            def slow_funding(*_):
+                clock.now.return_value = deadline
+
+            funding.side_effect = slow_funding
+            with self.assertRaisesRegex(ValueError, "expired"):
+                helper.submit(args, approval, "a" * 64)
+            create.assert_not_called()
+
     def test_creation_uses_strict_create_only_and_pins_response_uid(self):
         spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
         helper = importlib.util.module_from_spec(spec)
