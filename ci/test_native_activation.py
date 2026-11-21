@@ -88,3 +88,126 @@ class NativeActivationTest(unittest.TestCase):
             path.chmod(0o644)
             with self.assertRaises(ValueError):
                 check(path, "support", scope["cluster_id"], now)
+
+    def test_failed_activation_reconciles_owned_resources(self):
+        from datetime import timedelta
+        import subprocess
+        from unittest.mock import patch
+        import uuid
+
+        functions = self.functions
+        transaction = functions["Transaction"]
+        attempt_tag = functions["ATTEMPT"]
+        now = datetime.now(timezone.utc)
+        expiry = (now + timedelta(minutes=9)).isoformat().replace("+00:00", "Z")
+        too_late = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        cutoff = now + timedelta(hours=1)
+        target = {"cluster_id": "mk8scluster-fixture", "endpoint": "public"}
+        case_names = ("marker-response", "invalid-expiry", "held-probe", "policy-response",
+                      "binding-response", "released-probe", "binding-replaced", "success")
+
+        for failure in case_names:
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                session = Path(directory)
+                attempt = uuid.uuid4().hex
+                active = functions["active_policy"](self.images, RECEIPT, "support")
+                active["metadata"]["annotations"][attempt_tag] = attempt
+                role, binding = functions["access_objects"](RECEIPT)["items"]
+                for item in (role, binding):
+                    item["metadata"]["labels"] = {attempt_tag: attempt}
+                marker = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+                          "metadata": {"name": "marker", "namespace": "training", "labels": {attempt_tag: attempt}}}
+                intent = {"attempt": attempt, "held": self.policy, "active": active, "guard": self.binding,
+                          "marker": marker, "role": role, "binding": binding, "receipt": RECEIPT}
+                objects, calls = {}, []
+                policy_uid = str(uuid.uuid4())
+                kind_keys = {"Secret": "secrets", "Role": "roles", "RoleBinding": "rolebindings"}
+
+                class FakeTransaction(transaction):
+                    def __init__(self):
+                        super().__init__(["operator"], b"ca", target, session, intent)
+                        self.policy = intent["held"]
+
+                    def call(self, *args, payload=None, **kwargs):
+                        if "get" in args:
+                            return json.dumps(objects[args[3]]) if args[3] in objects else ""
+                        if args[:1] == ("delete",):
+                            resource = args[2].split("/")[-2]
+                            self.assert_uid(resource, payload)
+                            calls.append("delete-" + resource)
+                            del objects[resource]
+                            return "{}"
+                        if "token" in args and "create" in args:
+                            calls.append("token")
+                            return json.dumps({"status": {"token": "synthetic", "expirationTimestamp":
+                                                          too_late if failure == "invalid-expiry" else expiry}})
+                        if args[:2] == ("auth", "whoami"):
+                            calls.append("token-identity")
+                            return functions["IDENTITY"]
+                        if args[0] == "create":
+                            resource = kind_keys[payload["kind"]]
+                            saved = deepcopy(payload)
+                            saved["metadata"]["uid"] = str(uuid.uuid4())
+                            objects[resource] = saved
+                            calls.append("create-" + resource)
+                            if (failure, resource) in (
+                                ("marker-response", "secrets"), ("binding-response", "rolebindings")
+                            ):
+                                raise subprocess.TimeoutExpired(args, 1)
+                            return json.dumps(saved)
+                        raise AssertionError(args)
+
+                    def assert_uid(self, resource, delete):
+                        if delete["preconditions"]["uid"] != objects[resource]["metadata"]["uid"]:
+                            raise AssertionError("UID precondition differs from live object")
+
+                    def policy_list(self):
+                        live = deepcopy(self.policy)
+                        live["metadata"]["generation"] = 7
+                        live["metadata"]["uid"] = policy_uid
+                        live["status"] = {"observedGeneration": 7, "typeChecking": {}}
+                        return {"items": [live, intent["guard"]]}
+
+                    def patch_policy(self, live, desired):
+                        self.policy = desired
+                        if desired is active and failure == "policy-response":
+                            raise subprocess.TimeoutExpired("patch", 1)
+
+                    def probe(self, images=None):
+                        mode = "released-probe" if images else "held-probe"
+                        calls.append(mode)
+                        if failure == "binding-replaced" and images:
+                            objects["rolebindings"]["metadata"]["uid"] = str(uuid.uuid4())
+                            raise ValueError("synthetic replacement during released probe")
+                        if failure == mode:
+                            raise ValueError("synthetic probe failure")
+
+                tx = FakeTransaction()
+                globals_ = transaction.activate.__globals__
+                with patch.dict(globals_, current_release=lambda: (self.images, RECEIPT),
+                                wait_unauthorized=lambda *args: calls.append("401")):
+                    if failure == "success":
+                        tx.activate(self.images, cutoff)
+                        self.assertTrue((session / "kubeconfig").exists())
+                        tx.close()
+                        tx.close()
+                    else:
+                        with self.assertRaises((ValueError, subprocess.TimeoutExpired)):
+                            tx.activate(self.images, cutoff)
+
+                if failure == "binding-replaced":
+                    self.assertEqual(set(objects), {"rolebindings"})
+                    self.assertNotIn("delete-rolebindings", calls)
+                    self.assertFalse((session / "closed.json").exists())
+                else:
+                    self.assertEqual(objects, {})
+                    self.assertTrue((session / "closed.json").is_file())
+                self.assertEqual(tx.policy, self.policy)
+                self.assertFalse((session / "kubeconfig").exists())
+                if "create-rolebindings" in calls:
+                    self.assertLess(calls.index("token-identity"), calls.index("create-rolebindings"))
+                    self.assertLess(calls.index("held-probe"), calls.index("create-rolebindings"))
+                    if failure != "binding-replaced":
+                        self.assertLess(calls.index("delete-rolebindings"), calls.index("delete-secrets"))
+                if failure not in ("marker-response",):
+                    self.assertIn("401", calls)
