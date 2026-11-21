@@ -1,0 +1,20 @@
+{
+  "build_commit": "5bfadda3aeff9718bfcba293964f9f1a807f200d",
+  "forecast_commit": "87e0b8167faa0d569993437b004d6c3d85032ce1",
+  "images": {
+    "preflight": {
+      "config": "sha256:156c8ee1129f03af5a4bb4708b04171e210b5c057286a0b0670670405e9effdc",
+      "index": "sha256:fbc4b1c96d1d48834ad5615af7436dc1ac27159b1d85f565056761ebb25ade36",
+      "linux_amd64": "sha256:723ad5d7c45fed5109b8edd4c28631e903704cf6f16191cd880e5a5ed9a33fc6",
+      "repository": "ghcr.io/keneth-arias/ml-infra-qwen"
+    },
+    "trainer": {
+      "config": "sha256:183d120b9d0d60f862703299f36009e5e3ae6589a4d09246f35e5a88f6a441a6",
+      "index": "sha256:af2a985e4a4d030082d527b3f0bf6c09944a73013fffed5d5fd2f1f51525ec7b",
+      "linux_amd64": "sha256:10bdc15783d6c71000d1ce9963277787f853ca03db21e3257860cbac72e7ce5a",
+      "repository": "ghcr.io/keneth-arias/ml-infra-qwen"
+    }
+  },
+  "reader_commit": "13ad7997ee8e65385ece2cc36e5aaefdf994c61c",
+  "schema": "paired-forecast-candidate-v1"
+}
