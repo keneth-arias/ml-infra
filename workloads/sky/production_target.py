@@ -10,6 +10,23 @@ from urllib.parse import urlsplit
 from private_api import pinned_kubeconfig_ca
 
 
+def bind_tracking_client(pod):
+    """Mount the internal tracking CA and bind the same credentials for both clients."""
+    trust = "/var/run/airaware/tracking"
+    pod["volumes"].append({
+        "name": "tracking-ca",
+        "configMap": {"name": "episode-tracking", "items": [{"key": "ca.crt", "path": "ca.crt"}]},
+    })
+    pod["containers"][0]["volumeMounts"].append({
+        "name": "tracking-ca", "mountPath": trust, "readOnly": True,
+    })
+    return [
+        {"name": "MLFLOW_TRACKING_SERVER_CERT_PATH", "value": trust + "/ca.crt"},
+        {"name": "MLFLOW_TRACKING_URI", "valueFrom": {"configMapKeyRef": {"name": "episode-tracking", "key": "https-uri"}}},
+        {"name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}},
+    ]
+
+
 def kubectl_client(namespace, account, *, direct=False):
     return kubectl_client_for_identity(namespace, f"system:serviceaccount:{namespace}:{account}", direct=direct)
 

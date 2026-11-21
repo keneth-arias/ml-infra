@@ -38,7 +38,9 @@ if a.validation_sha256 and (
     p.error("Inner validation requires a distinct digest and a direct fit")
 spec = {
     "restartPolicy": "Never",
+    "serviceAccountName": "episode-input-stager",
     "automountServiceAccountToken": False,
+    "dnsConfig": {"options": [{"name": "ndots", "value": "1"}]},
     "nodeSelector": {"airaware.training/pool": "training-cpu"},
     "imagePullSecrets": [{"name": "ghcr-pull"}],
     "securityContext": {

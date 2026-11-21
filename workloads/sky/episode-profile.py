@@ -268,10 +268,8 @@ def main():
             spec["tolerations"] = [
                 {"key": "nvidia.com/gpu", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
             ]
-            tracking_env = [
-                {"name": "MLFLOW_TRACKING_URI", "valueFrom": {"configMapKeyRef": {"name": "episode-tracking", "key": "https-uri"}}},
-                {"name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}},
-            ]
+            from production_target import bind_tracking_client
+            tracking_env = bind_tracking_client(spec)
 
     if a.format != "sky":
         c = spec["containers"][0]

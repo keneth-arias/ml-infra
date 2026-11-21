@@ -75,6 +75,12 @@ class TrackingQualificationTest(unittest.TestCase):
             secret = [e["valueFrom"]["secretKeyRef"] for e in c["env"] if "secretKeyRef" in e.get("valueFrom", {})]
             self.assertEqual(secret, [{"name":"episode-tracking", "key":"token"}])
             plain_env = {e["name"]: e["value"] for e in c["env"] if "value" in e}
+            ca_volume, = [v for v in pod["volumes"] if v["name"] == "tracking-ca"]
+            ca_mount, = [m for m in c["volumeMounts"] if m["name"] == "tracking-ca"]
+            self.assertEqual(ca_volume["configMap"], {"name": "episode-tracking",
+                                                      "items": [{"key": "ca.crt", "path": "ca.crt"}]})
+            self.assertTrue(ca_mount["readOnly"])
+            self.assertEqual(plain_env["MLFLOW_TRACKING_SERVER_CERT_PATH"], ca_mount["mountPath"] + "/ca.crt")
             self.assertEqual(plain_env["MLFLOW_HTTP_REQUEST_TIMEOUT"], "5")
             self.assertEqual(plain_env["MLFLOW_HTTP_REQUEST_MAX_RETRIES"], "0")
 

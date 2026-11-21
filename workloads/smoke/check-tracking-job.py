@@ -11,7 +11,7 @@ import uuid
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "sky"))
 from production_release import current_release
-from production_target import kubectl_client_for_identity
+from production_target import bind_tracking_client, kubectl_client_for_identity
 
 
 def render(image, node, pool, name):
@@ -34,12 +34,11 @@ def render(image, node, pool, name):
                 {"name": "HOME", "value": "/tmp"}, {"name": "MLFLOW_DISABLE_TELEMETRY", "value": "true"},
                 {"name": "MLFLOW_HTTP_REQUEST_TIMEOUT", "value": "5"},
                 {"name": "MLFLOW_HTTP_REQUEST_MAX_RETRIES", "value": "0"},
-                {"name": "MLFLOW_TRACKING_URI", "valueFrom": {"configMapKeyRef": {"name": "episode-tracking", "key": "https-uri"}}},
-                {"name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}},
                 {"name": "TRACKING_PROBE_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
             ],
         }],
     }
+    pod["containers"][0]["env"].extend(bind_tracking_client(pod))
     if pool == "gpu":
         pod["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name, "namespace": "training"},

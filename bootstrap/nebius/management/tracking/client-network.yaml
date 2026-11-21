@@ -1,0 +1,52 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: training}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tracking-client, namespace: training}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: airaware.training/phase, operator: In, values: [fit, infer, tracking-check]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector:
+            matchLabels: {app.kubernetes.io/instance: coredns, app.kubernetes.io/name: coredns, k8s-app: coredns}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: tracking}}
+          podSelector: {matchLabels: {app: mlflow}}
+      ports: [{port: 8443, protocol: TCP}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: episode-input-stager, namespace: training}
+automountServiceAccountToken: false
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: stage-versioned-inputs, namespace: training}
+spec:
+  endpointSelector:
+    matchLabels:
+      io.cilium.k8s.policy.serviceaccount: episode-input-stager
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:app.kubernetes.io/instance: coredns
+            k8s:app.kubernetes.io/name: coredns
+            k8s:k8s-app: coredns
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules: {dns: [{matchName: storage.eu-south1.nebius.cloud}]}
+    - toFQDNs: [{matchName: storage.eu-south1.nebius.cloud}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
