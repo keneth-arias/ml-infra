@@ -106,8 +106,10 @@ class ObjectSet:
                         remaining -= len(block)
                     if src.read(1):
                         raise ValueError("Oversize object")
-            except Exception:
-                raise OSError(f"Versioned download failed for {name}") from None
+            except Exception as exc:
+                raise OSError(
+                    f"Versioned download failed for {name} ({type(exc).__name__})"
+                ) from None
             if check_manifest and name == "manifest.json":
                 check_manifest(output)
 

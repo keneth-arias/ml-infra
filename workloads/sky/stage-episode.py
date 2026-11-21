@@ -6,7 +6,10 @@ import json
 import re
 
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument("--image", required=True, help="Approved preflight image digest")
+p.add_argument(
+    "--image", required=True,
+    help="Digest of the input-staging image or a derived preflight image providing /usr/local/bin/python",
+)
 p.add_argument("--inventory-secret", required=True)
 p.add_argument("--source-prefix", required=True)
 p.add_argument("--weights-sha256", required=True)

@@ -9,7 +9,6 @@ import shutil
 import stat
 import time
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from episode_job import bundle, bundle_manifest, verify_base
 from versioned_episode_inputs import ObjectSet, sources
@@ -42,12 +41,34 @@ def sync(path):
         os.close(fd)
 
 
+def discard_partial(path):
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except PermissionError:
+        # Local copies can inherit read-only directory modes from the source.
+        # Only change staging directories, never files or symlink targets.
+        if path.is_symlink():
+            raise
+        path.chmod(0o700)
+        for directory, children, _ in os.walk(path):
+            for child in children:
+                folder = Path(directory) / child
+                if not folder.is_symlink():
+                    folder.chmod(0o700)
+        shutil.rmtree(path)
+
+
 def publish(parent, key, source, verify, *, check_manifest=None):
     started = time.monotonic()
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     final = parent / digest(key)
     with (parent / (key + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # Only a previous holder of this digest's lock could have left this copy.
+        partial = parent / (".staging-" + key)
+        discard_partial(partial)
         if final.exists():
             tree_size(final)
             verify(final)
@@ -58,8 +79,9 @@ def publish(parent, key, source, verify, *, check_manifest=None):
                 and tree_size(source) > shutil.disk_usage(parent).free
             ):
                 raise OSError("Insufficient free space for staged revision")
-            with TemporaryDirectory(dir=parent, prefix=".staging-") as tmp:
-                stage = Path(tmp) / "contents"
+            partial.mkdir(mode=0o700)
+            try:
+                stage = partial / "contents"
                 if isinstance(source, ObjectSet):
                     source.copy(stage, check_manifest)
                 else:
@@ -74,6 +96,8 @@ def publish(parent, key, source, verify, *, check_manifest=None):
                     sync(directory)
                 stage.rename(final)
                 sync(parent)
+            finally:
+                discard_partial(partial)
             outcome = "miss"
     return {"revision": key, "cache": outcome, "seconds": time.monotonic() - started}
 

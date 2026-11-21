@@ -1,8 +1,10 @@
 """Cover versioned and local staging for the two separately pinned training roles."""
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
+import signal
 import subprocess
 import sys
 import tempfile
@@ -105,6 +107,51 @@ class CohortStageTest(unittest.TestCase):
         self.assertIn("cohort protocol", denied.stderr)
         self.assertFalse((self.root / "cache/bundles" / validation).exists())
 
+    def test_concurrent_publishers_and_corrupt_cache_hit(self):
+        fit, validation = self.role("fit"), self.role("inner_validation")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            jobs = [pool.submit(self.launch, fit, validation, "inner_validation") for _ in range(4)]
+            receipts = []
+            for job in jobs:
+                result = job.result()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipts.append(json.loads(result.stdout))
+        for role in ("phase", "inner_validation", "weights"):
+            self.assertCountEqual([r[role]["cache"] for r in receipts], ["miss", "hit", "hit", "hit"])
+        data = self.root / "cache/bundles" / fit / "data.npz"
+        data.write_bytes(b"corrupted")
+        denied = self.launch(fit, validation, "inner_validation")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(data.read_bytes(), b"corrupted")
+
+    def test_retry_recovers_only_its_interrupted_copy(self):
+        fit, validation = self.role("fit"), self.role("inner_validation")
+        bundles = self.root / "cache/bundles"
+        worker = """
+import os, signal, sys
+from pathlib import Path
+from stage_episode_inputs import publish
+parent, key, source = sys.argv[1:]
+def interrupt(stage):
+    stage.chmod(0o555)
+    os.kill(os.getpid(), signal.SIGKILL)
+publish(Path(parent), key, Path(source), interrupt)
+"""
+        for key in (fit, "c" * 64):
+            result = subprocess.run(
+                [sys.executable, "-c", worker, bundles, key, self.root / "fit"],
+                cwd=ROOT / "runtime",
+            )
+            self.assertEqual(result.returncode, -signal.SIGKILL)
+        partial = bundles / (".staging-" + fit)
+        other = bundles / (".staging-" + "c" * 64)
+        self.assertTrue(partial.is_dir())
+        result = self.launch(fit, validation, "inner_validation")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["phase"]["cache"], "miss")
+        self.assertFalse(partial.exists())
+        self.assertTrue(other.is_dir())
+
     def test_inventory_restricts_each_role_to_its_own_prefix(self):
         prefix = "https://storage.eu-south1.nebius.cloud/example/run/"
 
@@ -154,6 +201,42 @@ class CohortStageTest(unittest.TestCase):
                 )
             opener.return_value.open.assert_called_once_with(rows[1]["url"], timeout=30)
         self.assertFalse((self.root / "out/data.npz").exists())
+
+    def test_versioned_download_enforces_metadata_and_exact_size(self):
+        prefix = "https://storage.eu-south1.nebius.cloud/example/run/trainer/fit/"
+        record = {
+            "name": "data.npz",
+            "url": prefix + "data.npz?versionId=1&signature=private-fixture",
+            "version_id": "1",
+            "size": 2,
+        }
+        files = ObjectSet([record], prefix, False, exact_keys=True)
+        cases = [
+            ("valid", "1", "2", b"ab"),
+            ("version", "2", "2", b"ab"),
+            ("length", "1", "3", b"ab"),
+            ("short", "1", "2", b"a"),
+            ("oversize", "1", "2", b"abc"),
+        ]
+        for name, version, length, payload in cases:
+            with self.subTest(name=name), patch("versioned_episode_inputs.build_opener") as opener:
+                response = io.BytesIO(payload)
+                response.headers = {"x-amz-version-id": version, "Content-Length": length}
+                opener.return_value.open.return_value = response
+                target = self.root / name
+                if name == "valid":
+                    files.copy(target)
+                    self.assertEqual((target / "data.npz").read_bytes(), b"ab")
+                else:
+                    with self.assertRaisesRegex(OSError, "Versioned download failed"):
+                        files.copy(target)
+        with patch("versioned_episode_inputs.build_opener") as opener:
+            opener.return_value.open.side_effect = TimeoutError(record["url"])
+            with self.assertRaises(OSError) as caught:
+                files.copy(self.root / "network-error")
+            self.assertIn("TimeoutError", str(caught.exception))
+            self.assertNotIn("private-fixture", str(caught.exception))
+            self.assertTrue(caught.exception.__suppress_context__)
 
     def test_render_paired_staging(self):
         args = [
