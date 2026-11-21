@@ -184,8 +184,18 @@ class NebiusRenderTest(unittest.TestCase):
             self.assertEqual(pod["serviceAccountName"], "episode-worker")
             self.assertFalse(pod["automountServiceAccountToken"])
             inputs = next(v for v in pod["volumes"] if v["name"] == "inputs")
-            self.assertTrue(inputs["persistentVolumeClaim"]["readOnly"])
+            self.assertEqual(inputs["persistentVolumeClaim"]["claimName"], "airaware-checkpoints")
+            self.assertEqual(bool(inputs["persistentVolumeClaim"].get("readOnly")), mode == "preflight")
+            self.assertEqual(sum("persistentVolumeClaim" in v for v in pod["volumes"]), 1)
+            mounts = {m["mountPath"]: m for m in pod["containers"][0]["volumeMounts"]}
+            self.assertTrue(mounts["/bundle"]["readOnly"])
+            self.assertTrue(mounts["/base"]["readOnly"])
+            self.assertEqual(pod["securityContext"]["fsGroup"], 1000)
+            if mode == "job":
+                self.assertEqual(mounts["/state"], {"name": "inputs", "mountPath": "/state",
+                                                     "readOnly": False, "subPath": "episodes/cloud-run/state"})
             if mode == "preflight":
+                self.assertNotIn("/state", mounts)
                 self.assertNotIn("tolerations", pod)
                 self.assertEqual(pod["nodeSelector"], {"airaware.training/pool": "training-cpu"})
             else:

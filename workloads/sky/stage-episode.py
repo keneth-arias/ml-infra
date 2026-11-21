@@ -59,7 +59,7 @@ spec = {
                 "/usr/local/bin/python",
                 "/opt/ml-infra/stage_episode_inputs.py",
                 "--cache",
-                "/inputs/airaware/cache",
+                "/inputs",
                 "--inventory",
                 "/source/inventory.json",
                 "--source-prefix",
@@ -84,7 +84,7 @@ spec = {
                 "limits": {"cpu": "2", "memory": "512Mi"},
             },
             "volumeMounts": [
-                {"name": "inputs", "mountPath": "/inputs"},
+                {"name": "inputs", "mountPath": "/inputs", "subPath": "airaware/cache"},
                 {"name": "source", "mountPath": "/source", "readOnly": True},
             ],
         }
