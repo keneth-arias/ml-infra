@@ -116,6 +116,11 @@ class ObjectSet:
 
 def sources(inventory, prefix, *, paired=False):
     data = json.loads(Path(inventory).read_text())
+    required = ("base", "bundle", "inner_validation") if paired else ("base", "bundle")
+    if not isinstance(data, dict) or any(not isinstance(data.get(key), list) for key in required):
+        raise ValueError("Expected a list of objects for each required inventory role")
+    if not paired and "inner_validation" in data:
+        raise ValueError("A paired inventory requires a pinned validation digest")
     if paired:
         if not prefix.endswith("/"):
             raise ValueError("Expected the approved versioned source directory prefix")

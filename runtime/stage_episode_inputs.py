@@ -88,6 +88,8 @@ def publish(parent, key, source, verify, *, check_manifest=None):
                     if check_manifest:
                         check_manifest(source / "manifest.json")
                     shutil.copytree(source, stage, symlinks=True)
+                    # Cross-parent rename needs write permission on the copied directory.
+                    stage.chmod(stat.S_IMODE(stage.stat().st_mode) | stat.S_IWUSR)
                 tree_size(stage)
                 verify(stage)
                 for directory, _, names in os.walk(stage, topdown=False):

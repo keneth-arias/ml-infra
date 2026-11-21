@@ -126,6 +126,9 @@ class CohortStageTest(unittest.TestCase):
 
     def test_retry_recovers_only_its_interrupted_copy(self):
         fit, validation = self.role("fit"), self.role("inner_validation")
+        source = self.root / "fit"
+        source.chmod(0o555)
+        self.addCleanup(source.chmod, 0o700)
         bundles = self.root / "cache/bundles"
         worker = """
 import os, signal, sys
@@ -151,6 +154,10 @@ publish(Path(parent), key, Path(source), interrupt)
         self.assertEqual(json.loads(result.stdout)["phase"]["cache"], "miss")
         self.assertFalse(partial.exists())
         self.assertTrue(other.is_dir())
+        self.assertEqual(source.stat().st_mode & 0o777, 0o555)
+        hit = self.launch(fit, validation, "inner_validation")
+        self.assertEqual(hit.returncode, 0, hit.stderr)
+        self.assertEqual(json.loads(hit.stdout)["phase"]["cache"], "hit")
 
     def test_inventory_restricts_each_role_to_its_own_prefix(self):
         prefix = "https://storage.eu-south1.nebius.cloud/example/run/"
@@ -175,6 +182,16 @@ publish(Path(parent), key, Path(source), interrupt)
         path.write_text(json.dumps(inv))
         with self.assertRaises(ValueError):
             sources(path, prefix, paired=True)
+
+    def test_unpaired_inventory_requires_base_and_bundle_lists(self):
+        prefix = "https://storage.eu-south1.nebius.cloud/example/run/"
+        path = self.root / "inventory.json"
+        for invalid in ([], {"base": []}, {"base": [], "bundle": {}},
+                        {"base": [], "bundle": [], "inner_validation": []}):
+            with self.subTest(invalid=invalid):
+                path.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError, "inventory"):
+                    sources(path, prefix)
 
     def test_invalid_remote_manifest_prevents_payload_download(self):
         prefix = "https://storage.eu-south1.nebius.cloud/example/run/trainer/fit/"
@@ -260,6 +277,7 @@ publish(Path(parent), key, Path(source), interrupt)
             "b" * 64,
         ]
         job = json.loads(subprocess.check_output(args))
+        self.assertEqual(job["spec"]["ttlSecondsAfterFinished"], 86400)
         cmd = job["spec"]["template"]["spec"]["containers"][0]["command"]
         self.assertEqual(cmd[cmd.index("--validation-sha256") + 1], "b" * 64)
         args[args.index("--phase") + 1] = "infer"
