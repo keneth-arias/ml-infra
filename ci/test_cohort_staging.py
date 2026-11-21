@@ -181,3 +181,25 @@ class CohortStageTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--validation-sha256") + 1], "b" * 64)
         args[args.index("--phase") + 1] = "infer"
         self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
+
+    def test_legacy_point_control_files_remain_loadable(self):
+        prefix = "https://storage.eu-south1.nebius.cloud/example/run/"
+        rows = [
+            {
+                "name": name,
+                "url": prefix + name + "?versionId=1",
+                "version_id": "1",
+                "size": 4,
+            }
+            for name in (
+                "data.npz",
+                "manifest.json",
+                "quantile-fit.json",
+                "quantile-checkpoint.json",
+            )
+        ]
+        self.assertEqual(
+            set(ObjectSet(rows, prefix, False).records), {r["name"] for r in rows}
+        )
+        with self.assertRaises(ValueError):
+            ObjectSet(rows, prefix, False, exact_keys=True)

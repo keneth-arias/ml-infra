@@ -34,6 +34,10 @@ class ObjectSet:
                 (name == "SHA256SUMS" or name.startswith("weights/"))
                 if base
                 else name in {"manifest.json", "data.npz", "thresholds.json"}
+                or (
+                    not exact_keys
+                    and name in {"quantile-fit.json", "quantile-checkpoint.json"}
+                )
             )
             if (
                 not allowed

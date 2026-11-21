@@ -1,9 +1,15 @@
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS input-staging
+COPY episode_job.py stage_episode_inputs.py versioned_episode_inputs.py /opt/ml-infra/
+ARG INFRA_SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$INFRA_SOURCE_REVISION
+USER 1000:1000
+
 FROM ghcr.io/keneth-arias/ml-infra-qwen@sha256:32b27ab5bc82060bde95e565348dd7fd54b004015cc2dddd7df0747653fbe1d9
 COPY forecast/src/opentslm/ /opt/forecast/src/opentslm/
 COPY forecast/scripts/train_qwen_forecast.py /opt/forecast/train_qwen_forecast.py
 COPY reader/ /opt/reader/
 RUN uv sync --project /opt/reader --locked --python /opt/reader-python/bin/python3.13
-COPY episode_job.py /opt/ml-infra/episode_job.py
+COPY --from=input-staging /opt/ml-infra/ /opt/ml-infra/
 ARG INFRA_SOURCE_REVISION
 ENV INFRA_SOURCE_REVISION=${INFRA_SOURCE_REVISION}
 ARG FORECAST_SOURCE_REVISION

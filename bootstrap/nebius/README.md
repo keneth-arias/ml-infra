@@ -50,3 +50,14 @@ python3 workloads/sky/stage-episode.py --phase fit --head direct \
 Under that prefix the paired inventory’s `base`, `bundle` and `inner_validation` lists refer to exact versioned keys in `base/`, `trainer/fit/` and `trainer/inner_validation/`. Each list item supplies its relative `name`, byte `size`, `version_id` and a matching version-specific HTTPS `url`. Keep scorer objects and credentials in separately authorized storage. The stager checks the role manifest before fetching its data. It verifies both roles share the protocol, historical source, base and fit-derived threshold table before returning success. The receipt records cold copies or verified cache hits for each digest. A retry can reuse individually verified entries after a partial failure.
 
 For a local qualification, supply `--base`, `--bundle` and `--validation-bundle` to `runtime/stage_episode_inputs.py` along with the digest and cache arguments. The managed Job requires the released image containing this stager and the prepared training claim.
+
+The episode Dockerfile packages the staging entry point and its dependencies. To check the committed CPU stage independently on bm, build the `input-staging` target from the archived runtime sources and invoke its CLI:
+
+```bash
+sha=$(git rev-parse HEAD)
+git archive "$sha:runtime" Dockerfile.episodes episode_job.py stage_episode_inputs.py versioned_episode_inputs.py | \
+  docker build --target input-staging --build-arg "INFRA_SOURCE_REVISION=$sha" -f Dockerfile.episodes -t "episode-stage:$sha" -
+docker run --rm --network none "episode-stage:$sha" python /opt/ml-infra/stage_episode_inputs.py --help
+```
+
+This target qualifies input staging. The production three-image release still needs its complete CPU preflight and a trainer that verifies and consumes both role manifests.
