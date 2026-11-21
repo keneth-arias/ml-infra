@@ -19,7 +19,7 @@ python3 bootstrap/nebius/management/rootless/install-template.py --check "$serve
 
 Qualify the image on the local Kubernetes worker with one token-free pod, UID 1000, `allowPrivilegeEscalation: false`, all capabilities dropped and `RuntimeDefault` seccomp. Record the resolved index, platform manifest and config digest. Exercise job completion, logs, authenticated SSH over port-forward, job cancellation and teardown before promoting the identical OCI bytes to the private registry.
 
-The [qualification task](qualification-task.yaml) contains the pilot's placement, resource limits, runtime checks and pod security settings. The pod has a 15-minute qualification deadline and a 30-second termination grace period. Its service account is precreated. The worker starts the SSH server in the foreground after Ray initialization. SSH errors reach the pod log and server exit ends the head. Operators reach port 22 through the Kubernetes API. SSH-level TCP and Unix-socket forwarding are disabled. The worker uses its writable container home and temporary storage. Keep high availability disabled for this single head (pod restart policy `Never`). Set the dedicated API server’s configuration as follows.
+The [qualification task](qualification-task.yaml) contains the pilot's placement, resource limits, runtime checks and pod security settings. The pod has a 15-minute qualification deadline and a 30-second termination grace period. Its service account is precreated. The worker starts the SSH server in the foreground after Ray initialization. Use `sky logs` for task output and `kubectl logs` for bootstrap and SSH diagnostics. Server exit ends the head. If Ray exits later while SSH is healthy, the pod can stay Running. Check job status through SkyPilot and tear down the failed pilot within its deadline. Operators reach port 22 through the Kubernetes API. SSH-level TCP and Unix-socket forwarding are disabled. The worker uses its writable container home and temporary storage. Keep high availability disabled for this single head (pod restart policy `Never`). Set the dedicated API server’s configuration as follows.
 
 ```yaml
 allowed_clouds: [kubernetes]
@@ -45,11 +45,13 @@ skopeo copy --all --preserve-digests --authfile "$private_authfile" \
 skopeo inspect --authfile "$private_authfile" --raw "docker://$repository@$index" | sha256sum
 ```
 
+CI resolves the build commit through the remote tag `rootless-build-$build_commit`. Publish it from the source checkout with `git push origin "$build_commit:refs/tags/rootless-build-$build_commit"`. An existing tag must resolve to the same commit.
+
 Compare the registry index against the build receipt. Use separate pull-only credentials to fetch the index, platform manifest and blobs before pinning the approved digest in the production admission policy.
 
 ### Refresh the worker lock
 
-Resolve on linux/amd64 with CPython 3.11 and the base image's pip. SkyPilot 0.14.3 requires Click below 8.2, which tightens the top-level cap. The qualified Pydantic 2.12.0 distribution requires exactly pydantic-core 2.41.1. Keep those versions together during updates. Downloading the committed hashes replays the qualified wheel set. For a dependency update, generate a fresh resolver report in a disposable environment and emit one wheel hash per resolved package. Preserve the separate build tools, review the diff, run the image's `pip check`, then repeat qualification.
+Resolve on linux/amd64 with CPython 3.11 and the base image's pip. SkyPilot 0.14.3 requires Click below 8.2, which tightens the `click<8.3` bound in `requirements.in`. The qualified Pydantic 2.12.0 distribution requires exactly pydantic-core 2.41.1. Keep those versions together during updates. Downloading the committed hashes replays the qualified wheel set. For a dependency update, generate a fresh resolver report in a disposable environment and emit one wheel hash per resolved package. Preserve the separate build tools, review the diff, run the image's `pip check`, then repeat qualification.
 
 ```bash
 dir=bootstrap/nebius/management/rootless
