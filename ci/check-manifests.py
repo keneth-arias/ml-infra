@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["kubernetes-validate==1.35.0", "PyYAML==6.0.3", "jsonschema==4.26.0"]
+# dependencies = ["kubernetes-validate==1.36.0", "PyYAML==6.0.3", "jsonschema==4.26.0"]
 # ///
 """Render each cluster and its Flux overlays, and validate their objects offline."""
 from pathlib import Path
@@ -17,7 +17,7 @@ def render(path):
     return [resource for resource in yaml.safe_load_all(output) if resource]
 
 
-def validate_cluster(cluster):
+def validate_cluster(cluster, minor):
     objects = render(cluster)
     paths = {
         obj["spec"]["path"] for obj in objects
@@ -50,7 +50,9 @@ def validate_cluster(cluster):
         if schema:
             jsonschema.validate(obj, schema)
         else:
-            kubernetes_validate.validate(obj, "1.35.0", strict=True)
+            version = kubernetes_validate.validate(obj, minor, strict=True)
+            if version != minor:
+                raise ValueError(f"Expected Kubernetes {minor} schemas, selected {version}")
     print(f"{cluster}: validated {len(objects)} objects")
 
 
@@ -68,4 +70,5 @@ def images(node):
 
 if __name__ == "__main__":
     for cluster in sorted(Path("clusters").glob("*/kustomization.yaml")):
-        validate_cluster(cluster.parent)
+        validate_cluster(cluster.parent, "1.36" if cluster.parent.name.startswith("prod-") else "1.35")
+    validate_cluster(Path("platform/overlays/prod/sky-cpu"), "1.36")

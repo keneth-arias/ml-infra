@@ -6,6 +6,7 @@ on:
       - bootstrap/nebius/management/rootless/**
       - bootstrap/nebius/releases/**
       - ci/verify-rootless-image.py
+      - platform/overlays/prod/sky-cpu/**
   workflow_dispatch:
 permissions:
   contents: read
