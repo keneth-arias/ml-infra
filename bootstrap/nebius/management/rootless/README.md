@@ -18,3 +18,30 @@ python3 bootstrap/nebius/management/rootless/install-template.py --check "$serve
 ```
 
 Qualify the image on the local Kubernetes worker with one token-free pod, UID 1000, `allowPrivilegeEscalation: false`, all capabilities dropped and `RuntimeDefault` seccomp. Record the resolved index, platform manifest and config digest. Exercise job completion, logs, authenticated SSH over port-forward, job cancellation and teardown before promoting the identical OCI bytes to the private registry.
+
+The [qualification task](qualification-task.yaml) contains the pilot's placement, resource limits, runtime checks and pod security settings. Its service account is precreated. The worker uses its writable container home and temporary storage. Keep high availability disabled for this single head (pod restart policy `Never`). Set the dedicated API server’s configuration as follows.
+
+```yaml
+allowed_clouds: [kubernetes]
+kubernetes:
+  allowed_contexts: [prod-nebius]
+  namespace: sky-cpu
+  remote_identity: NONE
+  context_configs:
+    prod-nebius:
+      ports: podip
+```
+
+SkyPilot 0.14.3 reaches SSH through Kubernetes port-forward. The task declares no application ports. On the existing local worker use its isolated test namespace, selector and imported image. On the managed cluster the `sky-cpu-pull` Secret supplies pull-only registry credentials. Supply the qualified image by digest when rendering the task.
+
+```bash
+index=$(jq -er '."containerimage.digest"' "$output/build.json")
+repository=ghcr.io/keneth-arias/ml-infra-sky-cpu
+sed "s|REPLACE_WITH_QUALIFIED_DIGEST_REFERENCE|$repository@$index|" \
+  bootstrap/nebius/management/rootless/qualification-task.yaml > "$output/task.yaml"
+skopeo copy --all --preserve-digests --authfile "$private_authfile" \
+  "oci-archive:$output/worker.tar" "docker://$repository:candidate-$build_commit"
+skopeo inspect --authfile "$private_authfile" --raw "docker://$repository@$index" | sha256sum
+```
+
+Compare the registry index against the build receipt. Use separate pull-only credentials to fetch the index, platform manifest and blobs before pinning the approved digest in the production admission policy.

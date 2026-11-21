@@ -13,6 +13,7 @@ STOCK = "ddd468efa7a6fd76fd601ab41324433d8130ecbad83bc01627d51e3ec246f62a"
 POD = """          command: ["/usr/bin/tini", "--", "/bin/bash", "-ec"]
           args:
             - |
+              rm -f /tmp/sky-cpu-ready
               mkdir -p "$HOME/sky_workdir" "$HOME/.sky/sky_app"
               python3 -m venv --without-pip --system-site-packages "$HOME/skypilot-runtime"
               /opt/sky-cpu/start-worker <<'SKYPILOT_SSH_KEY_EOF'
