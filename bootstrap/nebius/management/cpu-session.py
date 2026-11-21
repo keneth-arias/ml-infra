@@ -4,10 +4,12 @@
 import argparse
 import base64
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPSConnection
 import json
 import os
 from pathlib import Path
 import re
+import ssl
 import subprocess
 import sys
 import time
@@ -85,6 +87,36 @@ def revoke(client, receipt):
     while live_uid() == uid:
         if time.monotonic() >= deadline:
             raise ValueError("Session marker is still present; keep the receipt and retry revocation")
+        time.sleep(1)
+
+
+def wait_unauthorized(target, ca, credential):
+    # Read only the token field. Always connect directly to the operator-pinned
+    # managed API, irrespective of any other settings in the delivered file.
+    token = json.loads(credential.read_bytes())["users"][0]["user"]["token"]
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cadata=ca.decode("ascii"))
+    host = api_host(target["cluster_id"], target["endpoint"])
+    body = json.dumps({"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview"})
+    deadline = time.monotonic() + 75
+    while True:
+        connection = HTTPSConnection(host, context=context, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+                body,
+                {"Content-Type": "application/json", "Authorization": "Bearer " + token},
+            )
+            status = connection.getresponse().status
+        finally:
+            connection.close()
+        if status == 401:
+            return
+        if status not in (200, 201) or time.monotonic() >= deadline:
+            raise ValueError(
+                f"Credential rejection unconfirmed (API status {status}); retain the receipt and retry"
+            )
         time.sleep(1)
 
 
@@ -167,9 +199,15 @@ def issue(client, ca, target, session, account, seconds):
         )
         write_private(session / "issued.json", receipt)
         pending.rename(session / "kubeconfig")
-    except BaseException:
-        (session / "pending").unlink(missing_ok=True)
-        revoke(client, receipt)
+    except BaseException as error:
+        try:
+            revoke(client, receipt)
+        except Exception as rollback:
+            error.add_note(f"Marker revocation unconfirmed ({type(rollback).__name__}); reconcile {name}")
+        try:
+            (session / "pending").unlink(missing_ok=True)
+        except OSError as cleanup:
+            error.add_note(f"Remove the protected pending file after revocation ({type(cleanup).__name__})")
         raise
     return receipt
 
@@ -206,13 +244,23 @@ def main():
             p.error("Expected a session between 10 minutes and 8 hours")
         print(json.dumps(issue(client, ca, target, directory, a.account, a.seconds), sort_keys=True))
     else:
+        if (
+            directory.is_symlink()
+            or directory.stat().st_mode & 0o077
+            or directory.stat().st_uid != os.getuid()
+        ):
+            p.error("Use the original private session directory")
         receipt = json.loads((directory / "marker.json").read_bytes())
         if any(receipt[k] != v for k, v in target.items()):
             p.error("Session belongs to another target")
         revoke(client, receipt)
-        for credential in ("pending", "kubeconfig"):
-            (directory / credential).unlink(missing_ok=True)
-        print("Revoked", receipt["account"], "session", receipt["marker"])
+        issued = directory / "kubeconfig"
+        if issued.exists():
+            wait_unauthorized(target, ca, issued)
+            issued.unlink()
+            print("Managed API returned HTTP 401 for the revoked credential")
+        (directory / "pending").unlink(missing_ok=True)
+        print("Closed", receipt["account"], "session", receipt["marker"])
 
 
 if __name__ == "__main__":

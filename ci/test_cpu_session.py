@@ -112,3 +112,31 @@ class CPUSessionTests(unittest.TestCase):
         with patch.object(session, "kubectl", cluster.kubectl):
             session.revoke(["kubectl"], receipt)
         self.assertFalse(cluster.deleted)
+
+    def test_rollback_attempts_both_cleanups_preserving_the_original_error(self):
+        cluster = Cluster(identity="wrong")
+        with (
+            patch.object(session, "kubectl", cluster.kubectl),
+            patch.object(Path, "unlink", side_effect=PermissionError("synthetic")),
+            self.assertRaisesRegex(ValueError, "unexpected identity") as errors,
+        ):
+            session.issue(["kubectl"], b"ca", TARGET, self.path, "cpu-submit", 900)
+        self.assertEqual(cluster.deleted, [UID])
+        self.assertTrue(any("pending file" in note for note in errors.exception.__notes__))
+
+    def test_revoke_waits_for_401_and_refuses_inconclusive_status(self):
+        from unittest.mock import Mock
+
+        self.path.write_text(json.dumps({"users": [{"user": {"token": "synthetic"}}]}))
+        with (
+            patch.object(session.ssl, "SSLContext"),
+            patch.object(session.time, "sleep") as pause,
+            patch.object(session, "HTTPSConnection") as conn,
+        ):
+            instance = conn.return_value
+            instance.getresponse.side_effect = [Mock(status=201), Mock(status=401), Mock(status=403)]
+            session.wait_unauthorized(TARGET, b"fixture", self.path)
+            pause.assert_called_once()
+            self.assertEqual(instance.close.call_count, 2)
+            with self.assertRaisesRegex(ValueError, "403"):
+                session.wait_unauthorized(TARGET, b"fixture", self.path)

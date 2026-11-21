@@ -5,21 +5,25 @@
 
 The operator on bm can issue a bounded credential for `sky-cpu:sky-backend` or `sky-cpu:cpu-submit` with [cpu-session.py](cpu-session.py). Each session creates an immutable, empty Secret in `sky-cpu`. Kubernetes binds the requested API token to that marker's UID. Revoking one session leaves the ServiceAccount and its other sessions available. The expiry and API audiences in `issued.json` are the values returned by the managed API. [Kubernetes bound service account tokens](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-tokens)
 
-On the trusted operator host, use the production cluster ID and CA digest recorded independently from the Nebius management API. Keep the sessions in a private, operator-owned directory on temporary storage. The protected `kubeconfig` is the only file for delivery to its intended consumer. The marker and issuance receipts can be retained separately for audit.
+On the trusted operator host, use the production cluster ID and CA digest recorded independently from the Nebius management API. Select the operator kubeconfig for the approved public endpoint on bm. A kubeconfig generated with `--internal` belongs to the private route. For that route select `NEBIUS_API_ENDPOINT=private` throughout instead. Keep the sessions in a private, operator-owned directory on temporary storage. The protected `kubeconfig` is the only file for delivery to its intended consumer. The marker and issuance receipts can be retained separately for audit.
 
 ```bash
 umask 077
 sessions=$(mktemp -d "${XDG_RUNTIME_DIR:?}/cpu-pilot.XXXXXXXX")
+export NEBIUS_API_ENDPOINT=public
+: "${OPERATOR_CONFIG:?select the verified operator kubeconfig for this endpoint}"
+: "${NEBIUS_TRAINING_CLUSTER_ID:?}" "${NEBIUS_CA_BUNDLE_SHA256:?}"
+export NEBIUS_TRAINING_CLUSTER_ID NEBIUS_CA_BUNDLE_SHA256
 issuer=(python3 bootstrap/nebius/management/cpu-session.py
-  --operator-config "$HOME/.kube/nebius-prod" --endpoint public
+  --operator-config "$OPERATOR_CONFIG" --endpoint "$NEBIUS_API_ENDPOINT"
   --cluster-id "$NEBIUS_TRAINING_CLUSTER_ID" --ca-bundle-sha256 "$NEBIUS_CA_BUNDLE_SHA256")
 "${issuer[@]}" issue --account sky-backend --seconds 1800 "$sessions/backend-a"
 "${issuer[@]}" issue --account cpu-submit --seconds 1800 "$sessions/native"
 ```
 
-Install the backend kubeconfig atomically with owner `sky-cpu` and mode 0600. Give the native configuration to the native client. Set an attended stop timer before starting the authenticated HTTPS proxy and isolated SkyPilot API. Allow for backend shutdown and restart before the earliest credential expiry. For renewal, issue a second session for the same account into a new directory, atomically replace the delivered file, and restart the backend during an idle handoff. Verify the effective Kubernetes identity, namespace, authenticated client/server version and scoped access with the new credential. A server-side dry run with the released image checks admission. Scheduling and image pulls require a funded worker.
+Install the backend kubeconfig atomically with owner `sky-cpu` and mode 0600. Give the native configuration to the native client. Set an attended stop timer before starting the authenticated HTTPS proxy and isolated SkyPilot API. Allow for backend shutdown and restart before the earliest credential expiry. For renewal, issue a second session for the same account into a new directory, atomically replace the delivered file, and restart the backend during an idle handoff. Verify the effective Kubernetes identity, namespace, authenticated client/server version and scoped access with the new credential. Run the [CPU admission probe](../../../workloads/smoke/check-cpu-admission.py) with the endpoint, cluster ID and CA pin from the issuance environment and the new backend credential. For example, from the checkout root run `NEBIUS_SUBMIT_KUBECONFIG="$sessions/backend-b/kubeconfig" uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"` with the independently verified image reference. Scheduling and image pulls require a funded worker.
 
-Revoke the old session with `"${issuer[@]}" revoke "$sessions/backend-a"`. The delete is conditional on the original marker UID. Verify that a protected transient copy of the previous credential receives an authentication rejection while the new session still works. At closure stop the attended services, revoke each remaining session, remove delivered credential copies and capture the inventory. If the issue process lost the marker-create response, `intent.json` identifies the marker to reconcile with the operator context. Verify its name, session label, UID and immutable empty contents before removing that orphan. A run interrupted after `marker.json` was written can be closed directly with `revoke`. An unattended token broker remains a separate deployment.
+Revoke the old session with `"${issuer[@]}" revoke "$sessions/backend-a"`. The delete is conditional on the original marker UID. When the issued kubeconfig is available the command waits up to 75 seconds for its own SelfSubjectReview to return HTTP 401 before removing it. Verify the new session still works. If a request times out or the API returns an inconclusive status, retain the session directory and retry closeout. At closure stop the attended services, revoke each remaining session, remove delivered credential copies and capture the inventory. If the issue process lost the marker-create response, `intent.json` identifies the marker to reconcile with the operator context. Verify its name, session label, UID and immutable empty contents before removing that orphan. A run interrupted after `marker.json` was written can be closed directly with `revoke`. An unattended token broker remains a separate deployment.
 
 ## Check the allocation
 
