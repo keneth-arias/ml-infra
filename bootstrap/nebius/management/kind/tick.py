@@ -199,14 +199,16 @@ def verify_allocated_inventory(profile, scope, baseline, groups):
                     else ("cpu-d3", "4vcpu-16gb"))
         boot = vm["spec"]["boot_disk"]["managed_disk"]
         labels = {"mk8s-cluster-id": cluster, "mk8s-node-group-id": group_id}
-        attachments = [row for row in vm_status.get("disk_attachments", [])
-                       if row.get("name") == boot["name"]]
+        attachments = vm_status.get("disk_attachments", [])
+        boot_attachments = [row for row in attachments if row.get("name") == boot["name"]]
+        data_disk_ids = {row.get("id") for row in attachments if row.get("name") != boot["name"]}
         if (
             (resources["platform"], resources["preset"]) != expected
             or boot["name"] != disk["metadata"]["name"]
-            or len(attachments) != 1
-            or attachments[0].get("id") != disk_id
-            or attachments[0].get("is_managed") is not True
+            or len(boot_attachments) != 1
+            or boot_attachments[0].get("id") != disk_id
+            or boot_attachments[0].get("is_managed") is not True
+            or not data_disk_ids <= set(baseline["disk_ids"])
             or any(row.get("labels", {}).get(k) != v for row in
                    (vm["metadata"], boot, disk["metadata"]) for k, v in labels.items())
         ):

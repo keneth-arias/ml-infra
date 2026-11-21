@@ -139,6 +139,14 @@ class KindBackup(unittest.TestCase):
                 with self.subTest(changes=changes), patch.dict(status, changes), self.assertRaises(ValueError):
                     tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
 
+            retained = {"name": "postgres-csi", "id": "approved-csi", "is_managed": False}
+            with patch.dict(inventory["disk"], **{"approved-csi": {"metadata": {"name": "postgres-csi"}}}), \
+                 patch.dict(baseline, disk_ids=["approved-csi"]), \
+                 patch.dict(vm_status, disk_attachments=[*vm_status["disk_attachments"], retained]):
+                tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
+                with patch.dict(retained, id="unapproved-csi"), self.assertRaises(ValueError):
+                    tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
+
             gpu_group = deepcopy(inventory["node-group"]["cpu"])
             gpu_vm = deepcopy(inventory["instance"]["vm"])
             gpu_disk = deepcopy(inventory["disk"]["disk"])
