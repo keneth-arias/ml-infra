@@ -33,6 +33,7 @@ ROLE = "episode-native-window"
 RECEIPT = "airaware.training/deployment-sha256"
 STAGE = "airaware.training/native-window"
 ATTEMPT = "airaware.training/native-attempt"
+FENCE = "airaware.training/native-close-fence"
 IDENTITY = "system:serviceaccount:training:episode-submit"
 RBAC = "/apis/rbac.authorization.k8s.io/v1/namespaces/training"
 POLICY = f"validatingadmissionpolicy/{NAME}"
@@ -208,11 +209,35 @@ class Transaction:
             raise ValueError(f"Created {resource} object is not visible under its issued UID")
         return uid
 
+    def no_create_audited(self, resource, desired, checkpoint):
+        path = self.session / (checkpoint + "-no-create.json")
+        if not path.exists():
+            return False
+        mode = path.stat()
+        if path.is_symlink() or mode.st_mode & 0o077 or mode.st_uid != os.getuid():
+            raise ValueError("Expected owner-only API audit evidence")
+        evidence = json.loads(path.read_bytes())
+        if (
+            evidence["attempt"] != self.intent["attempt"]
+            or evidence["target"] != self.intent["target"]
+            or evidence["resource"] != resource
+            or evidence["name"] != desired["metadata"]["name"]
+            or evidence["stage"] != "ResponseComplete"
+            or evidence["verb"] != "create"
+            or evidence["status_code"] not in (400, 401, 403, 404, 409, 422)
+            or str(uuid.UUID(evidence["audit_id"])) != evidence["audit_id"]
+        ):
+            raise ValueError("Audit evidence does not prove the attempted create was rejected")
+        return True
+
     def delete_owned(self, resource, desired, checkpoint, group):
         if not self.checkpoint_value(checkpoint + "-started"):
             return
         uid = self.owned(resource, desired, checkpoint)
         if uid is None:
+            if self.checkpoint_value(checkpoint + "-uid") is None and not self.no_create_audited(
+                    resource, desired, checkpoint):
+                raise ValueError(f"Unknown create result for {resource}; retry close or reconcile the API audit")
             return
         if self.checkpoint_value(checkpoint + "-uid") is None:
             self.checkpoint(checkpoint + "-uid", uid)
@@ -237,7 +262,7 @@ class Transaction:
             if (policy.get("status", {}).get("observedGeneration") == policy["metadata"]["generation"]
                     or time.monotonic() >= deadline):
                 check_active(desired, self.intent["guard"], live)
-                return
+                return policy
             time.sleep(1)
 
     def patch_policy(self, operator_policy, desired):
@@ -256,17 +281,41 @@ class Transaction:
     def restore_hold(self):
         if not self.checkpoint_value("policy-started"):
             return
-        live = self.policy_list()
-        policy = next(item for item in live["items"] if item["kind"] == "ValidatingAdmissionPolicy")
-        owner = policy["metadata"].get("annotations", {}).get(ATTEMPT)
-        if owner == self.intent["attempt"]:
-            if policy["metadata"]["uid"] != self.checkpoint_value("policy-uid"):
+        uid = self.checkpoint_value("policy-uid")
+        held = self.intent["held"]
+        # An activation patch with a lost response may still be in flight. A
+        # unique annotation advances the resourceVersion even if the hold is
+        # already present, invalidating that stale patch's precondition.
+        fence = uuid.uuid4().hex
+        fenced = {**held, "metadata": {**held["metadata"], "annotations": {FENCE: fence}}}
+        for _ in range(3):
+            policy = self.live_policy()
+            metadata = policy["metadata"]
+            if metadata["uid"] != uid:
                 raise ValueError("Refusing to change a replacement admission policy")
-            self.patch_policy(policy, self.intent["held"])
-        elif owner is not None or with_match_defaults(policy["spec"], "matchConstraints") != with_match_defaults(
-                self.intent["held"]["spec"], "matchConstraints"):
-            raise ValueError("Refusing to change an admission policy owned by another attempt")
-        self.wait_policy(self.intent["held"])
+            owner = metadata.get("annotations", {}).get(ATTEMPT)
+            if owner != self.intent["attempt"] and (
+                owner is not None or with_match_defaults(policy["spec"], "matchConstraints") != with_match_defaults(
+                    held["spec"], "matchConstraints")
+            ):
+                raise ValueError("Refusing to change an admission policy owned by another attempt")
+            previous_version = metadata["resourceVersion"]
+            try:
+                self.patch_policy(policy, fenced)
+            except (subprocess.SubprocessError, OSError):
+                # Reconcile a lost patch response by reading our unique fence.
+                pass
+            observed = self.live_policy()["metadata"]
+            if (observed["uid"] == uid and observed["resourceVersion"] != previous_version
+                    and observed.get("annotations", {}).get(FENCE) == fence):
+                checked = self.wait_policy(held)["metadata"]
+                if checked["uid"] == uid and checked.get("annotations", {}).get(FENCE) == fence:
+                    return
+                break
+        raise ValueError("Admission hold fence is unconfirmed")
+
+    def live_policy(self):
+        return next(item for item in self.policy_list()["items"] if item["kind"] == "ValidatingAdmissionPolicy")
 
     def issue(self, uid, cutoff):
         issued = json.loads(self.call(
@@ -333,7 +382,7 @@ class Transaction:
             raise
 
     def close(self):
-        if self.checkpoint_value("closed"):
+        if self.checkpoint_value("closed-reconciled"):
             return
         issues = []
 
@@ -359,7 +408,9 @@ class Transaction:
             attempt("credential invalidation", remove_token)
         if issues:
             raise ValueError("Unconfirmed closeout of " + ", ".join(issues))
-        self.checkpoint("closed")
+        if not self.checkpoint_value("closed"):
+            self.checkpoint("closed")
+        self.checkpoint("closed-reconciled")
 
 
 def main():

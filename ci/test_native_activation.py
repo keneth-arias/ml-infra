@@ -104,7 +104,8 @@ class NativeActivationTest(unittest.TestCase):
         cutoff = now + timedelta(hours=1)
         target = {"cluster_id": "mk8scluster-fixture", "endpoint": "public"}
         case_names = ("marker-response", "invalid-expiry", "held-probe", "policy-response",
-                      "binding-response", "released-probe", "binding-replaced", "success")
+                                            "binding-response", "released-probe", "binding-replaced", "success",
+                      "marker-delayed", "binding-delayed", "policy-delayed", "policy-delayed-wins", "marker-audited")
 
         for failure in case_names:
             with self.subTest(failure=failure), TemporaryDirectory() as directory:
@@ -118,15 +119,17 @@ class NativeActivationTest(unittest.TestCase):
                 marker = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
                           "metadata": {"name": "marker", "namespace": "training", "labels": {attempt_tag: attempt}}}
                 intent = {"attempt": attempt, "held": self.policy, "active": active, "guard": self.binding,
-                          "marker": marker, "role": role, "binding": binding, "receipt": RECEIPT}
-                objects, calls = {}, []
+                                                    "marker": marker, "role": role, "binding": binding, "receipt": RECEIPT,
+                          "manager": "fixture", "target": target}
+                objects, delayed, calls = {}, {}, []
                 policy_uid = str(uuid.uuid4())
                 kind_keys = {"Secret": "secrets", "Role": "roles", "RoleBinding": "rolebindings"}
 
                 class FakeTransaction(transaction):
                     def __init__(self):
                         super().__init__(["operator"], b"ca", target, session, intent)
-                        self.policy = intent["held"]
+                        self.policy = deepcopy(intent["held"])
+                        self.version = 1
 
                     def call(self, *args, payload=None, **kwargs):
                         if "get" in args:
@@ -144,12 +147,30 @@ class NativeActivationTest(unittest.TestCase):
                         if args[:2] == ("auth", "whoami"):
                             calls.append("token-identity")
                             return functions["IDENTITY"]
+                        if args[0] == "patch":
+                            if failure in ("policy-delayed", "policy-delayed-wins") and payload[-1]["value"].get(attempt_tag):
+                                delayed["policy"] = payload
+                                raise subprocess.TimeoutExpired(args, 1)
+                            if failure == "policy-delayed-wins" and "policy" in delayed:
+                                self.apply_patch(delayed.pop("policy"))
+                                raise subprocess.CalledProcessError(1, args)
+                            self.apply_patch(payload)
+                            if failure == "policy-response" and payload[-1]["value"].get(attempt_tag):
+                                raise subprocess.TimeoutExpired(args, 1)
+                            return "{}"
                         if args[0] == "create":
                             resource = kind_keys[payload["kind"]]
                             saved = deepcopy(payload)
                             saved["metadata"]["uid"] = str(uuid.uuid4())
-                            objects[resource] = saved
                             calls.append("create-" + resource)
+                            if (failure, resource) in (
+                                ("marker-delayed", "secrets"), ("binding-delayed", "rolebindings"),
+                                ("marker-audited", "secrets"),
+                            ):
+                                if failure != "marker-audited":
+                                    delayed[resource] = saved
+                                raise subprocess.TimeoutExpired(args, 1)
+                            objects[resource] = saved
                             if (failure, resource) in (
                                 ("marker-response", "secrets"), ("binding-response", "rolebindings")
                             ):
@@ -165,13 +186,19 @@ class NativeActivationTest(unittest.TestCase):
                         live = deepcopy(self.policy)
                         live["metadata"]["generation"] = 7
                         live["metadata"]["uid"] = policy_uid
+                        live["metadata"]["resourceVersion"] = str(self.version)
                         live["status"] = {"observedGeneration": 7, "typeChecking": {}}
                         return {"items": [live, intent["guard"]]}
 
-                    def patch_policy(self, live, desired):
-                        self.policy = desired
-                        if desired is active and failure == "policy-response":
-                            raise subprocess.TimeoutExpired("patch", 1)
+                    def apply_patch(self, patch):
+                        self.assert_resource_version(patch[0])
+                        self.policy["spec"] = patch[1]["value"]
+                        self.policy["metadata"]["annotations"] = patch[2]["value"]
+                        self.version += 1
+
+                    def assert_resource_version(self, check):
+                        if check != {"op": "test", "path": "/metadata/resourceVersion", "value": str(self.version)}:
+                            raise ValueError("Delayed patch was fenced by a newer resourceVersion")
 
                     def probe(self, images=None):
                         mode = "released-probe" if images else "held-probe"
@@ -194,6 +221,29 @@ class NativeActivationTest(unittest.TestCase):
                     else:
                         with self.assertRaises((ValueError, subprocess.TimeoutExpired)):
                             tx.activate(self.images, cutoff)
+                        if failure in ("marker-delayed", "binding-delayed", "marker-audited"):
+                            self.assertFalse((session / "closed-reconciled.json").exists())
+                            self.assertFalse((session / "kubeconfig").exists())
+                            self.assertEqual(tx.policy["spec"], self.policy["spec"])
+                            # A checkpoint from an earlier tool revision cannot seal this attempt.
+                            tx.checkpoint("closed")
+                            if failure == "marker-audited":
+                                tx.checkpoint("marker-no-create", {
+                                    "attempt": attempt, "target": target, "resource": "secrets", "name": "marker",
+                                    "stage": "ResponseComplete", "verb": "create", "status_code": 403,
+                                    "audit_id": str(uuid.uuid4()),
+                                })
+                            else:
+                                objects.update(delayed)
+                            tx.close()
+                        if failure == "policy-delayed":
+                            self.assertEqual(tx.version, 2)
+                            self.assertIn(functions["FENCE"], tx.policy["metadata"]["annotations"])
+                            with self.assertRaisesRegex(ValueError, "fenced"):
+                                tx.apply_patch(delayed["policy"])
+                        if failure == "policy-delayed-wins":
+                            self.assertEqual(tx.version, 3)
+                            self.assertIn(functions["FENCE"], tx.policy["metadata"]["annotations"])
 
                 if failure == "binding-replaced":
                     self.assertEqual(set(objects), {"rolebindings"})
@@ -202,12 +252,16 @@ class NativeActivationTest(unittest.TestCase):
                 else:
                     self.assertEqual(objects, {})
                     self.assertTrue((session / "closed.json").is_file())
-                self.assertEqual(tx.policy, self.policy)
+                    self.assertTrue((session / "closed-reconciled.json").is_file())
+                self.assertEqual(tx.policy["spec"], self.policy["spec"])
+                self.assertNotIn(attempt_tag, tx.policy["metadata"].get("annotations", {}))
                 self.assertFalse((session / "kubeconfig").exists())
                 if "create-rolebindings" in calls:
                     self.assertLess(calls.index("token-identity"), calls.index("create-rolebindings"))
                     self.assertLess(calls.index("held-probe"), calls.index("create-rolebindings"))
-                    if failure != "binding-replaced":
+                    if failure == "binding-delayed":
+                        self.assertLess(calls.index("delete-secrets"), calls.index("delete-rolebindings"))
+                    elif failure != "binding-replaced":
                         self.assertLess(calls.index("delete-rolebindings"), calls.index("delete-secrets"))
-                if failure not in ("marker-response",):
+                if failure not in ("marker-response", "marker-delayed", "marker-audited"):
                     self.assertIn("401", calls)

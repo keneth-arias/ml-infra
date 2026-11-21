@@ -40,6 +40,19 @@ uv run "$tool" close --operator-config "$operator" --session "$session"
 unset NEBIUS_SUBMIT_KUBECONFIG
 ```
 
-The intent and per-operation checkpoints identify the attempted marker, policy, Role and RoleBinding. Keep them available if a create response was lost or the process crashed. The wrapper only reconciles resources with the originating attempt label and recorded UID, or the matching object recovered from an in-flight create without a UID response. It uses UID-precondition deletes and a resource-version precondition for the policy. It attempts the binding removal, marker revocation and held-policy restoration even when another step fails. It verifies token rejection before removing the local kubeconfig. Keep the private directory until closeout succeeds. An ownership mismatch requires operator reconciliation, and the wrapper leaves the unexpected object intact.
+The intent and per-operation checkpoints identify the attempted marker, policy, Role and RoleBinding. Keep them available if a create response was lost or the process crashed. The wrapper only reconciles resources with the originating attempt label and recorded UID, or the matching object recovered from an in-flight create without a UID response. It uses UID-precondition deletes. The rollback writes a unique fence annotation under an exact resource-version precondition and checks the hold and new version, including when the policy was already held. A delayed activation patch using the old version then fails. It attempts the binding removal, marker revocation and held-policy restoration even when another step fails. It verifies token rejection before removing the local kubeconfig. Keep the private directory until closeout succeeds. An ownership mismatch requires operator reconciliation, and the wrapper leaves the unexpected object intact.
+
+If a create started and its response was lost, an absent object leaves the session unresolved. Retry the same close command to catch a subsequently visible object. If the object never appears, reconcile the exact create with the managed Kubernetes API audit. Require a correlated `ResponseComplete` event for the original operator, namespace, resource, name and attempt, with a definitive rejection status. An absent audit event, timeout or server-side 5xx leaves the outcome uncertain. With the original event retained in the protected audit location, record the verified result in the owner-only session file `marker-no-create.json`, `role-no-create.json` or `binding-no-create.json`, respectively. Use these fields:
+
+| Field | Value |
+| --- | --- |
+| `attempt`, `target` | Exact values from the session's `intent.json` |
+| `resource` | `secrets`, `roles` or `rolebindings` |
+| `name` | Exact intended object name from the session's intent |
+| `stage`, `verb` | `ResponseComplete`, `create` |
+| `audit_id` | The original event's Kubernetes audit UUID |
+| `status_code` | The event's recorded 400, 401, 403, 404, 409 or 422 response |
+
+Run close again. It checks live ownership first even when audit evidence is present. The completion checkpoint is `closed-reconciled.json`.
 
 The `check-held` command compares the live policy and binding on standard input with the canonical held configuration. It is a read-only diagnostic. If the managed API becomes unreachable, keep the worker shutdown schedulers armed, preserve the session directory and reconcile the grant, policy and workloads as soon as the API is reachable. Reconcile outstanding Jobs before ordinary worker release.
