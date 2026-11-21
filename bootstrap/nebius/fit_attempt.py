@@ -1,7 +1,7 @@
 """Bind a production paired fit to its render, remaining budget and off-host attempt."""
 
 import argparse
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -92,6 +92,13 @@ def check_seed_28(ledger):
         raise ValueError("Seed 27 does not qualify for replication")
 
 
+def fit_attempt_id(purpose, request):
+    ordinal = request["attempt"]
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValueError("Invalid request ordinal for paired attempt ID")
+    return f"paired-{purpose}-{request['seed']}-{request['arm']}-{ordinal}"
+
+
 def previous_attempts(ledger, request, purpose, max_attempts):
     seed, arm, number = request["seed"], request["arm"], request["attempt"]
     history = ledger.get("fit_attempts", [])
@@ -99,6 +106,9 @@ def previous_attempts(ledger, request, purpose, max_attempts):
     group = []
     seen = set()
     for entry in history:
+        prev = entry["request"]
+        if entry["attempt_id"] != fit_attempt_id(entry["purpose"], prev):
+            raise ValueError("Stored paired attempt ID differs from its recorded request")
         if (
             entry["attempt_id"] in seen
             or entry["attempt_id"] not in attempts
@@ -107,7 +117,6 @@ def previous_attempts(ledger, request, purpose, max_attempts):
         ):
             raise ValueError("Reconcile the previous workload, writer and checkpoint before another launch")
         seen.add(entry["attempt_id"])
-        prev = entry["request"]
         same_arm = (entry["purpose"], prev["seed"], prev["arm"]) == (purpose, seed, arm)
         if (
             same_arm != (prev["run"] == request["run"])
@@ -116,12 +125,14 @@ def previous_attempts(ledger, request, purpose, max_attempts):
         ):
             raise ValueError("Logical run or immutable paired inputs changed")
         if same_arm:
+            if prev["attempt"] != len(group) + 1:
+                raise ValueError("Paired attempt history is out of order")
             if prev["ceiling"] != request["ceiling"]:
                 raise ValueError("Retry must retain the original training schedule")
             group.append(entry)
     if {a for a in attempts if a.startswith("paired-")} != seen:
         raise ValueError("Incomplete paired attempt history")
-    attempt_id = f"paired-{purpose}-{seed}-{arm}-{number}"
+    attempt_id = fit_attempt_id(purpose, request)
     if (
         number != len(group) + 1
         or number > max_attempts
@@ -131,6 +142,50 @@ def previous_attempts(ledger, request, purpose, max_attempts):
         raise ValueError("Attempt already consumed, out of order or beyond the approved retry limit")
 
     return group, attempt_id
+
+
+def recovery_checkpoint(ledger, approval, request, group):
+    """Bind the one recovery drill to its completed control and replacement VM."""
+    reference = approval["recovery_reference"]
+    baseline = next((entry for entry in ledger["fit_attempts"]
+                     if entry["attempt_id"] == "paired-qualification-27-control-1"), None)
+    if (baseline is None or baseline["purpose"] != "qualification" or baseline["max_attempts"] != 1
+            or baseline.get("outcome") != "complete"
+            or reference != {"attempt_id": baseline["attempt_id"], "closeout_sha256": baseline["closeout_sha256"],
+                             "checkpoint": baseline.get("qualification_checkpoint")}
+            or any(baseline["request"][key] != request[key] for key in
+                   ("mode", "seed", "arm", "pair", "ceiling", "save_interval_seconds"))
+            or not re.fullmatch(rf"{request['ceiling']}:[0-9a-f]{{64}}", reference["checkpoint"] or "")):
+        raise ValueError("Recovery reference must match the completed and verified control qualification")
+    baseline_request = baseline["request"]
+    if baseline_request["attempt"] != 1 or baseline_request["resume"] is not False or baseline_request["checkpoint"] is not None:
+        raise ValueError("Recovery reference must be the fresh first control attempt")
+    credit = baseline.get("selected_fit_credit")
+    if type(credit) is not int or credit != 0:
+        raise ValueError("Recovery reference must carry exactly zero selected fit credit")
+    if not group:
+        return None
+
+    interrupted, = group
+    checkpoint = interrupted.get("qualification_checkpoint") or ""
+    if (interrupted.get("recovery_reference") != reference or interrupted.get("outcome") not in ("aborted", "preempted")
+            or not re.fullmatch(r"[1-9][0-9]*:[0-9a-f]{64}", checkpoint)
+            or int(checkpoint.split(":", 1)[0]) >= request["ceiling"]):
+        raise ValueError("Recovery requires a verified interrupted checkpoint below the approved ceiling")
+    if interrupted["vm"] == approval["vm"]:
+        raise ValueError("Recovery must use a different GPU VM")
+    current_vm, = [span for span in ledger["gpu_intervals"] if span["end"] is None]
+    previous = [span for span in ledger["gpu_intervals"] if span["vm"] == interrupted["vm"]]
+    if not previous or any(
+        span["end"] is None or timestamp(span["end"]) > timestamp(current_vm["start"]) for span in previous
+    ):
+        raise ValueError("Reconcile and close the interrupted GPU allocation before opening its replacement")
+    reserved = datetime.fromisoformat(interrupted["reserved_at"])
+    if reserved.utcoffset() != timedelta(0) or not any(
+        timestamp(span["start"]) <= reserved < timestamp(span["end"]) for span in previous
+    ):
+        raise ValueError("A closed interrupted GPU interval must cover its attempt reservation")
+    return checkpoint
 
 
 def reserve_fit(s3, scope, request, measurements, cluster, now):
@@ -156,10 +211,12 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     if purpose == "selected":
         if request["ceiling"] != EPOCH:
             raise ValueError("Selected fit requires the full epoch ceiling")
-    elif purpose != "qualification" or seed != 27 or not 0 < request["ceiling"] < EPOCH:
+    elif purpose not in ("qualification", "qualification-recovery") or seed != 27 or not 0 < request["ceiling"] < EPOCH:
         raise ValueError("Expected a selected pair or bounded seed-27 qualification")
     history = ledger.get("fit_attempts", [])
     max_attempts = whole(approval["max_attempts"], 1, 2**31 - 1)
+    if purpose == "qualification-recovery" and (arm != "control" or request["mode"] != "job" or max_attempts != 2):
+        raise ValueError("Recovery requires two separately approved native control qualification attempts")
     group, attempt_id = previous_attempts(ledger, request, purpose, max_attempts)
     projection = Decimal(request["deadline_seconds"]) / 3600
     checkpoint = None
@@ -190,6 +247,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         if request["save_interval_seconds"] != fit["save_interval_seconds"]:
             raise ValueError("Rendered save interval differs from the measured checkpoint policy")
         projection = fit["projected_hours"]
+    elif purpose == "qualification-recovery":
+        checkpoint = recovery_checkpoint(ledger, approval, request, group)
     elif group:
         checkpoint = group[-1].get("qualification_checkpoint")
         if checkpoint is not None and not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", checkpoint):
@@ -214,6 +273,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         prior_revision=ledger["revision"],
         reserved_at=now.astimezone(timezone.utc).isoformat(),
     )
+    if purpose == "qualification-recovery":
+        hold["recovery_reference"] = approval["recovery_reference"]
     ledger.setdefault("fit_attempts", []).append(hold)
     revision, version = write_reservation(s3, scope, current, ledger, hold)
     return {
