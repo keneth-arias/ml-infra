@@ -3,6 +3,14 @@ on:
   pull_request:
     paths:
       - .github/workflows/rootless-candidate.yaml
+      - bootstrap/microk8s/build-episodes.sh
+      - runtime/episode_job.py
+      - runtime/episode_stop.py
+      - runtime/stage_episode_inputs.py
+      - runtime/versioned_episode_inputs.py
+      - runtime/Dockerfile.episodes
+      - runtime/Dockerfile.preflight
+      - ci/test_paired_image.py
       - bootstrap/nebius/management/rootless/**
       - bootstrap/nebius/releases/**
       - ci/oci_candidate.py
