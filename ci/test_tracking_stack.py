@@ -37,6 +37,7 @@ class TrackingStackTest(unittest.TestCase):
         self.assertEqual(hba, [
             ["local", "all", "postgres", "peer"],
             ["hostssl", "mlflow", "mlflow", "all", "scram-sha-256"],
+            ["hostssl", "mlflow_restore", "mlflow_restore", "all", "scram-sha-256"],
         ])
         self.assertIn("addressing_style = path", config["aws-config"])
         self.assertIn("--serve-artifacts", config["start-mlflow.py"])

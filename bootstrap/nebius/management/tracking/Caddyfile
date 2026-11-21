@@ -13,6 +13,7 @@ https://mlflow.tracking.svc.cluster.local:8443 {
 	@authorized header Authorization "Bearer {$TRACKING_BEARER}"
 	handle @authorized {
 		reverse_proxy 127.0.0.1:5000 {
+			header_up Host mlflow.tracking.svc.cluster.local
 			header_up -Authorization
 		}
 	}
