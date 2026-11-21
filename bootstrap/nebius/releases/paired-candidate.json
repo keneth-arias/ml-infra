@@ -1,20 +1,20 @@
 {
   "schema": "paired-forecast-candidate-v1",
-  "build_commit": "7290ce4943cc93878898cd5cb79fecbb3734d423",
+  "build_commit": "5d838e3ff91e88db862d51f74731d4995631d324",
   "forecast_commit": "b1dbff547a95c0c9d6c8366d77fa328217506fce",
   "reader_commit": "2e475a7d2f82f699729c4ea826fbc2ebd8573e0d",
   "images": {
     "preflight": {
       "repository": "ghcr.io/keneth-arias/ml-infra-qwen",
-      "index": "sha256:69af4b763db27507ab69b6c433a51ea2f3b52884443f267298bfb58da3bc0cfc",
-      "linux_amd64": "sha256:c420fa6b180c252fd13f312ac1b677560735421a71297f580b3c74c9fce6066a",
-      "config": "sha256:12dcdfb4d706c853a7a18fb086aa69280daac593251cefb0b04c7f1322884a4b"
+      "index": "sha256:686b86212e73c8111c06b34401dc035d8b0b227799036ce10cf0f8eee57623aa",
+      "linux_amd64": "sha256:a914b9a0308ab8afa635c43f03459ca8eecd05b8566f59e53ccd3f1dd4f0404d",
+      "config": "sha256:0d73d1a51512ba88014ac575c797535211c8984e89076635b42b9b5992e91f4f"
     },
     "trainer": {
       "repository": "ghcr.io/keneth-arias/ml-infra-qwen",
-      "index": "sha256:f02eb84b398334cc11adfd324da5e184607d61fdc16048f12efc678bf610856e",
-      "linux_amd64": "sha256:536297fc43ec51b0e593ae9117bf2e5eb14c624b37d742603b8299289718131f",
-      "config": "sha256:085db42af9a013885768ec6b72064e7ef45654530d28c259b1b93790a2c68e9f"
+      "index": "sha256:6c5b7701086b59437c299477ceeb80cdb4114146aec6740610d0368ea69d18ef",
+      "linux_amd64": "sha256:078574767148e7239435a0727783ffa475094c0663d0d16350dea7095974b72a",
+      "config": "sha256:fba5a1d35fd70e3391e3df89c4c5709d9514141de01a14027d66013a88645820"
     }
   }
 }
