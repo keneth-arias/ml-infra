@@ -1,0 +1,86 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlflow-ingress
+spec:
+  podSelector:
+    matchLabels: {app: mlflow}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: training}
+          podSelector:
+            matchExpressions:
+              - key: airaware.training/phase
+                operator: In
+                values: [tracking-check, fit, infer]
+      ports:
+        - {protocol: TCP, port: 8443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-mlflow
+spec:
+  podSelector:
+    matchLabels: {app: postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: mlflow}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlflow-postgres
+spec:
+  podSelector:
+    matchLabels: {app: mlflow}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: postgres}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mlflow-dns-and-artifacts
+  namespace: tracking
+spec:
+  endpointSelector:
+    matchLabels: {app: mlflow}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:app.kubernetes.io/instance": coredns
+            "k8s:app.kubernetes.io/name": coredns
+            "k8s:k8s-app": coredns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+          rules:
+            dns:
+              - matchName: postgres.tracking.svc.cluster.local
+              - matchName: storage.eu-south1.nebius.cloud
+    - toFQDNs:
+        - matchName: storage.eu-south1.nebius.cloud
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}

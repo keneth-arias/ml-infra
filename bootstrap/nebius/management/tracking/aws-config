@@ -1,0 +1,4 @@
+[default]
+region = eu-south1
+s3 =
+    addressing_style = path

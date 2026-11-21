@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tracking
+resources:
+  - namespace.yaml
+  - storage.yaml
+  - network.yaml
+  - workloads.yaml
+configMapGenerator:
+  - name: mlflow-runtime
+    files:
+      - Caddyfile
+      - aws-config
+      - init-db.sh
+      - pg_hba.conf
+      - start-mlflow.py
+      - start-proxy.sh
+generatorOptions:
+  disableNameSuffixHash: true
