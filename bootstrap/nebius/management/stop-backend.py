@@ -1,6 +1,7 @@
 """Let the attended SkyPilot process tree leave its systemd unit in order."""
 import os
 from pathlib import Path
+import select
 import signal
 import time
 
@@ -21,11 +22,18 @@ def stop():
     except ProcessLookupError:
         return
     try:
-        if main not in members.read_text().splitlines():
-            raise ValueError("SkyPilot supervisor is outside the stopping unit")
-        signal.pidfd_send_signal(fd, signal.SIGTERM)
+        if main in members.read_text().splitlines():
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+        else:
+            # The pidfd becomes readable at exit, including when the PID
+            # disappears from the unit between pidfd_open and this read.
+            exited = select.poll()
+            exited.register(fd, select.POLLIN)
+            if not any(events & (select.POLLIN | select.POLLHUP)
+                       for _, events in exited.poll(0)):
+                raise ValueError("SkyPilot supervisor is outside the stopping unit")
     except ProcessLookupError:
-        return
+        pass
     finally:
         os.close(fd)
 

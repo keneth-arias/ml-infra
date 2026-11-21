@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import runpy
+import select
 import signal
 import subprocess
 import unittest
@@ -32,11 +33,32 @@ class BackendStopTests(unittest.TestCase):
             patch("os.pidfd_open", return_value=9, create=True),
             patch("os.close") as close,
             patch("signal.pidfd_send_signal", create=True) as send,
+            patch("select.poll") as poll,
         ):
+            poll.return_value.poll.return_value = []
             with self.assertRaisesRegex(ValueError, "outside"):
                 STOP()
         send.assert_not_called()
         close.assert_called_once_with(9)
+
+    def test_exited_supervisor_can_leave_a_draining_worker(self):
+        with (
+            patch.dict(os.environ, {"MAINPID": "91234"}),
+            patch.object(Path, "read_text", side_effect=["0::/fixture\n", "91236\n", "91235\n91236\n", "91236\n"]),
+            patch("os.getpid", return_value=91236),
+            patch("os.pidfd_open", return_value=9, create=True),
+            patch("os.close") as close,
+            patch("signal.pidfd_send_signal", create=True) as send,
+            patch("select.poll") as poll,
+            patch("time.sleep") as wait,
+        ):
+            poll.return_value.poll.return_value = [(9, select.POLLIN)]
+            STOP()
+        poll.return_value.register.assert_called_once_with(9, select.POLLIN)
+        poll.return_value.poll.assert_called_once_with(0)
+        send.assert_not_called()
+        close.assert_called_once_with(9)
+        wait.assert_called_once()
 
     def test_waits_for_tracker_after_supervisor_exits(self):
         lists = ["0::/fixture\n", "91234\n91235\n", "91235\n91236\n", "91236\n"]
