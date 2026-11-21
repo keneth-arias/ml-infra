@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: episode-scoring
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: deny-ingress, namespace: episode-scoring}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: episode-worker, namespace: training}
+automountServiceAccountToken: false
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: episode-submit-inputs}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+  # Staging runs under separate operator credentials and can populate the input claim.
+  matchConditions:
+    - name: native-submitter
+      expression: "request.userInfo.username == 'system:serviceaccount:training:episode-submit'"
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+  validations:
+    # The signed trainer and preflight release will replace this hold.
+    - expression: "false"
+      message: Native training submission is closed during CPU qualification.
+    - expression: >-
+        has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'episode-worker'
+        && has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
+      message: Require the token-free episode-worker account.
+    - expression: >-
+        !has(variables.pod.volumes) || variables.pod.volumes.all(v,
+        has(v.emptyDir) || (has(v.persistentVolumeClaim) &&
+        (v.persistentVolumeClaim.claimName == 'airaware-model-state' ||
+        (v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
+        has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly))))
+      message: Native training may mount only scratch, model state and read-only training inputs.
+    - expression: >-
+        size(variables.pod.containers) == 1 && !has(variables.pod.initContainers)
+        && !has(variables.pod.ephemeralContainers) && !has(variables.pod.resourceClaims)
+        && (!has(variables.pod.imagePullSecrets) || variables.pod.imagePullSecrets.all(s, s.name == 'ghcr-pull'))
+      message: Require one training container and its approved pull credential.
+    - expression: >-
+        variables.pod.containers.all(c, !has(c.envFrom) && (!has(c.env) ||
+        c.env.all(e, !has(e.valueFrom) || has(e.valueFrom.fieldRef) ||
+        (has(e.valueFrom.configMapKeyRef) && e.valueFrom.configMapKeyRef.name == 'episode-tracking'
+        && e.valueFrom.configMapKeyRef.key == 'https-uri') ||
+        (has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name == 'episode-tracking'
+        && e.valueFrom.secretKeyRef.key == 'token'))))
+      message: Permit only the training tracking URI and token as configuration references.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: episode-submit-inputs}
+spec:
+  policyName: episode-submit-inputs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: training}}

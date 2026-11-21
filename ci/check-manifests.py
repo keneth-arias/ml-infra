@@ -72,4 +72,5 @@ def images(node):
 if __name__ == "__main__":
     for cluster in sorted(Path("clusters").glob("*/kustomization.yaml")):
         validate_cluster(cluster.parent, production=cluster.parent.name.startswith("prod-"))
+    validate_cluster(Path("platform/overlays/prod"), production=True)
     validate_cluster(Path("platform/overlays/prod/sky-cpu"), production=True)
