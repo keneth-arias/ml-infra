@@ -156,14 +156,8 @@ def terraform(*args, capture=False):
 def plan_release(
     saved, *, profile, cluster_id, run_id, cutoff_label, allow_orphans=False
 ):
-    groups = cloud_items(profile, "mk8s", "node-group", cluster_id)
-    target_ids = {
-        ident
-        for ident, group in groups.items()
-        if group["metadata"]["parent_id"] == cluster_id
-        and group["metadata"].get("labels", {}).get("airaware-run") == run_id
-        and group["metadata"].get("labels", {}).get("airaware-cutoff") == cutoff_label
-    }
+    # Cutoff still snapshots first to report out-of-state live groups as orphans.
+    groups = cloud_items(profile, "mk8s", "node-group", cluster_id) if allow_orphans else None
     # Terraform labels every targeted destroy plan incomplete. Check this private
     # plan against independently read cloud IDs, exact addresses, and run labels.
     terraform(
@@ -178,6 +172,17 @@ def plan_release(
         capture=True,
     )
     plan = json.loads(terraform("show", "-json", saved, capture=True))
+    # During a rehearsal, a funding apply can finish while we wait for its lock.
+    # Compare the plan with a fresh independent snapshot once planning completes.
+    if groups is None:
+        groups = cloud_items(profile, "mk8s", "node-group", cluster_id)
+    target_ids = {
+        ident
+        for ident, group in groups.items()
+        if group["metadata"]["parent_id"] == cluster_id
+        and group["metadata"].get("labels", {}).get("airaware-run") == run_id
+        and group["metadata"].get("labels", {}).get("airaware-cutoff") == cutoff_label
+    }
     changes = release_candidates(
         plan,
         cluster_id,
