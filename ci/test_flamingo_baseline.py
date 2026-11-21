@@ -83,7 +83,9 @@ class BaselineTest(unittest.TestCase):
             if "--reference" in argv:
                 self.assertEqual(env["PYTHONPATH"], cwd)
                 self.assertFalse(paths)
-                self.assertEqual(argv[1:-1], ["/opt/forecast/reference/check_per_series_reference.py",
+                self.assertEqual(argv[1], "-c")
+                self.assertLess(argv[2].index("configure_device(0)"), argv[2].index("runpy.run_path("))
+                self.assertEqual(argv[3:-1], ["/opt/forecast/reference/check_per_series_reference.py",
                     "--reference", "/opt/forecast/reference/utils.py", "--weights", "/base/weights", "--receipt"])
                 Path(argv[-1]).write_text(json.dumps({
                     "protocol": "per-series-reference-parity-v1",

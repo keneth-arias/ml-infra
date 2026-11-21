@@ -19,8 +19,17 @@ def collect(image_digest, output):
     with TemporaryDirectory(dir=output) as staging:
         stage = Path(staging)
         parity = stage / "reference-parity.json"
+        # The upstream parity CLI loads directly on CUDA. Apply the Job's
+        # allocator limit in that same process before either model loads.
+        parity_main = (
+            "import runpy, sys\n"
+            "from opentslm.forecast_inference import configure_device\n"
+            "configure_device(0)\n"
+            "sys.argv = sys.argv[1:]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')"
+        )
         subprocess.run(
-            [sys.executable, "/opt/forecast/reference/check_per_series_reference.py",
+            [sys.executable, "-c", parity_main, "/opt/forecast/reference/check_per_series_reference.py",
              "--reference", "/opt/forecast/reference/utils.py", "--weights", "/base/weights", "--receipt", str(parity)],
             cwd=cwd, check=True, env={**os.environ, "PYTHONPATH": cwd},
         )
