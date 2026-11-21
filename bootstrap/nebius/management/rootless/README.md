@@ -36,6 +36,7 @@ SkyPilot 0.14.3 reaches SSH through Kubernetes port-forward. The task declares n
 
 ```bash
 index=$(jq -er '."containerimage.digest"' "$output/build.json")
+build_commit=$(jq -er '."image.name" | capture(":git-(?<sha>[0-9a-f]{40})$").sha' "$output/build.json")
 repository=ghcr.io/keneth-arias/ml-infra-sky-cpu
 sed "s|REPLACE_WITH_QUALIFIED_DIGEST_REFERENCE|$repository@$index|" \
   bootstrap/nebius/management/rootless/qualification-task.yaml > "$output/task.yaml"
