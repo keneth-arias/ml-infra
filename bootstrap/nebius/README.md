@@ -65,3 +65,21 @@ docker run --rm --network none "episode-stage:$sha" python /opt/ml-infra/stage_e
 ```
 
 This target qualifies input staging. The production three-image release still needs its complete CPU preflight and a trainer that verifies and consumes both role manifests.
+
+
+### Run a pinned direct comparison
+
+Build the trainer and slim CPU preflight with the paired OpenTSLM revision and the same infra sources. Supply both immutable image references and the three staged digests to `workloads/sky/launch-episode.sh --nebius job fit direct RUN_ID`. Select `--direct-objective normalized-mse` or `--direct-objective physical-mae`. Supply `--bundle-sha256` for fit, `--validation-sha256` for inner validation, `--cached-weights-sha256`, and both `--step` and `--schedule` set to the full epoch ceiling. Use distinct run IDs for the two arms and reuse the same ID, seed, image and digests when resuming an interrupted arm. The CPU preflight mounts the two cohorts and base read-only, verifies their identities and rejects a swapped role before GPU submission. Set `--gpu-limit-bytes` only to apply a measured cloud allocator budget.
+
+The selected checkpoint and actual stopping step are recorded separately in `direct-result.json`. A retry uses `--resume --attempt N` and reuses the logical MLflow run. From the management host, set the authenticated tracking URI and run `uv run workloads/sky/direct-learning-curves.py --run CONTROL_MLFLOW_ID --run CANDIDATE_MLFLOW_ID --output NEW_DIRECTORY`. Supply both arms for each seed. The report checks the terminal receipt and checkpoint manifest before exporting the evaluation CSV and PNG. The cutoff and budget gate apply before launching either arm.
+
+For a fit launched with `--graceful-stop`, use the verified training context, namespace, pod name and worker container from that attempt. Read back its UID before requesting a stop. Supply the run ID, scheduled step and attempt used at launch. The helper checks the pod UID again, writes the request inside that pod and verifies the generation named in its acknowledgement.
+
+```bash
+pod_uid=$(kubectl --context prod-nebius -n training get pod "$pod" -o jsonpath='{.metadata.uid}')
+kubectl --context prod-nebius -n training exec "$pod" -c "$container" -- \
+  env PYTHONPATH=/opt/forecast/src /opt/conda/bin/python /opt/ml-infra/episode_stop.py \
+  --pod-uid "$pod_uid" --run-id "$run_id" --step "$step" --attempt "$attempt" --timeout 90
+```
+
+An interrupted fit exits 75. A stop before the first update can have no generation to restore. If the helper times out, check the worker exit and verify the last complete checkpoint before retrying within the original cutoff. Inspect quarantined `.damaged-*` and `.superseded-*` directories with writers stopped. Reclaim space only after verifying an independent restorable copy.

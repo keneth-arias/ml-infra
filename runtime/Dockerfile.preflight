@@ -1,0 +1,8 @@
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
+RUN echo 'numpy==2.3.4 --hash=sha256:a7b2f9a18b5ff9824a6af80de4f37f4ec3c2aab05ef08f51c77a093f5b89adda' | pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes -r /dev/stdin
+COPY forecast/src/opentslm/forecast_inputs.py forecast/src/opentslm/forecast_checkpoint.py /opt/forecast/src/opentslm/
+ENV PYTHONPATH=/opt/forecast/src
+COPY episode_job.py stage_episode_inputs.py versioned_episode_inputs.py /opt/ml-infra/
+ARG INFRA_SOURCE_REVISION
+ARG FORECAST_SOURCE_REVISION
+LABEL org.opencontainers.image.revision=$INFRA_SOURCE_REVISION airaware.forecast.revision=$FORECAST_SOURCE_REVISION

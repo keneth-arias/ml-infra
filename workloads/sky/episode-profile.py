@@ -42,7 +42,7 @@ def validate_staged_launch(
         raise ValueError("Submission differs from the staged test release")
 
 
-def pod_spec(phase, run_id, retained_release=None, step=None):
+def pod_spec(phase, run_id, retained_release=None, step=None, *, weights_digest=None, bundle_digest=None, validation_digest=None):
     mounts = [
         {
             "name": "inputs",
@@ -57,6 +57,12 @@ def pod_spec(phase, run_id, retained_release=None, step=None):
             "readOnly": True,
         },
     ]
+    if weights_digest:
+        mounts[0]["subPath"] = f"airaware/cache/bundles/{bundle_digest}"
+        mounts[1]["subPath"] = f"airaware/cache/weights/{weights_digest}"
+    if validation_digest:
+        mounts.append({"name": "inputs", "mountPath": "/validation",
+                       "subPath": f"airaware/cache/bundles/{validation_digest}", "readOnly": True})
     checkpoint_mount = {
         "name": "state",
         "mountPath": "/state" if phase == "fit" else "/checkpoint",
@@ -94,7 +100,10 @@ def pod_spec(phase, run_id, retained_release=None, step=None):
                 "name": "ray-node",
                 "imagePullPolicy": "IfNotPresent",
                 "volumeMounts": mounts,
-                "resources": {"requests": {"memory": "12G"}},
+                "resources": {
+                    "requests": {"memory": "12G"},
+                    "limits": {},
+                },
             }
         ],
         "volumes": [
@@ -116,10 +125,17 @@ def main():
     p.add_argument("phase", choices=("fit", "infer"))
     p.add_argument("head", choices=("direct", "quantile", "episode"))
     p.add_argument("run_id")
+    p.add_argument("--target", choices=("dev-bm", "prod-nebius"), default="dev-bm")
     p.add_argument("--image", required=True)
+    p.add_argument("--preflight-image", help="Digest-pinned CPU validator from the same source pair")
+    p.add_argument("--gpu-limit-bytes", type=int, help="Explicit allocator ceiling for a qualified cloud run")
+    p.add_argument("--cached-weights-sha256", help="Use verified digest-keyed PVC input directories")
+    p.add_argument("--graceful-stop", action="store_true", help="Use a trainer with cooperative shutdown support")
     p.add_argument("--bundle-sha256", required=True)
     p.add_argument("--step", type=int, required=True)
     p.add_argument("--schedule", type=int)
+    p.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
+    p.add_argument("--validation-sha256", help="Separately pinned direct inner-validation cohort")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--seed", type=int, default=27)
     p.add_argument("--attempt", type=int, default=1)
@@ -156,6 +172,20 @@ def main():
         r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", a.image
     ) or not re.fullmatch("[0-9a-f]{64}", a.bundle_sha256):
         p.error("Immutable image and bundle digests are required")
+    if a.direct_objective or a.validation_sha256:
+        if (not a.direct_objective or not re.fullmatch("[0-9a-f]{64}", a.validation_sha256 or "")
+                or a.validation_sha256 == a.bundle_sha256 or not a.cached_weights_sha256
+                or (a.phase, a.head) != ("fit", "direct") or a.batch != 16 or a.seed not in (27, 28)
+                or a.step != a.schedule or a.schedule < 500):
+            p.error("A matched direct fit requires both pinned cohorts, cached weights and a full batch-16 epoch")
+    if a.preflight_image and not re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", a.preflight_image):
+        p.error("Immutable preflight image digest required")
+    if a.cached_weights_sha256 and not re.fullmatch("[0-9a-f]{64}", a.cached_weights_sha256):
+        p.error("Invalid cached weights digest")
+    if a.gpu_limit_bytes is not None and (a.target != "prod-nebius" or not 0 < a.gpu_limit_bytes <= 96_000_000_000):
+        p.error("Set a positive GPU limit within the 96 GB cloud profile")
+    if a.graceful_stop and a.phase != "fit":
+        p.error("Graceful stop is only available for fit")
     if (
         a.step < 1
         or a.attempt < 1
@@ -184,6 +214,8 @@ def main():
         str(a.batch),
     ]
     cmd += ["--attempt", str(a.attempt), "--save-seconds", str(a.save_seconds)]
+    if a.direct_objective:
+        cmd.extend(["--direct-objective", a.direct_objective, "--validation-sha256", a.validation_sha256])
     if a.schedule is not None:
         cmd.extend(["--schedule", str(a.schedule)])
     if a.resume:
@@ -194,27 +226,68 @@ def main():
         "OMP_NUM_THREADS": "2",
         "HF_HUB_OFFLINE": "1",
     }
-    spec = pod_spec(a.phase, a.run_id, a.retained_release, a.step)
+    if a.gpu_limit_bytes and a.format != "preflight":
+        env["FORECAST_GPU_LIMIT_BYTES"] = str(a.gpu_limit_bytes)
+    spec = pod_spec(a.phase, a.run_id, a.retained_release, a.step, weights_digest=a.cached_weights_sha256, bundle_digest=a.bundle_sha256, validation_digest=a.validation_sha256)
+    spec["automountServiceAccountToken"] = False
+    if a.graceful_stop and a.format != "preflight":
+        cmd.append("--graceful-stop")
+        spec["terminationGracePeriodSeconds"] = 90
+        env.update(MLFLOW_HTTP_REQUEST_TIMEOUT="5", MLFLOW_HTTP_REQUEST_MAX_RETRIES="0")
+    pod_uid = [{"name": "EPISODE_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}] if a.graceful_stop and a.format != "preflight" else []
+    labels = {"airaware.training/run": a.run_id, "airaware.training/phase": a.phase,
+              "airaware.training/attempt": str(a.attempt), "airaware.training/step": str(a.step)}
+    cluster = None
+    if a.graceful_stop and a.format == "sky":
+        token = hashlib.sha256(f"{a.target}/{a.run_id}/{a.step}/{a.attempt}".encode()).hexdigest()[:16]
+        cluster = "fit-" + a.run_id[:12] + "-" + token
+        labels["airaware.training/sky-cluster"] = cluster
+    production = a.target == "prod-nebius"
+    tracking_env = []
+    if production:
+        del env["MLFLOW_TRACKING_URI"]
+        spec.pop("runtimeClassName")
+        spec["imagePullSecrets"] = [{"name": "ghcr-pull"}]
+        for volume in spec["volumes"]:
+            if volume["name"] == "inputs":
+                volume["persistentVolumeClaim"]["readOnly"] = True
+        if a.format != "sky":
+            spec["serviceAccountName"] = "episode-worker"
+        if a.format != "preflight":
+            spec["nodeSelector"] = {"airaware.training/pool": "training-gpu"}
+            spec["tolerations"] = [
+                {"key": "nvidia.com/gpu", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+            ]
+            tracking_env = [
+                {"name": "MLFLOW_TRACKING_URI", "valueFrom": {"configMapKeyRef": {"name": "episode-tracking", "key": "https-uri"}}},
+                {"name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}},
+            ]
+
     if a.format != "sky":
         c = spec["containers"][0]
         c.update(
             image=a.image,
             command=cmd,
-            env=[{"name": k, "value": v} for k, v in env.items()],
+            env=[{"name": k, "value": v} for k, v in env.items()] + tracking_env + pod_uid,
         )
         c["resources"]["requests"]["cpu"] = "2"
         if a.format == "preflight":
+            c["resources"] = {"requests": {"cpu": "2", "memory": "1G"}}
+            if a.preflight_image:
+                c["image"] = a.preflight_image
+                cmd[0] = "/usr/local/bin/python"
+                c["resources"] = {"requests": {"cpu": "1", "memory": "256Mi"},
+                                  "limits": {"cpu": "2", "memory": "512Mi"}}
             cmd.append("--preflight")
-            c["resources"]["requests"]["memory"] = "1G"
-            spec.pop("runtimeClassName")
+            spec.pop("runtimeClassName", None)
             c["volumeMounts"] = [m for m in c["volumeMounts"] if m.get("readOnly")]
             mount_names = {m["name"] for m in c["volumeMounts"]}
             spec["volumes"] = [v for v in spec["volumes"] if v["name"] in mount_names]
         else:
-            c["resources"]["limits"] = {"nvidia.com/gpu": 1}
+            c["resources"]["limits"]["nvidia.com/gpu"] = 1
             c["resources"]["requests"]["nvidia.com/gpu"] = 1
         spec.update(restartPolicy="Never", automountServiceAccountToken=False)
-        template = {"metadata": {"labels": {"app": "airaware-episodes"}}, "spec": spec}
+        template = {"metadata": {"labels": {"app": "airaware-episodes", **labels}}, "spec": spec}
         result = {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -231,25 +304,31 @@ def main():
             },
         }
     else:
+        if tracking_env or pod_uid:
+            spec["containers"][0]["env"] = tracking_env + pod_uid
+        if production:
+            if a.graceful_stop:
+                cmd.extend(["--stop-after-seconds", str(a.deadline_seconds)])
+                spec["activeDeadlineSeconds"] = a.deadline_seconds + 90
+                cmd = ["timeout", "--signal=KILL", str(a.deadline_seconds + 90), *cmd]
+            else:
+                cmd = ["timeout", "--kill-after=30s", str(a.deadline_seconds), *cmd]
         result = {
-            "name": "airaware-episodes",
+            "name": cluster or "airaware-episodes",
             "num_nodes": 1,
             "resources": {
-                "infra": "k8s/dev-bm",
-                "accelerators": "rtx5070ti:1",
+                "infra": "k8s/" + a.target,
+                "accelerators": "rtxpro6000:1" if production else "rtx5070ti:1",
                 "image_id": "docker:" + a.image,
                 "cpus": 4,
                 "memory": 12,
             },
             "config": {
                 "kubernetes": {
-                    "remote_identity": "NONE",
-                    "set_pod_resource_limits": False,
-                    "pod_config": {"spec": spec},
-                }
+                    "set_pod_resource_limits": False,"remote_identity": "NONE", "pod_config": {"metadata": {"labels": labels}, "spec": spec}}
             },
             "envs": env,
-            "run": shlex.join(cmd),
+            "run": "export PYTHONPATH=/opt/forecast/src\nexec " + shlex.join(cmd),
         }
     print(json.dumps(result, indent=2))
 

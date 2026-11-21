@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if (( $# != 3 )); then
-  echo 'Usage: build-episodes.sh OpenTSLM_CHECKOUT AIR_AWARE_CHECKOUT IMAGE_TAG' >&2
+if (( $# < 3 || $# > 4 )) || [[ "${4:-}" == "$3" ]]; then
+  echo 'Usage: build-episodes.sh OpenTSLM_CHECKOUT AIR_AWARE_CHECKOUT TRAINER_TAG [DISTINCT_PREFLIGHT_TAG]' >&2
   exit 2
 fi
 infra=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
@@ -10,10 +10,15 @@ reader_sha=$(git -C "$2" rev-parse HEAD)
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 mkdir "$stage/forecast" "$stage/reader"
-git -C "$1" archive "$forecast_sha" src/opentslm scripts/train_qwen_forecast.py | tar -x -C "$stage/forecast"
-git -C "$2" archive "$reader_sha:tools/timenet-smoke" | tar -x -C "$stage/reader"
+git -C "$1" archive "$forecast_sha" src/opentslm scripts/train_qwen_forecast.py | tar --same-permissions -x -C "$stage/forecast"
+git -C "$2" archive "$reader_sha:tools/timenet-smoke" | tar --same-permissions -x -C "$stage/reader"
 infra_sha=$(git -C "$infra" rev-parse HEAD)
-git -C "$infra" archive "$infra_sha:runtime" episode_job.py stage_episode_inputs.py versioned_episode_inputs.py Dockerfile.episodes | tar -x -C "$stage"
+git -C "$infra" archive "$infra_sha:runtime" episode_job.py episode_stop.py stage_episode_inputs.py versioned_episode_inputs.py Dockerfile.episodes Dockerfile.preflight | tar --same-permissions -x -C "$stage"
 docker build --build-arg "INFRA_SOURCE_REVISION=$infra_sha" -f "$stage/Dockerfile.episodes" -t "$3" \
   --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" --build-arg "AIRAWARE_SOURCE_REVISION=$reader_sha" "$stage"
 docker image inspect "$3" --format '{{json .RepoDigests}}'
+if (( $# == 4 )); then
+  docker build -f "$stage/Dockerfile.preflight" -t "$4" \
+    --build-arg "INFRA_SOURCE_REVISION=$infra_sha" --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" "$stage"
+  docker image inspect "$4" --format '{{json .RepoDigests}}'
+fi
