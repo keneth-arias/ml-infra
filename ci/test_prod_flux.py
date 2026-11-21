@@ -1,6 +1,7 @@
 """Verify the deployable Flux source and retained state in the rendered production root."""
 
 import json
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -78,3 +79,14 @@ class ProductionFluxTests(unittest.TestCase):
         self.assertFalse(any(s.get("name") == "episode-submit" for o in platform for s in o.get("subjects", ())))
         fence = next(o for o in platform if o["kind"] == "ValidatingAdmissionPolicy" and o["metadata"]["name"] == "episode-submit-inputs")
         self.assertEqual(fence["spec"]["validations"][0]["expression"], "false")
+
+    def test_access_probe_uses_the_released_preflight_entrypoint(self):
+        render = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))["render_job"]
+        trainer = "ghcr.io/fixture/trainer@sha256:" + "1" * 64
+        for preflight in ("ghcr.io/fixture/preflight@sha256:" + "2" * 64,
+                          "example.invalid/probe@sha256:" + "a" * 64):
+            job = render("preflight", trainer, preflight, paired=True)
+            container, = job["spec"]["template"]["spec"]["containers"]
+            self.assertEqual(container["image"], preflight)
+            self.assertEqual(container["command"][0], "/usr/local/bin/python")
+            self.assertEqual(container["resources"]["requests"], {"cpu": "1", "memory": "256Mi"})

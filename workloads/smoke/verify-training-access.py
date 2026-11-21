@@ -12,6 +12,17 @@ sys.path.insert(0, str(SKY))
 from production_target import kubectl_client
 
 
+def render_job(mode, trainer, preflight, *, paired=False):
+    return json.loads(subprocess.check_output([
+        sys.executable, SKY / "episode-profile.py", mode, "fit", "direct", "access-check",
+        "--target", "prod-nebius", "--image", trainer,
+        *(["--preflight-image", preflight] if mode == "preflight" else []),
+        "--bundle-sha256", "b" * 64, "--schedule", "14084", "--step", "14084",
+        *(["--cached-weights-sha256", "c" * 64, "--validation-sha256", "d" * 64,
+           "--direct-objective", "physical-mae"] if paired else []),
+    ]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trainer-image", help="Verified image from the signed release")
@@ -41,15 +52,6 @@ def main():
             raise SystemExit(f"Unexpected permission for {verb} {resource}/{subresource} in {namespace}")
         print(namespace, verb, resource, subresource, result.stdout.strip())
 
-    def render(mode, *, paired=False, image=None):
-        return json.loads(subprocess.check_output([
-            sys.executable, SKY / "episode-profile.py", mode, "fit", "direct", "access-check",
-            "--target", "prod-nebius", "--image", image or (args.preflight_image if mode == "preflight" else args.trainer_image),
-            "--bundle-sha256", "b" * 64, "--schedule", "14084", "--step", "14084",
-            *(["--cached-weights-sha256", "c" * 64, "--validation-sha256", "d" * 64,
-               "--direct-objective", "physical-mae"] if paired else []),
-        ]))
-
     def check(job, label, denial=None):
         result = subprocess.run(
             [*kube, "create", "--dry-run=server", "-f", "-", "-o", "name"],
@@ -67,16 +69,18 @@ def main():
     if not released:
         # Authorization is the outer boundary during the CPU pilot.
         result = subprocess.run([*kube, "create", "--dry-run=server", "-f", "-"],
-                                input=json.dumps(render("job", image=invalid)),
+                                input=json.dumps(render_job("job", invalid, None)),
                                 capture_output=True, text=True, timeout=20)
         if result.returncode == 0 or "cannot create resource" not in result.stderr or "jobs" not in result.stderr:
             raise SystemExit("Expected the held submitter to be refused Job creation by RBAC")
         print("native training submission held")
         return
     for mode in ("preflight", "job"):
-        check(render(mode, image=invalid), "unapproved-" + mode, "approved image")
-        check(render(mode), mode)
-        check(render(mode, paired=True), "paired-" + mode)
+        trainer = invalid if mode == "job" else args.trainer_image
+        preflight = invalid if mode == "preflight" else args.preflight_image
+        check(render_job(mode, trainer, preflight), "unapproved-" + mode, "approved image")
+        check(render_job(mode, args.trainer_image, args.preflight_image), mode)
+        check(render_job(mode, args.trainer_image, args.preflight_image, paired=True), "paired-" + mode)
     for label, field, value, message in (
         ("other-account", "serviceAccountName", "default", "token-free"),
         ("mounted-token", "automountServiceAccountToken", True, "token-free"),
@@ -85,10 +89,10 @@ def main():
         ("writable-input", "volumes", [{"name": "inputs", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}},
                                       {"name": "state", "emptyDir": {}}], "read-only training inputs"),
     ):
-        job = render("job")
+        job = render_job("job", args.trainer_image, args.preflight_image)
         job["spec"]["template"]["spec"][field] = value
         check(job, label, message)
-    job = render("job")
+    job = render_job("job", args.trainer_image, args.preflight_image)
     job["spec"]["template"]["spec"]["containers"][0]["env"].append({
         "name": "FIXTURE", "valueFrom": {"secretKeyRef": {"name": "scoring-fixture", "key": "marker"}},
     })
