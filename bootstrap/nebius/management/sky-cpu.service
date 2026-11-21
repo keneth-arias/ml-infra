@@ -15,6 +15,8 @@ Environment=HOME=/var/lib/sky-cpu
 Environment=PATH=/opt/sky-cpu/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PIP_NO_INDEX=1
 Environment=PIP_FIND_LINKS=/opt/sky-cpu-build-wheels
+Environment=PYTHONPATH=/opt/ml-infra/bootstrap/nebius/management/sky_plugins
+Environment=SKYPILOT_SERVER_PLUGINS_CONFIG=/opt/ml-infra/bootstrap/nebius/management/sky_plugins/plugins.yaml
 Environment=SKYPILOT_CONFIG=/etc/sky-cpu/config.yaml
 Environment=KUBECONFIG=/var/lib/sky-cpu/kubeconfig
 Environment=NEBIUS_SUBMIT_KUBECONFIG=/var/lib/sky-cpu/kubeconfig
@@ -23,7 +25,12 @@ UnsetEnvironment=SKYPILOT_ALLOW_ALL_KUBERNETES_CONTEXTS SKYPILOT_API_SERVER_ENDP
 WorkingDirectory=/var/lib/sky-cpu
 ExecStartPre=/opt/sky-cpu/bin/python -I /opt/ml-infra/bootstrap/nebius/management/rootless/install-template.py --check /opt/sky-cpu
 ExecStartPre=/opt/sky-cpu/bin/python -I /opt/ml-infra/bootstrap/nebius/management/check-backend.py
+ExecStartPre=/usr/bin/test -s /opt/ml-infra/bootstrap/nebius/management/sky_plugins/plugins.yaml
 ExecStart=/opt/sky-cpu/bin/sky api start --host 127.0.0.1 --port 46581 --foreground
+ExecStop=/usr/bin/python3 -I /opt/ml-infra/bootstrap/nebius/management/stop-backend.py
+KillMode=mixed
+TimeoutStopSec=90s
+TimeoutStopFailureMode=kill
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

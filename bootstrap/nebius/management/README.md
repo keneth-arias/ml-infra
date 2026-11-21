@@ -9,10 +9,12 @@ Use a reviewed revision of this repository for the installation. Keep the two se
 
 | Destination | Reviewed inputs |
 | --- | --- |
-| `/opt/ml-infra` | Preserve the repository paths for `workloads/sky/{private_api,production_target}.py`, `bootstrap/nebius/management/{check-backend.py,config.yaml}`, and `management/rootless/{install-template.py,build-wheels.txt}` under the same bootstrap directory. |
+| `/opt/ml-infra` | Preserve the repository paths for `workloads/sky/{private_api,production_target}.py`, `bootstrap/nebius/management/{check-backend.py,stop-backend.py,config.yaml,sky_plugins/}`, and `management/rootless/{install-template.py,build-wheels.txt}` under the same bootstrap directory. |
 | `/etc/sky-cpu` | [Server configuration](config.yaml), [Caddyfile](Caddyfile), [nftables table](sky-cpu.nft). Set `SKY_CPU_CERT` and `SKY_CPU_KEY` in `proxy.env`. Limit access to the TLS key and `operators.caddy` (Caddy basic-auth username and password hash entries) to the proxy. |
 | `/etc/systemd/system` | [Backend service](sky-cpu.service), [TLS proxy service](sky-cpu-proxy.service) and [firewall service](sky-cpu-firewall.service). |
 | `/opt/sky-cpu` | Dedicated CPython 3.11 environment with the [locked rootless SkyPilot package and adapter](rootless/README.md). Install Caddy at `/opt/sky-cpu-proxy/bin/caddy` and provide `kubectl`, OpenSSH, rsync, socat and nc on the unit's PATH. |
+
+The attended unit uses cgroup v2 on bm. Its stop command signals the API supervisor while the executors and queue manager drain. The server plugin closes the request database before Python waits on its SQLite thread. The proxy stops accepting connections first. After a timed session, check that both services are inactive, their cgroups and listeners are gone, and the journal reports a successful stop. A stalled stop is forcibly bounded at 90 seconds.
 
 Download the three build wheels from the reviewed lock with `python3.11 -m pip download --only-binary=:all: --no-deps --require-hashes -r bootstrap/nebius/management/rootless/build-wheels.txt -d "$wheel_stage"` and install them in the dedicated `/opt/sky-cpu-build-wheels` directory. The backend checks the installed adapter, package version, wheel names and hashes, namespace, only allowed context, pinned managed API CA, direct endpoint and authenticated ServiceAccount before binding its port.
 
