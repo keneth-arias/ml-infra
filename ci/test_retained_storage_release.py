@@ -1,7 +1,9 @@
 """Exercise operator-only retained storage renders and funded binding checks."""
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -37,6 +39,9 @@ class RetainedStorageReleaseTest(unittest.TestCase):
         self.assertEqual(storage_class["provisioner"], "compute.csi.nebius.com")
         self.assertEqual(storage_class["volumeBindingMode"], "Immediate")
         self.assertEqual(storage_class["reclaimPolicy"], "Retain")
+        self.assertEqual(storage_class["allowedTopologies"], [
+            {"matchLabelExpressions": [{"key": "kubernetes.io/os", "values": ["linux"]}]},
+        ])
         self.assertEqual(storage_class["parameters"], {"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"})
         for objects, expected in ((database, {("tracking", "postgres", "16Gi")}),
                                    (training, {("training", "airaware-checkpoints", "128Gi")})):
@@ -141,6 +146,112 @@ class RetainedStorageReleaseTest(unittest.TestCase):
             path.write_text(json.dumps(live | {"phase": "submit-db"}))
             with self.assertRaises(ValueError):
                 helper.evidence(path, "db", live, funding)
+
+    def test_repaired_capture_preserves_original_paid_claim_and_exact_receipts(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        state = dict(project_id="project-synthetic", cluster_id="mk8scluster-synthetic",
+                     namespace_uids={"tracking": "tracking-uid", "training": "training-uid"})
+        approval = state | dict(reservation_id="synthetic", tenant_id="tenant-synthetic",
+                                approved_at="2026-10-01T20:00:00Z", acquisition_deadline="2026-10-01T21:00:00Z",
+                                retain_until="2026-10-31T21:00:00Z", allocated_non_gpu_usd="20",
+                                ssd_gib_hourly_usd="0.0001", tax_reserve_rate="0.22", retention_owner="test")
+        approval_hash = "a" * 64
+        repair = dict(project_id=state["project_id"], cluster_id=state["cluster_id"],
+                      namespace_uid="tracking-uid", approval_sha256=approval_hash, reservation_id="synthetic",
+                      pvc_uid="db-uid", storage_class_uid="class-uid", attempt_id="repair-1",
+                      started_at="2026-10-01T20:20:00.500000Z")
+        cls, claim = sorted(render(STORAGE / "db"), key=lambda row: row["kind"], reverse=True)
+        cls["metadata"].update(uid="class-uid", creationTimestamp="2026-10-01T20:01:00Z",
+                               labels={helper.OWNER: "synthetic"},
+                               annotations={helper.REPAIR_ATTEMPT: repair["attempt_id"],
+                                            helper.REPAIR_STARTED: repair["started_at"]})
+        claim["metadata"].update(uid="db-uid", creationTimestamp="2026-10-01T20:02:00Z",
+                                 labels={helper.OWNER: "synthetic"})
+        claim["spec"]["volumeName"] = "db-pv"
+        claim["status"] = {"phase": "Bound"}
+        provider_id = "computedisk-synthetic"
+        pv = dict(metadata=dict(name="db-pv", uid="pv-uid", creationTimestamp="2026-10-01T20:20:01Z"),
+                  status={"phase": "Bound"},
+                  spec=dict(storageClassName=helper.CLASS, persistentVolumeReclaimPolicy="Retain",
+                            accessModes=["ReadWriteOnce"], capacity={"storage": "16Gi"},
+                            claimRef={"namespace": "tracking", "name": "postgres", "uid": "db-uid"},
+                            csi=dict(driver=helper.DRIVER, fsType="ext4", volumeHandle=provider_id)))
+        disk = dict(metadata=dict(id=provider_id, parent_id=state["project_id"],
+                                  created_at="2026-10-01T20:20:01.300000Z"),
+                    spec=dict(type="NETWORK_SSD", size_gibibytes="16"), status={"state": "READY"})
+        live = state | dict(storage_classes=[cls], claims=[claim], volumes=[pv], disks=[disk], attachments=[])
+        created = [{"key": helper.object_key(obj), "uid": obj["metadata"]["uid"]} for obj in (cls, claim)]
+        with TemporaryDirectory() as directory:
+            submission = Path(directory) / "submitted.json"
+            submission.write_text(json.dumps(state | dict(phase="submit-db", approval_sha256=approval_hash,
+                                  observed_at="2026-10-01T20:02:01Z", created_objects=created)))
+            args = SimpleNamespace(phase="db", profile="ml-prod", submission=submission, db_repair=repair)
+            with (patch.object(helper, "observe", return_value=live), patch.object(helper, "disk_quota", return_value={}),
+                  patch.object(helper, "datetime", wraps=datetime) as clock):
+                clock.now.return_value = datetime.fromisoformat("2026-10-01T20:24:30Z")
+                result = helper.capture(args, approval, approval_hash)
+                self.assertEqual(result["db_repair"], repair)
+                self.assertEqual(result["bindings"][0]["pvc_uid"], "db-uid")
+                for invalid in (None, repair | {"pvc_uid": "foreign"}, repair | {"extra": "foreign"},
+                                repair | {"attempt_id": "different"}):
+                    args.db_repair = invalid
+                    with self.assertRaisesRegex(ValueError, "topology repair"):
+                        helper.capture(args, approval, approval_hash)
+                args.db_repair = repair
+                clock.now.return_value = datetime.fromisoformat("2026-10-01T20:26:00Z")
+                with self.assertRaisesRegex(ValueError, "five-minute"):
+                    helper.capture(args, approval, approval_hash)
+                clock.now.return_value = datetime.fromisoformat("2026-10-01T20:24:30Z")
+                disk["metadata"]["created_at"] = "2026-10-01T20:20:00.100000Z"
+                with self.assertRaisesRegex(ValueError, "after the topology patch"):
+                    helper.capture(args, approval, approval_hash)
+                disk["metadata"]["created_at"] = result["bindings"][0]["disk_created_at"]
+                args.phase = "submit-training"
+                args.db_receipt = Path(directory) / "db-bound.json"
+                raw = json.dumps(result).encode()
+                args.db_receipt.write_bytes(raw)
+                args.db_receipt_sha256 = hashlib.sha256(raw).hexdigest()
+                self.assertEqual(helper.capture(args, approval, approval_hash)["db_repair"], repair)
+                args.db_receipt.write_bytes(raw + b" ")
+                with self.assertRaisesRegex(ValueError, "receipt digest"):
+                    helper.capture(args, approval, approval_hash)
+
+                args.db_receipt.write_bytes(raw)
+                training, = render(STORAGE / "training")
+                training["metadata"].update(uid="training-pvc-uid", creationTimestamp="2026-10-01T20:28:00Z",
+                                            labels={helper.OWNER: "synthetic"})
+                training["spec"]["volumeName"] = "training-pv"
+                training["status"] = {"phase": "Bound"}
+                training_pv = deepcopy(pv)
+                training_pv["metadata"].update(name="training-pv", uid="training-pv-uid",
+                                               creationTimestamp="2026-10-01T20:28:01Z")
+                training_pv["spec"]["capacity"] = {"storage": "128Gi"}
+                training_pv["spec"]["claimRef"] = {
+                    key: training["metadata"][key] for key in ("namespace", "name", "uid")
+                }
+                training_disk = deepcopy(disk)
+                training_disk["metadata"].update(id="computedisk-training", created_at="2026-10-01T20:28:01Z")
+                training_disk["spec"]["size_gibibytes"] = "128"
+                training_pv["spec"]["csi"]["volumeHandle"] = training_disk["metadata"]["id"]
+                live["claims"].append(training)
+                live["volumes"].append(training_pv)
+                live["disks"].append(training_disk)
+                args.phase = "all"
+                args.submission = Path(directory) / "training-submission.json"
+                submission = state | dict(phase="submit-training", approval_sha256=approval_hash,
+                                          observed_at="2026-10-01T20:28:01Z", db_repair=repair,
+                                          created_objects=[{"key": helper.object_key(training),
+                                                            "uid": training["metadata"]["uid"]}])
+                args.submission.write_text(json.dumps(submission))
+                clock.now.return_value = datetime.fromisoformat("2026-10-01T20:29:00Z")
+                final = helper.capture(args, approval, approval_hash)
+                self.assertEqual(final["db_repair"], repair)
+                self.assertEqual(final["baseline"]["disk_ids"], [provider_id, "computedisk-training"])
+                args.submission.write_text(json.dumps(submission | {"db_repair": None}))
+                with self.assertRaisesRegex(ValueError, "Training submission differs"):
+                    helper.capture(args, approval, approval_hash)
 
     def test_bounds_and_exact_binding(self):
         spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
