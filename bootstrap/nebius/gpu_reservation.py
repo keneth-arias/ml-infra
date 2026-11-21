@@ -5,6 +5,9 @@ import hashlib
 import json
 import re
 import uuid
+from pathlib import Path
+
+from worker_cleanup import cleanup_digest, scope_digest
 
 from gpu_window import BID, RELEASE_HOURS, bounds, hours, pilot_bounds
 from worker_plan import amount, timestamp
@@ -48,6 +51,33 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         or len(set(accounts.values())) != 2
     ):
         raise ValueError("Expected distinct identities for both cleanup hosts")
+    # The funding owner binds the IAM administrator's independent grant check
+    # to the actual keys/identities and the whole period through release.
+    grants = ledger["cleanup_access"]
+    for host, account in accounts.items():
+        grant = grants[host]
+        if (
+            grant["account_id"] != account
+            or grant["project_id"] != scope["project_id"]
+            or grant["cluster_id"] != scope["cluster_id"]
+            or not re.fullmatch("[0-9a-f]{64}", grant["evidence_sha256"])
+            or not timestamp(grant["checked_at"]) <= now
+            or timestamp(grant["valid_through"])
+            < timestamp(scope["cutoff"]) + timedelta(hours=1)
+            or any(
+                grant.get(key) is not True
+                for key in ("node_group_delete", "state_write", "lock_write_delete")
+            )
+        ):
+            raise ValueError(
+                f"{host} cleanup grant evidence does not cover this allocation"
+            )
+    root = Path(__file__).resolve().parent
+    units = {
+        name: root / "management" / name
+        for name in ("worker-expiry@.timer", "worker-expiry@.service")
+    }
+    expected_source = cleanup_digest(root, units)
     versions = {}
     for host, account in accounts.items():
         key = f"prod/mk8s/release-control/timers/{run}/{stage}/{host}.json"
@@ -68,11 +98,20 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         expected.update(
             host=host,
             account_id=account,
+            scope_sha256=scope_digest(scope),
+            cleanup_source_sha256=expected_source,
             state_serial=state_serial,
             timer=f"worker-expiry@{run}.timer",
         )
         if any(proof.get(k) != v for k, v in expected.items()) or not all(
-            proof.get(k) is True for k in ("enabled", "active", "cloud_state_access")
+            proof.get(k) is True
+            for k in (
+                "enabled",
+                "active",
+                "cloud_state_access",
+                "inventory_reconciled",
+                "locked_release_plan_checked",
+            )
         ):
             raise ValueError(f"{host} timer attestation mismatches the allocation")
         if (

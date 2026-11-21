@@ -485,6 +485,14 @@ class ReservationTests(unittest.TestCase):
         import json
         from unittest.mock import Mock
         from gpu_reservation import reserve
+        from worker_cleanup import cleanup_digest, scope_digest
+
+        root = Path(gpu_window.__file__).parent
+        units = {
+            name: root / "management" / name
+            for name in ("worker-expiry@.service", "worker-expiry@.timer")
+        }
+        source = cleanup_digest(root, units)
 
         sc = dict(
             scope(),
@@ -495,7 +503,23 @@ class ReservationTests(unittest.TestCase):
             baseline_sha256="b" * 64,
             cleanup_accounts={"bm": "primary", "fw13": "backup"},
         )
-        raw = json.dumps(dict(ledger(), remaining_gpu_hours=100)).encode()
+        grants = {
+            host: dict(
+                account_id=account,
+                project_id="p",
+                cluster_id="c",
+                evidence_sha256="d" * 64,
+                checked_at=utc(NOW),
+                valid_through=utc(NOW + timedelta(hours=9)),
+                node_group_delete=True,
+                state_write=True,
+                lock_write_delete=True,
+            )
+            for host, account in sc["cleanup_accounts"].items()
+        }
+        raw = json.dumps(
+            dict(ledger(), remaining_gpu_hours=100, cleanup_access=grants)
+        ).encode()
         sc["ledger_sha256"] = hashlib.sha256(raw).hexdigest()
 
         def run(case):
@@ -524,10 +548,18 @@ class ReservationTests(unittest.TestCase):
                     enabled=True,
                     active=True,
                     cloud_state_access=True,
+                    scope_sha256=scope_digest(sc),
+                    cleanup_source_sha256=source,
+                    inventory_reconciled=True,
+                    locked_release_plan_checked=True,
                     account_id=sc["cleanup_accounts"][host],
                 )
                 if case == "timer" and host == "fw13":
                     data["run_id"] = "old"
+                if case == "old-code":
+                    data.pop("cleanup_source_sha256")
+                if case == "unrehearsed":
+                    data["locked_release_plan_checked"] = False
                 if case == "wrong-stage":
                     data["stage"] = "support"
                 if case == "expired":
@@ -538,7 +570,14 @@ class ReservationTests(unittest.TestCase):
                 }
 
             s3.get_object.side_effect = read
-            if case in ("timer", "expired", "stale", "wrong-stage"):
+            if case in (
+                "timer",
+                "expired",
+                "stale",
+                "wrong-stage",
+                "old-code",
+                "unrehearsed",
+            ):
                 with self.assertRaises(ValueError):
                     reserve(s3, sc, "a" * 64, 3, NOW)
                 s3.put_object.assert_not_called()
@@ -556,9 +595,32 @@ class ReservationTests(unittest.TestCase):
 
         for stage in ("gpu", "pilot"):
             sc.update(stage=stage, cutoff=utc(NOW + timedelta(hours=7)))
-            for case in ("ok", "timer", "expired", "stale", "wrong-stage"):
+            for case in (
+                "ok",
+                "timer",
+                "expired",
+                "stale",
+                "wrong-stage",
+                "old-code",
+                "unrehearsed",
+            ):
                 with self.subTest(stage=stage, case=case):
                     run(case)
+
+        # The live ledger carries evidence of provider deletion authority separately
+        # from the cleanup process that can only demonstrate a read-only rehearsal.
+        for key, value in (("node_group_delete", False), ("valid_through", utc(NOW))):
+            bad = deepcopy(grants)
+            bad["fw13"][key] = value
+            raw = json.dumps(
+                dict(ledger(), remaining_gpu_hours=100, cleanup_access=bad)
+            ).encode()
+            sc["ledger_sha256"] = hashlib.sha256(raw).hexdigest()
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(ValueError, "cleanup grant evidence"),
+            ):
+                run("ok")
 
 
 class ApplyConsumptionTests(unittest.TestCase):

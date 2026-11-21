@@ -12,6 +12,11 @@ import shlex
 import socket
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+
+TERRAFORM_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TERRAFORM_ROOT))
+from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_inventory
 
 STATE_KEY = "prod/mk8s/terraform.tfstate"
 ENDPOINT = "https://storage.eu-south1.nebius.cloud"
@@ -50,32 +55,7 @@ def main(run):
     )
     if account != info["service_account_profile"]["info"]["metadata"]["id"]:
         raise ValueError("Unexpected Nebius cleanup identity")
-    for service, resource, parent in (
-        ("compute", "instance", target[0]),
-        ("compute", "disk", target[0]),
-        ("mk8s", "node-group", target[1]),
-    ):
-        response = json.loads(
-            output(
-                "nebius",
-                "-p",
-                "ml-prod",
-                service,
-                resource,
-                "list",
-                "--all",
-                "--parent-id",
-                parent,
-                "--format",
-                "json",
-            )
-        )
-        if (
-            not isinstance(response, dict)
-            or response.keys() - {"items", "next_page_token"}
-            or response.get("next_page_token")
-        ):
-            raise ValueError("Incomplete provider inventory")
+    verify_inventory("ml-prod", target[0], target[1], baseline, before_stage=scope)
     backend = json.loads(
         (Path(os.environ["TF_DATA_DIR"]) / "terraform.tfstate").read_text()
     )["backend"]
@@ -95,6 +75,40 @@ def main(run):
         raise ValueError("Unexpected live state lineage")
 
     timer = f"worker-expiry@{run}.timer"
+    service = f"worker-expiry@{run}.service"
+    units = {}
+    for unit, template in (
+        (service, "worker-expiry@.service"),
+        (timer, "worker-expiry@.timer"),
+    ):
+
+        def prop(key):
+            return output("systemctl", "show", unit, "--value", "-p", key)
+
+        if prop("DropInPaths") or prop("NeedDaemonReload") != "no":
+            raise ValueError("Expiry unit differs from the loaded release")
+        units[template] = Path(prop("FragmentPath"))
+        if unit == timer and prop("Unit") != service:
+            raise ValueError("Timer does not trigger the scoped expiry service")
+        if unit == service and (
+            prop("User") != "nebius-cleanup"
+            or Path(prop("WorkingDirectory")) != Path.cwd()
+        ):
+            raise ValueError(
+                "Expiry service uses a different identity or Terraform directory"
+            )
+
+    source_digest = cleanup_digest(TERRAFORM_ROOT, units)
+    with TemporaryDirectory() as scratch:
+        groups = plan_release(
+            Path(scratch) / "rehearsal.tfplan",
+            profile="ml-prod",
+            cluster_id=target[1],
+            run_id=run,
+            cutoff_label=datetime.fromisoformat(target[2]).strftime("%Y%m%d%H%M%S"),
+        )
+    if groups != ({scope["support_group_id"]} if scope["stage"] == "gpu" else set()):
+        raise ValueError("Expiry rehearsal did not match the stage's owned live groups")
     dest = "org.freedesktop.systemd1"
     bus_path = shlex.split(
         output(
@@ -154,6 +168,10 @@ def main(run):
         enabled=True,
         active=True,
         cloud_state_access=True,
+        scope_sha256=scope_digest(scope),
+        cleanup_source_sha256=source_digest,
+        inventory_reconciled=True,
+        locked_release_plan_checked=True,
     )
     import boto3
 
