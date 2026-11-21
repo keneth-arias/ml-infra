@@ -114,6 +114,24 @@ def reserve(s3, scope, plan_digest, state_serial, now):
             state_serial=state_serial,
             timer=f"worker-expiry@{run}.timer",
         )
+        if host == "fw13":
+            expected["timer"] = f"cronjob/expiry-{run}"
+            cron = scope["fw13_cronjob"]
+            live = proof.get("kind_cronjob", {})
+            if (
+                not isinstance(live, dict)
+                or not re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", cron["image"])
+                or not re.fullmatch("[0-9a-f]{64}", cron["spec_sha256"])
+                or not re.fullmatch("[0-9a-f]{64}", scope["fw13_tfvars_sha256"])
+                or scope["fw13_public_key_id"] != grants[host]["public_key_id"]
+                or not cron["uid"]
+                or any(live.get(k) != cron[k] for k in ("uid", "spec_sha256", "image"))
+                or not live.get("job_uid") or not live.get("pod_uid")
+                or not now <= timestamp(scope["fw13_attest_until"]) <= timestamp(scope["cutoff"])
+                or timestamp(live["scheduled_at"]) > timestamp(proof["observed_at"])
+                or timestamp(proof["next_tick"]) != timestamp(live["scheduled_at"]) + timedelta(minutes=1)
+            ):
+                raise ValueError("Expected fresh proof from the approved fw13 kind CronJob")
         if any(proof.get(k) != v for k, v in expected.items()) or not all(
             proof.get(k) is True
             for k in (
