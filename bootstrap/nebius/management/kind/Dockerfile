@@ -11,5 +11,5 @@ ENV TF_CLI_CONFIG_FILE=/opt/cleanup/management/kind/terraform.rc TF_IN_AUTOMATIO
 ARG BUILD_COMMIT
 LABEL org.opencontainers.image.revision=$BUILD_COMMIT
 USER 1000:1000
-RUN python3 -B management/kind/tick.py --help >/dev/null && test -x ./expire-workers && TF_DATA_DIR=/tmp/check-provider terraform init -backend=false -lockfile=readonly && TF_DATA_DIR=/tmp/check-provider terraform providers schema -json >/dev/null && rm -rf /tmp/check-provider
+RUN python3 -B management/kind/tick.py --help >/dev/null && test -x ./expire-workers && TF_DATA_DIR=/tmp/check-provider terraform init -backend=false -lockfile=readonly && TF_DATA_DIR=/tmp/check-provider terraform validate -no-color && rm -rf /tmp/check-provider
 ENTRYPOINT ["python3","-B","/opt/cleanup/management/kind/tick.py"]
