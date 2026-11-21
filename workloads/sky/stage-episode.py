@@ -109,6 +109,7 @@ print(
             "metadata": {"generateName": "stage-episode-", "namespace": "training"},
             "spec": {
                 "activeDeadlineSeconds": 1800,
+                "ttlSecondsAfterFinished": 86400,
                 "backoffLimit": 0,
                 "template": {"spec": spec},
             },
