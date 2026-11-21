@@ -80,6 +80,29 @@ class ProductionFluxTests(unittest.TestCase):
         fence = next(o for o in platform if o["kind"] == "ValidatingAdmissionPolicy" and o["metadata"]["name"] == "episode-submit-inputs")
         self.assertEqual(fence["spec"]["validations"][0]["expression"], "false")
 
+    def test_pilot_resource_limits(self):
+        rendered = subprocess.check_output(["kubectl", "kustomize", ROOT / "clusters/prod-nebius"])
+        specs = {o["kind"]: o["spec"] for o in yaml.safe_load_all(rendered)}
+        self.assertEqual(specs["ResourceQuota"]["hard"], {
+            "pods": "3",
+            "count/jobs.batch": "2",
+            "requests.cpu": "2",
+            "limits.cpu": "3",
+            "requests.memory": "5Gi",
+            "limits.memory": "8Gi",
+            "requests.nvidia.com/gpu": "0",
+            "persistentvolumeclaims": "0",
+            "services": "3",
+            "services.loadbalancers": "0",
+            "services.nodeports": "0",
+        })
+        self.assertEqual(specs["LimitRange"]["limits"], [{
+            "type": "Container",
+            "defaultRequest": {"cpu": "100m", "memory": "128Mi"},
+            "default": {"cpu": "1", "memory": "2Gi"},
+            "max": {"cpu": "2", "memory": "4Gi"},
+        }])
+
     def test_access_probe_uses_the_released_preflight_entrypoint(self):
         render = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))["render_job"]
         trainer = "ghcr.io/fixture/trainer@sha256:" + "1" * 64
