@@ -10,4 +10,4 @@ spec:
   storageClassName: airaware-network-retain-immediate
   resources:
     requests:
-      storage: 64Gi
+      storage: 128Gi

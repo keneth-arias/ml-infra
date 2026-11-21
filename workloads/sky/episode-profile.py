@@ -256,9 +256,14 @@ def main():
         del env["MLFLOW_TRACKING_URI"]
         spec.pop("runtimeClassName")
         spec["imagePullSecrets"] = [{"name": "ghcr-pull"}]
-        for volume in spec["volumes"]:
-            if volume["name"] == "inputs":
-                volume["persistentVolumeClaim"]["readOnly"] = True
+        spec["securityContext"] = {"fsGroup": 1000, "fsGroupChangePolicy": "OnRootMismatch"}
+        # Publish the RWO PVC once. Bind input/checkpoint subpaths read-only
+        # without making the underlying GPU state mount read-only as well.
+        spec["volumes"] = [volume for volume in spec["volumes"] if volume["name"] == "inputs"]
+        if a.format == "preflight":
+            spec["volumes"][0]["persistentVolumeClaim"]["readOnly"] = True
+        for mount in spec["containers"][0]["volumeMounts"]:
+            mount["name"] = "inputs"
         if a.format != "sky":
             spec["serviceAccountName"] = "episode-worker"
         if a.format == "preflight":

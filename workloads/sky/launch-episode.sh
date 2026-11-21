@@ -45,6 +45,7 @@ if [[ "$target" == prod-nebius ]]; then
     echo 'Production release verification returned an invalid receipt digest.' >&2
     exit 1
   fi
+  python3 "$base/training-storage-handoff.py"
 fi
 receipt=$("${kube[@]}" create -f "$tmp/pre.json" -o name)
 "${kube[@]}" -n training wait --for=condition=complete --timeout=10m "$receipt" || {
@@ -70,6 +71,7 @@ if [[ "$mode" == sky ]]; then
 fi
 if [[ "$target" == prod-nebius ]]; then
   if [[ $mode == sky ]]; then python3 "$base/production_target.py" training; fi
+  python3 "$base/training-storage-handoff.py"
   current_receipt=$(check_release)
   if [[ "$current_receipt" != "$approved_receipt" ]]; then
     echo 'The approved production release changed during preflight. Run preflight again.' >&2

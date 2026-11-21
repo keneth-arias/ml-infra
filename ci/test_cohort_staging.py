@@ -278,6 +278,10 @@ publish(Path(parent), key, Path(source), interrupt)
         ]
         job = json.loads(subprocess.check_output(args))
         self.assertEqual(job["spec"]["ttlSecondsAfterFinished"], 86400)
+        pod = job["spec"]["template"]["spec"]
+        inputs = next(m for m in pod["containers"][0]["volumeMounts"] if m["name"] == "inputs")
+        self.assertEqual(inputs, {"name": "inputs", "mountPath": "/inputs", "subPath": "airaware/cache"})
+        self.assertEqual(pod["securityContext"]["fsGroup"], 1000)
         cmd = job["spec"]["template"]["spec"]["containers"][0]["command"]
         self.assertEqual(cmd[cmd.index("--validation-sha256") + 1], "b" * 64)
         args[args.index("--phase") + 1] = "infer"

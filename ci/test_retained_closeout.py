@@ -19,13 +19,16 @@ from check import CLAIMS, OWNER, reconcile
 
 class RetainedCloseoutTest(unittest.TestCase):
     def setUp(self):
+        self.setup_layout(CLAIMS)
+
+    def setup_layout(self, layout):
         self.approval = dict(project_id="project-p", cluster_id="mk8scluster-c", reservation_id="storage-r",
                              approved_at="2026-10-01T10:00:00Z", acquisition_deadline="2026-10-01T11:00:00Z")
         sc = yaml.safe_load((STORAGE / "db/storage-class.yaml").read_bytes())
         self.live = dict(project_id="project-p", cluster_id="mk8scluster-c",
                          namespace_uids={"training": "t", "tracking": "m"}, storage_classes=[sc],
                          claims=[], volumes=[], disks=[], attachments=[])
-        for (ns, name), size in CLAIMS.items():
+        for (ns, name), size in layout.items():
             i = len(self.live["claims"])
             pv, uid, disk = f"pv-{i}", f"uid-{i}", f"computedisk-{i}"
             meta = dict(name=name, namespace=ns, uid=uid, labels={OWNER: "storage-r"},
@@ -42,15 +45,26 @@ class RetainedCloseoutTest(unittest.TestCase):
                                            status=dict(state="READY"), spec=dict(type="NETWORK_SSD", size_gibibytes=size)))
         claims, volumes, disks = (self.live[k] for k in ("claims", "volumes", "disks"))
         db = reconcile("db", self.approval, sc, claims[:1], volumes[:1], disks[:1], [])
-        self.original = reconcile("all", self.approval, sc, claims, volumes, disks, [], db)
+        self.original = reconcile("all", self.approval, sc, claims, volumes, disks, [], db, layout=layout)
         self.original["namespace_uids"] = self.live["namespace_uids"]
         self.baseline = self.original["baseline"]
 
     def test_exact_retention_after_acquisition_window(self):
         proof = verify_closeout(self.approval, self.original, self.baseline, self.live)
         self.assertEqual(proof["phase"], "worker-release")
+        self.assertEqual(len(proof["bindings"]), 2)
         self.assertEqual(proof["baseline"], self.baseline)
         self.assertEqual(proof["bindings"], self.original["bindings"])
+
+    def test_archived_split_training_layout_can_still_close(self):
+        self.setup_layout({("tracking", "postgres"): 16, ("training", "airaware-checkpoints"): 64,
+                           ("training", "airaware-model-state"): 64})
+        proof = verify_closeout(self.approval, self.original, self.baseline, self.live)
+        self.assertEqual(proof["baseline"], self.baseline)
+        self.assertEqual(len(proof["bindings"]), 3)
+        self.live["disks"].pop()
+        with self.assertRaises(ValueError):
+            verify_closeout(self.approval, self.original, self.baseline, self.live)
 
     def test_refuses_drift_in_retained_identity_and_attachment(self):
         def replace_pvc(live):
@@ -59,7 +73,7 @@ class RetainedCloseoutTest(unittest.TestCase):
         for mutation in (
             lambda live: live["disks"].pop(), lambda live: live["attachments"].append({"uid": "va"}),
             lambda live: live["namespace_uids"].update(training="new-namespace"),
-            lambda live: live["disks"][2]["status"].update(read_write_attachment="instance-1"),
+            lambda live: live["disks"][1]["status"].update(read_write_attachment="instance-1"),
             lambda live: live["disks"][1]["status"].update(managed_by="instance-1"),
             lambda live: live["volumes"][1]["metadata"].update(uid="recreated-pv"),
             lambda live: live["disks"][0]["metadata"].update(created_at="2026-10-01T10:03:00Z"),

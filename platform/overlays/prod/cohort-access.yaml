@@ -118,15 +118,21 @@ spec:
         && has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
       message: Require the token-free episode-worker account.
     - expression: >-
-        has(variables.pod.volumes) && variables.pod.volumes.all(v,
-        (has(v.persistentVolumeClaim) &&
-        ((v.name == 'state' && v.persistentVolumeClaim.claimName == 'airaware-model-state') ||
-         (v.name == 'inputs' && v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
-          has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly))) ||
+        has(variables.pod.securityContext) && has(variables.pod.securityContext.fsGroup) &&
+        variables.pod.securityContext.fsGroup == 1000 &&
+        has(variables.pod.securityContext.fsGroupChangePolicy) &&
+        variables.pod.securityContext.fsGroupChangePolicy == 'OnRootMismatch'
+      message: Require the enrolled training filesystem group.
+    - expression: >-
+        has(variables.pod.volumes) && variables.pod.volumes.exists_one(v, v.name == 'inputs') &&
+        variables.pod.volumes.all(v,
+        (v.name == 'inputs' && has(v.persistentVolumeClaim) &&
+         v.persistentVolumeClaim.claimName == 'airaware-checkpoints' &&
+         (has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly) == !variables.usesGPU) ||
         (variables.usesGPU && v.name == 'tracking-ca' && has(v.configMap) && v.configMap.name == 'episode-tracking' &&
          (!has(v.configMap.optional) || !v.configMap.optional) && has(v.configMap.items) && size(v.configMap.items) == 1 &&
          v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt'))
-      message: Native training requires approved state, read-only training inputs and the tracking CA.
+      message: Native training requires one scoped training volume and the tracking CA.
     - expression: >-
         !has(variables.container.volumeDevices) &&
         variables.mounts.exists_one(m, m.mountPath == '/base') &&
@@ -148,7 +154,7 @@ spec:
                m.subPath.matches('^airaware/cache/weights/[0-9a-f]{64}$'))) ||
              (m.mountPath == '/validation' && size(variables.argv) > 21 &&
                m.subPath == 'airaware/cache/bundles/' + variables.argv[21]))) ||
-           (m.name == 'state' && has(m.subPath) &&
+           (m.name == 'inputs' && has(m.subPath) &&
             ((variables.usesGPU && (!has(m.readOnly) || !m.readOnly) &&
               ((variables.phase == 'fit' && m.mountPath == '/state' && m.subPath == 'episodes/' + variables.runID + '/state') ||
                (variables.phase == 'infer' && m.mountPath == '/output' && m.subPath == 'episodes/' + variables.runID + '/output'))) ||

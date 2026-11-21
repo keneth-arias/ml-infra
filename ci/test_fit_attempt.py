@@ -313,6 +313,7 @@ class FitAttemptTests(unittest.TestCase):
                 "late-release-denied",
                 "release-promoted",
                 "preflight-failed",
+                "handoff-failed",
                 "budget-stop",
                 "wrong-bucket-owner",
                 "ambiguous",
@@ -349,6 +350,9 @@ case "$1" in
     else
       echo "{'c' * 64}"
     fi
+    exit 0;;
+  */training-storage-handoff.py)
+    if [ -f "$FIXTURE/preflight" ] && [ "$OUTCOME" = handoff-failed ]; then exit 1; fi
     exit 0;;
   */fit_attempt.py) touch "$FIXTURE/funding-guard";;
 esac
@@ -469,7 +473,7 @@ def client(*a, **kw):
                         self.assertFalse(submitted.exists())
                         continue
                     for stage in ("early", "late"):
-                        if stage == "late" and outcome in ("early-release-denied", "preflight-failed"):
+                        if stage == "late" and outcome in ("early-release-denied", "preflight-failed", "handoff-failed"):
                             self.assertFalse((root / "late-task").exists())
                             continue
                         self.assertEqual((root / f"{stage}-task").read_bytes(), task)
@@ -479,7 +483,7 @@ def client(*a, **kw):
                         self.assertFalse((root / "preflight").exists())
                     else:
                         self.assertEqual(digest((root / "preflight").read_bytes()), request["preflight_sha256"])
-                    if outcome in ("early-release-denied", "late-release-denied", "release-promoted"):
+                    if outcome in ("early-release-denied", "late-release-denied", "release-promoted", "handoff-failed"):
                         self.assertFalse((root / "funding-guard").exists())
                         self.assertFalse((root / "s3-access").exists())
                         self.assertEqual((root / "ledger.json").read_bytes(), raw)

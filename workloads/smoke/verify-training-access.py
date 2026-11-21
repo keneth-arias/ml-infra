@@ -198,12 +198,33 @@ def exercise_release(trainer_image, preflight_image, check):
         job = render_job("job", trainer_image, preflight_image)
         job["spec"]["template"]["spec"][field] = value
         check(job, label, message)
-    for label, change in (("other-claim", {"claimName": "scoring-fixture"}),
-                          ("writable-input", {"readOnly": False})):
-        job = render_job("job", trainer_image, preflight_image)
+    for mode, label, change in (("job", "other-claim", {"claimName": "scoring-fixture"}),
+                                ("preflight", "writable-claim", {"readOnly": False}),
+                                ("job", "read-only-gpu-state", {"readOnly": True})):
+        job = render_job(mode, trainer_image, preflight_image)
         inputs = next(v for v in job["spec"]["template"]["spec"]["volumes"] if v["name"] == "inputs")
         inputs["persistentVolumeClaim"].update(change)
-        check(job, label, "read-only training inputs")
+        check(job, label, "one scoped training volume")
+    job = render_job("job", trainer_image, preflight_image)
+    pod = job["spec"]["template"]["spec"]
+    pod["volumes"].append({"name": "state", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}})
+    check(job, "second-mount-of-same-claim", "one scoped training volume")
+    job = render_job("job", trainer_image, preflight_image)
+    mount = next(m for m in job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] if m["mountPath"] == "/bundle")
+    mount["readOnly"] = False
+    check(job, "writable-bundle-subpath", "checkpoint mount paths")
+    for label, subpath in (("whole-training-disk", None), ("cache-as-state", "airaware/cache"),
+                           ("scorer-as-state", "scorer/confirmation")):
+        job = render_job("job", trainer_image, preflight_image)
+        mount = next(m for m in job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] if m["mountPath"] == "/state")
+        if subpath is None:
+            del mount["subPath"]
+        else:
+            mount["subPath"] = subpath
+        check(job, label, "checkpoint mount paths")
+    job = render_job("job", trainer_image, preflight_image)
+    job["spec"]["template"]["spec"]["securityContext"]["fsGroup"] = 0
+    check(job, "wrong-volume-group", "training filesystem group")
     job = render_job("job", trainer_image, preflight_image)
     ca = next(v for v in job["spec"]["template"]["spec"]["volumes"] if v["name"] == "tracking-ca")
     ca["configMap"]["name"] = "unapproved-ca"
