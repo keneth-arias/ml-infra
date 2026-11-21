@@ -18,8 +18,9 @@ def verify(layout, receipt, role):
     image = receipt["images"][role]
     if image["repository"] != "ghcr.io/keneth-arias/ml-infra-qwen":
         raise ValueError("Unexpected candidate repository")
-    if receipt["images"]["trainer"]["index"] == receipt["images"]["preflight"]["index"]:
-        raise ValueError("Each role requires a distinct image")
+    for field in ("index", "linux_amd64", "config"):
+        if receipt["images"]["trainer"][field] == receipt["images"]["preflight"][field]:
+            raise ValueError(f"Each role requires a distinct {field} digest")
     config, layers = verified_config(layout, image)
     if role == "trainer":
         env = dict(field.split("=", 1) for field in config["Env"])

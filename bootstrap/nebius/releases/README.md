@@ -24,6 +24,6 @@ cosign sign --yes --tlog-upload=false --key "$release_key" \
   -a "role=$role" -a "build_commit=$commit" "$repository@$digest"
 ```
 
-The **Verify private Nebius candidate images** workflow cold-pulls each role in a fresh runner with `packages: read`. The job checks the index, amd64 manifest, config, blobs and BuildKit statement. It verifies the trainer's three source revisions or the preflight's two source labels, then verifies the signature with its expected role and build revision. Grant the private infrastructure repository package Read access if the read-only job cannot resolve an image already verified by its publisher.
+The **Verify private Nebius candidate images** workflow cold-pulls each role in a fresh runner with `packages: read`. The job checks the index, amd64 manifest, config, blobs and BuildKit statement. It checks the recorded source revisions in the digest-pinned image config, then verifies the signature with its expected role and build revision. The BuildKit statement identifies the platform manifest. Reproduction from source uses the pinned Git archives. Grant the private infrastructure repository package Read access if the read-only job cannot resolve an image already verified by its publisher.
 
 Record the three successful cold-pull jobs in the release record. Production admission still needs an independently trusted signer and approved role-to-digest mapping.
