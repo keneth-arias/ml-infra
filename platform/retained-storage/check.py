@@ -28,6 +28,9 @@ GIB = 1024**3
 WORKER_BOOT_DISKS = 2
 WORKER_BOOT_GIB = 128
 DB = ("tracking", "postgres")
+TOPOLOGIES = [{"matchLabelExpressions": [{"key": "kubernetes.io/os", "values": ["linux"]}]}]
+REPAIR_ATTEMPT = "airaware.storage/topology-repair-attempt"
+REPAIR_STARTED = "airaware.storage/topology-repair-at"
 
 
 def utc(value):
@@ -62,16 +65,19 @@ def indexed(rows, identity):
     return result
 
 
-def require_class(storage_class):
+def require_class(storage_class, *, allow_legacy=False):
     if storage_class["metadata"]["name"] != CLASS or (
         storage_class["provisioner"], storage_class["volumeBindingMode"], storage_class["reclaimPolicy"],
         storage_class["parameters"],
     ) != (DRIVER, "Immediate", "Retain", {"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"}):
         raise ValueError("The retained StorageClass differs from the reviewed manifest")
+    topologies = storage_class.get("allowedTopologies")
+    if topologies != TOPOLOGIES and not (allow_legacy and topologies is None):
+        raise ValueError("The retained StorageClass differs from the reviewed CSI topology")
 
 
 def reconcile(phase, approval, storage_class, claims, volumes, disks, attachments, db_receipt=None, *, layout=CLAIMS):
-    require_class(storage_class)
+    require_class(storage_class, allow_legacy=True)
     expected = {DB: layout[DB]} if phase == "db" else layout
     claims = indexed(claims, lambda row: (row["metadata"]["namespace"], row["metadata"]["name"]))
     volumes = indexed(volumes, lambda row: row["metadata"]["name"])
@@ -176,8 +182,11 @@ def observe(args, approval):
                 project_id=project, cluster_id=cluster)
 
 
-def evidence(path, phase, receipt, approval):
-    value = json.loads(path.read_bytes())
+def evidence(path, phase, receipt, approval, *, trusted_digest=None, require_digest=False):
+    raw = path.read_bytes()
+    if (require_digest or trusted_digest is not None) and hashlib.sha256(raw).hexdigest() != trusted_digest:
+        raise ValueError("Evidence bytes differ from the independently verified receipt digest")
+    value = json.loads(raw)
     if (value.get("phase") != phase or any(value.get(key) != receipt[key] for key in
                                          ("approval_sha256", "namespace_uids", "project_id", "cluster_id"))
             or not utc(approval["approved_at"]) <= utc(value["observed_at"]) <= utc(receipt["observed_at"])):
@@ -194,6 +203,40 @@ def submitted_uids(submission, objects, expected):
     if (set(records) != expected or len(records) != len(submission["created_objects"])
             or records != {object_key(row): row["metadata"]["uid"] for row in objects}):
         raise ValueError("Live claim identities differ from the create-only submission receipt")
+
+
+def repair_start(repair, receipt, approval, storage_class, db_claim):
+    annotations = storage_class["metadata"].get("annotations", {})
+    marker = annotations.get(REPAIR_ATTEMPT), annotations.get(REPAIR_STARTED)
+    if repair is None:
+        if REPAIR_ATTEMPT in annotations or REPAIR_STARTED in annotations:
+            raise ValueError("The storage topology repair requires independently verified evidence")
+        return None
+    expected = {key: receipt[key] for key in ("approval_sha256", "cluster_id", "project_id")}
+    expected.update(reservation_id=approval["reservation_id"], namespace_uid=receipt["namespace_uids"]["tracking"],
+                    pvc_uid=db_claim["metadata"]["uid"], storage_class_uid=storage_class["metadata"]["uid"])
+    if (set(repair) != {*expected, "attempt_id", "started_at"}
+            or any(repair[key] != value for key, value in expected.items())
+            or marker != (repair["attempt_id"], repair["started_at"])
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", repair["attempt_id"])):
+        raise ValueError("Storage topology repair differs from the funded original database claim")
+    started = utc(repair["started_at"])
+    if not max(utc(row["metadata"]["creationTimestamp"]) for row in (storage_class, db_claim)) < started:
+        raise ValueError("Storage topology repair must follow creation of both original objects")
+    return started
+
+
+def check_db_window(started, observed, approval, volumes, disks, binding, *, repaired):
+    if not started <= observed <= started + timedelta(minutes=5) or observed >= utc(approval["acquisition_deadline"]):
+        raise ValueError("The first worker-free database bind missed its five-minute evidence window")
+    if repaired:
+        pv = next(row for row in volumes if row["metadata"]["name"] == binding["pv"])
+        disk = next(row for row in disks if row["metadata"]["id"] == binding["provider_disk_id"])
+        pv_created = utc(pv["metadata"]["creationTimestamp"])
+        disk_created = utc(disk["metadata"]["created_at"])
+        # Kubernetes timestamps have whole-second precision; Nebius can record subsecond creation.
+        if not started <= disk_created <= observed or not disk_created.replace(microsecond=0) <= pv_created <= observed:
+            raise ValueError("The repaired database PV and disk must originate after the topology patch")
 
 
 def quota_headroom(n, tenant, name, needed, owned, *, unit=None):
@@ -239,13 +282,17 @@ def capture(args, approval, approval_hash):
                    priced_storage_bound_usd=str(funding(approval, now)), **quota)
     classes, claims, volumes, disks, attachments = (state[key] for key in
         ("storage_classes", "claims", "volumes", "disks", "attachments"))
+    repair = getattr(args, "db_repair", None)
     if phase == "preflight":
+        if repair is not None:
+            raise ValueError("A topology repair must reference an existing paid database submission")
         if classes or claims or volumes or disks or attachments:
             raise ValueError("Existing claims or storage require a separately reviewed compatibility plan")
         return receipt
     if (len(classes) != 1 or classes[0]["metadata"].get("deletionTimestamp")
             or classes[0]["metadata"].get("labels", {}).get(OWNER) != approval["reservation_id"]):
         raise ValueError("Expected exactly one active funded Immediate StorageClass")
+    require_class(classes[0])
     start = utc(approval["approved_at"])
     if any(not start <= utc(row["metadata"]["creationTimestamp"]) <= now for row in [*classes, *claims, *volumes]):
         raise ValueError("Kubernetes storage evidence was created outside this acquisition")
@@ -257,28 +304,44 @@ def capture(args, approval, approval_hash):
     db_created = utc(db_claims[0]["metadata"]["creationTimestamp"])
     db_objects = [*classes, *db_claims]
     db_keys = {("StorageClass", "", CLASS), ("PersistentVolumeClaim", *DB)}
+    repaired_at = repair_start(repair, receipt, approval, classes[0], db_claims[0])
+    window_start = repaired_at or db_created
     if phase == "db":
         submission = evidence(args.submission, "submit-db", receipt, approval)
         submitted_uids(submission, db_objects, db_keys)
-        if not utc(submission["observed_at"]) <= now <= db_created + timedelta(minutes=5):
-            raise ValueError("The first worker-free database bind missed its five-minute evidence window")
+        if not db_created <= utc(submission["observed_at"]) <= (repaired_at or now):
+            raise ValueError("The original paid database submission does not precede evidence capture or repair")
+        live = reconcile("db", approval, classes[0], claims, volumes, disks, attachments)
+        check_db_window(window_start, now, approval, volumes, disks, live["bindings"][0], repaired=repair is not None)
         receipt["db_objects"] = submission["created_objects"]
-        return receipt | reconcile("db", approval, classes[0], claims, volumes, disks, attachments)
-    first = evidence(args.db_receipt, "db", receipt, approval)
+        if repair is not None:
+            receipt["db_repair"] = repair
+        return receipt | live
+    first = evidence(args.db_receipt, "db", receipt, approval,
+                     trusted_digest=getattr(args, "db_receipt_sha256", None), require_digest=repair is not None)
+    if first.get("db_repair") != repair:
+        raise ValueError("The first database receipt differs from the verified topology repair")
     submitted_uids({"created_objects": first["db_objects"]}, db_objects, db_keys)
-    if not db_created <= utc(first["observed_at"]) <= db_created + timedelta(minutes=5):
-        raise ValueError("The database receipt did not complete within five minutes of claim creation")
     if phase == "db-live":
         live = reconcile("db", approval, classes[0], claims, volumes, disks, attachments)
         if live["bindings"] != first["bindings"]:
             raise ValueError("The first database binding changed before training submission")
+    else:
+        live = reconcile("all", approval, classes[0], claims, volumes, disks, attachments, first)
+    check_db_window(window_start, utc(first["observed_at"]), approval, volumes, disks, live["bindings"][0],
+                    repaired=repair is not None)
+    if repair is not None:
+        receipt["db_repair"] = repair
+    if phase == "db-live":
         return receipt
     training = [row for row in claims if row not in db_claims]
     submission = evidence(args.submission, "submit-training", receipt, approval)
     if utc(submission["observed_at"]) < utc(first["observed_at"]):
         raise ValueError("Training submission predates the database qualification")
     submitted_uids(submission, training, {("PersistentVolumeClaim", *key) for key in CLAIMS if key != DB})
-    return receipt | reconcile("all", approval, classes[0], claims, volumes, disks, attachments, first)
+    if submission.get("db_repair") != repair:
+        raise ValueError("Training submission differs from the verified topology repair")
+    return receipt | live
 
 
 def submission_seconds(approval, checked_at, now):

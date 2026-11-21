@@ -10,3 +10,8 @@ volumeBindingMode: Immediate
 parameters:
   type: NETWORK_SSD
   csi.storage.k8s.io/fstype: ext4
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: kubernetes.io/os
+        values:
+          - linux
