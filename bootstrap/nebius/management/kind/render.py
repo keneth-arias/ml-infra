@@ -19,7 +19,7 @@ def resources(run, image, stage, *, armed=False, rehearsal=False):
         raise ValueError("Unknown stage")
     spec = {
         "serviceAccountName": SA, "automountServiceAccountToken": False,
-        "restartPolicy": "Never", "terminationGracePeriodSeconds": 30,
+        "restartPolicy": "Never", "terminationGracePeriodSeconds": 150,
         "securityContext": {"runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
                             "runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}},
         "containers": [{

@@ -12,6 +12,8 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
+from threading import Event
 from tempfile import TemporaryDirectory
 from urllib.request import Request, urlopen
 
@@ -179,6 +181,8 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
                      observed_at=stamp(now), next_tick=stamp(next_tick), scope_sha256=scope_digest(scope),
                      cleanup_source_sha256=cleanup_digest(ROOT, units), cloud_state_access=True,
                      inventory_reconciled=True, locked_release_plan_checked=True)
+        if (Path(os.environ["CLEANUP_CONTROL"]) / "stopping").exists():
+            raise ValueError("Backup stopping before attestation")
         import boto3
         store = boto3.client("s3", region_name="eu-south1", endpoint_url=ENDPOINT)
         response = store.put_object(Bucket=scope["state_bucket"],
@@ -189,6 +193,56 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
         print("Published fw13 CronJob proof", response["VersionId"])
 
 
+def stop_worker(child, control, *, grace=75, terraform_binary="/usr/local/bin/terraform"):
+    """Fence new Terraform commands and interrupt the active CLI once so it can unlock."""
+    (control / "stopping").touch(mode=0o600)
+    until = time.monotonic() + grace
+    signaled = False
+    while child.poll() is None and time.monotonic() < until:
+        if not signaled:
+            try:
+                pid = int((control / "terraform.pid").read_text())
+                fd = os.pidfd_open(pid)
+                try:
+                    if os.getpgid(pid) == child.pid and os.path.samefile(f"/proc/{pid}/exe", terraform_binary):
+                        signal.pidfd_send_signal(fd, signal.SIGINT)
+                        signaled = True
+                finally:
+                    os.close(fd)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        time.sleep(0.1)
+    if child.poll() is None:
+        # A stuck provider may still hold the lock. Do not try to unlock it here.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+
+
+def supervise(argv, *, timeout=600):
+    stopping = Event()
+    previous = {sig: signal.signal(sig, lambda *_: stopping.set())
+                for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        with TemporaryDirectory() as folder:
+            control = Path(folder)
+            child = subprocess.Popen(argv, start_new_session=True, env={
+                **os.environ, "CLEANUP_SUPERVISED": "1", "CLEANUP_CONTROL": str(control)})
+            until = time.monotonic() + timeout
+            while child.poll() is None:
+                remaining = until - time.monotonic()
+                if remaining <= 0 or stopping.wait(min(0.25, remaining)):
+                    stop_worker(child, control)
+                    raise RuntimeError("Backup interrupted; check state lock and inventory")
+            if child.returncode:
+                raise RuntimeError("Backup process failed")
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run")
@@ -197,7 +251,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     os.umask(0o077)
     # Leave time inside the Job deadline to report a hung Terraform/provider operation.
-    # The subprocess group also covers the provider subprocesses Terraform starts.
+    # Kubernetes terminates PID 1, which forwards a bounded graceful stop to the active CLI.
     if os.environ.get("CLEANUP_SUPERVISED") == "1":
         try:
             run_tick(args.run, args.stage, args.rehearsal)
@@ -206,17 +260,7 @@ if __name__ == "__main__":
             sys.exit(1)
         sys.exit(0)
     try:
-        child = subprocess.Popen([sys.executable, __file__, *sys.argv[1:]], start_new_session=True,
-                                 env={**os.environ, "CLEANUP_SUPERVISED": "1"})
-        try:
-            code = child.wait(timeout=640)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
-            raise
-        if code:
-            raise RuntimeError("Backup process failed")
-
+        supervise([sys.executable, __file__, *sys.argv[1:]])
     except Exception as exc:
         print("fw13 cleanup failed:", type(exc).__name__, file=sys.stderr, flush=True)
         if not args.rehearsal:

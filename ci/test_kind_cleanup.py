@@ -84,3 +84,56 @@ class KindBackup(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tick.run_tick("r", "pilot", False, scope_dir=path)
                 release.assert_not_called()
+
+    def test_shutdown_unlocks_and_fences_future_terraform_commands(self):
+        import subprocess
+        import time
+        with TemporaryDirectory() as folder:
+            control = Path(folder)
+            lock = control / "state.lock"
+            # A second process can acquire the simulated S3 lock only after the
+            # first CLI completes its interrupt handler and removes the object.
+            fake_cli = """
+import os, signal, sys, time
+from pathlib import Path
+control = Path(sys.argv[1])
+def interrupt(*_):
+    (control/'state.lock').unlink()
+    sys.exit(130)
+signal.signal(signal.SIGINT, interrupt)
+(control/'state.lock').touch(exist_ok=False)
+(control/'terraform.pid').write_text(str(os.getpid()))
+time.sleep(30)
+"""
+            child = subprocess.Popen([sys.executable, "-c", fake_cli, folder], start_new_session=True)
+            try:
+                until = time.monotonic() + 5
+                while not (control/"terraform.pid").exists() and time.monotonic() < until:
+                    time.sleep(0.01)
+                self.assertTrue(lock.exists())
+                tick.stop_worker(child, control, grace=3, terraform_binary=sys.executable)
+                self.assertEqual(child.wait(timeout=1), 130)
+                lock.touch(exist_ok=False)
+                result = subprocess.run([str(KIND/"bin/terraform"), "apply"],
+                                        env={**tick.os.environ, "CLEANUP_CONTROL": folder})
+                self.assertEqual(result.returncode, 130)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+    def test_supervisor_handles_deadline_and_pod_termination(self):
+        import signal
+        from types import SimpleNamespace
+        for expire in (True, False):
+            # Deliver the kubelet signal to our PID while supervise owns its handler.
+            def start(*args, **kwargs):
+                if not expire:
+                    tick.os.kill(tick.os.getpid(), signal.SIGTERM)
+                return SimpleNamespace(poll=lambda: None)
+            with self.subTest(deadline=expire), patch.object(tick.subprocess, "Popen", side_effect=start), \
+                 patch.object(tick, "stop_worker") as stop, self.assertRaisesRegex(RuntimeError, "interrupted"):
+                try:
+                    tick.supervise(["worker"], timeout=0 if expire else 10)
+                finally:
+                    stop.assert_called_once()
