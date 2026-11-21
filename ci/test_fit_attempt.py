@@ -311,6 +311,7 @@ class FitAttemptTests(unittest.TestCase):
                 "approved",
                 "preflight-failed",
                 "budget-stop",
+                "wrong-bucket-owner",
                 "ambiguous",
                 "dirty-retry",
                 "fresh-retry",
@@ -354,6 +355,20 @@ case "$1" in
 esac
 """,
                     )
+                    script(
+                        "nebius",
+                        f"""#!{sys.executable}
+import json
+import os
+import sys
+name = sys.argv[sys.argv.index("--name") + 1]
+project = sys.argv[sys.argv.index("--parent-id") + 1]
+assert project == {{"fixture": "p", "controls": "management-project"}}[name]
+if name == "controls" and os.environ["OUTCOME"] == "wrong-bucket-owner":
+    project = "another-project"
+print(json.dumps({{"metadata": {{"name": name, "parent_id": project}}}}))
+""",
+                    )
                     (root / "boto3.py").write_text("""
 import os
 from io import BytesIO
@@ -367,6 +382,7 @@ class Storage:
         self.path.write_bytes(Body)
         return dict(VersionId="null" if os.environ["OUTCOME"] == "ambiguous" else "v2")
 def client(*a, **kw):
+    (Path(os.environ["FIXTURE"]) / "s3-access").touch()
     return Storage()
 """)
                     sc, funds, timing = fixture(request, datetime.now(timezone.utc))
@@ -428,3 +444,7 @@ def client(*a, **kw):
                         self.assertNotEqual(result.returncode, 0)
                         self.assertFalse(submitted.exists())
                         self.assertEqual(bool(hold), outcome == "ambiguous")
+                        if outcome == "wrong-bucket-owner":
+                            self.assertIn(b"Unexpected owning project", result.stderr)
+                            self.assertFalse((root / "s3-access").exists())
+                            self.assertEqual((root / "ledger.json").read_bytes(), raw)

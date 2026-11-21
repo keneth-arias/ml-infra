@@ -15,7 +15,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from control_storage import control_bucket
+from control_storage import control_bucket, verify_bucket_projects
 from gpu_reservation import reserve_remote
 from gpu_window import BudgetStop, bounds, check_projection, check_stage, fit_projection
 from worker_plan import timestamp
@@ -56,21 +56,6 @@ def inspect_archive(saved, scope):
     if not scope["state_lineage"] or scope["state_lineage"] != state["lineage"]:
         raise ValueError("Unexpected Terraform state lineage")
     return state["serial"]
-
-
-def verify_bucket_projects(scope):
-    for field, owner in (
-        ("state_bucket", "project_id"), ("control_bucket", "control_project_id")
-    ):
-        name, project = scope[field], scope[owner]
-        command = [
-            "nebius", "-p", "ml-prod", "--no-browser", "--no-check-update", "storage",
-            "bucket", "get-by-name", "--name", name, "--parent-id", project, "--format", "json",
-        ]
-        env = {**os.environ, "AI_AGENT": os.environ.get("AI_AGENT") or "worker-allocation"}
-        metadata = json.loads(subprocess.check_output(command, env=env, timeout=30))["metadata"]
-        if metadata.get("name") != name or metadata.get("parent_id") != project:
-            raise ValueError(f"Unexpected owning project or name for {field}")
 
 
 def checked_plan(args):

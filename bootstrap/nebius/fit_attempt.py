@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 
-from control_storage import STORAGE_FIELDS
+from control_storage import STORAGE_FIELDS, verify_bucket_projects
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
 from gpu_window import EPOCH, bounds, check_projection, fit_projection, whole
 from worker_plan import amount, timestamp
@@ -253,6 +253,7 @@ def main():
         print(json.dumps(request, sort_keys=True))
         return
     scope = json.loads(Path(os.environ["NEBIUS_FIT_SCOPE"]).read_bytes())
+    verify_bucket_projects(scope)
     timing = Path(os.environ["NEBIUS_FIT_MEASUREMENTS"]).read_bytes()
     print(
         json.dumps(
