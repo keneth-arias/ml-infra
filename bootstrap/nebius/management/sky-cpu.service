@@ -1,11 +1,13 @@
 [Unit]
 Description=Attended SkyPilot CPU pilot on the Nebius management host
+Wants=network-online.target
 After=network-online.target sky-cpu-firewall.service
 BindsTo=sky-cpu-firewall.service
 [Service]
 User=sky-cpu
 Group=sky-cpu
 UMask=0077
+StateDirectoryMode=0700
 StateDirectory=sky-cpu
 Environment=HOME=/var/lib/sky-cpu
 Environment=PATH=/opt/sky-cpu/bin:/usr/local/bin:/usr/bin:/bin

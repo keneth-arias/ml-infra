@@ -1,9 +1,11 @@
 [Unit]
 Description=Protect the production SkyPilot loopback listener
 After=nftables.service
+PartOf=nftables.service
 Before=sky-cpu.service
 
 [Service]
 Type=oneshot
+ExecStartPre=/usr/bin/grep -Fxq 'include "/etc/sky-cpu/sky-cpu.nft"' /etc/nftables.conf
 ExecStart=/usr/sbin/nft -f /etc/sky-cpu/sky-cpu.nft
 RemainAfterExit=yes

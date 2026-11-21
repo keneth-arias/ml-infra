@@ -4,8 +4,8 @@
 	grace_period 10s
 }
 
-{$SKY_CPU_HOSTNAME} {
-	bind {$SKY_CPU_BIND_IP}
+https://sky-cpu.localhost:46582 {
+	bind 127.0.0.1
 	tls {$SKY_CPU_CERT} {$SKY_CPU_KEY}
 	basic_auth {
 		import /etc/sky-cpu/operators.caddy

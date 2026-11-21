@@ -1,11 +1,14 @@
 [Unit]
 Description=Authenticated TLS endpoint for the production SkyPilot CPU pilot
+Wants=network-online.target
 After=network-online.target sky-cpu.service
 BindsTo=sky-cpu.service
+PartOf=sky-cpu.service
 
 [Service]
 User=sky-cpu-proxy
 Group=sky-cpu-proxy
+StateDirectoryMode=0700
 StateDirectory=sky-cpu-proxy
 Environment=HOME=/var/lib/sky-cpu-proxy
 EnvironmentFile=/etc/sky-cpu/proxy.env

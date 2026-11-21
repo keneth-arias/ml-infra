@@ -3,20 +3,44 @@
 
 ## Install the attended SkyPilot backend on bm
 
-The production client connects through an authenticated HTTPS proxy. SkyPilot 0.14.3 listens on `127.0.0.1:46581` under the dedicated `sky-cpu` account. Caddy runs as `sky-cpu-proxy`. The two identities can reach the raw port through the host's UID-based firewall. Named proxy users share the backend's scoped `sky-cpu:sky-backend` permissions.
+The production client connects through an authenticated HTTPS proxy. SkyPilot 0.14.3 listens on `127.0.0.1:46581` under the dedicated `sky-cpu` account. Caddy 2.11.4 runs as `sky-cpu-proxy` and serves `https://sky-cpu.localhost:46582` on IPv4 loopback. The two identities can reach the raw port through the host's UID-based firewall. Named proxy users share the backend's scoped `sky-cpu:sky-backend` permissions.
 
 Use a reviewed revision of this repository for the installation. Keep the two service accounts, private `/var/lib/sky-cpu` state, the host's TLS key, the operator password hashes and the session kubeconfig on the management host. Create the accounts before checking the firewall table because nftables resolves their names. Install these components as root-owned files, readable by their respective services.
 
 | Destination | Reviewed inputs |
 | --- | --- |
 | `/opt/ml-infra` | Preserve the repository paths for `workloads/sky/{private_api,production_target}.py`, `bootstrap/nebius/management/{check-backend.py,config.yaml}`, and `management/rootless/{install-template.py,build-wheels.txt}` under the same bootstrap directory. |
-| `/etc/sky-cpu` | [Server configuration](config.yaml), [Caddyfile](Caddyfile), [nftables table](sky-cpu.nft). Set `SKY_CPU_HOSTNAME`, `SKY_CPU_BIND_IP`, `SKY_CPU_CERT` and `SKY_CPU_KEY` in `proxy.env`. Limit access to the TLS key and `operators.caddy` (Caddy basic-auth username and password hash entries) to the proxy. |
+| `/etc/sky-cpu` | [Server configuration](config.yaml), [Caddyfile](Caddyfile), [nftables table](sky-cpu.nft). Set `SKY_CPU_CERT` and `SKY_CPU_KEY` in `proxy.env`. Limit access to the TLS key and `operators.caddy` (Caddy basic-auth username and password hash entries) to the proxy. |
 | `/etc/systemd/system` | [Backend service](sky-cpu.service), [TLS proxy service](sky-cpu-proxy.service) and [firewall service](sky-cpu-firewall.service). |
 | `/opt/sky-cpu` | Dedicated CPython 3.11 environment with the [locked rootless SkyPilot package and adapter](rootless/README.md). Install Caddy at `/opt/sky-cpu-proxy/bin/caddy` and provide `kubectl`, OpenSSH, rsync, socat and nc on the unit's PATH. |
 
 Download the three build wheels from the reviewed lock with `python3.11 -m pip download --only-binary=:all: --no-deps --require-hashes -r bootstrap/nebius/management/rootless/build-wheels.txt -d "$wheel_stage"` and install them in the dedicated `/opt/sky-cpu-build-wheels` directory. The backend checks the installed adapter, package version, wheel names and hashes, namespace, only allowed context, pinned managed API CA, direct endpoint and authenticated ServiceAccount before binding its port.
 
-In `/etc/sky-cpu/target.env`, set the independent cluster ID and CA digest and the approved endpoint mode as described below. Run `systemd-analyze verify` on the three installed units and `systemctl daemon-reload`. For an attended window issue a bounded backend session, deliver its kubeconfig as mode 0600 owned by `sky-cpu`, and arm the stop timer before starting `sky-cpu-proxy.service`. Starting the proxy also starts the protected backend and firewall. Leave the two application units disabled at boot. Verify an anonymous TLS request to the proxy receives 401 and the authenticated client reports the expected healthy API and versions. Submit only after the independent admission, funding and worker checks. Stop the proxy and backend at closure and revoke the session. On bm a backend stop has taken 90 seconds; allow for that time when scheduling the session cutoff.
+On bm, append the following exact directive at the **end** of the host's existing `/etc/nftables.conf` after its ruleset reset. Use the host's configuration owner to preserve this include during upgrades. The include reinstalls the pilot table in the same atomic transaction as a host ruleset reload. Validate with `sudo nft -c -f /etc/nftables.conf`. The pilot firewall unit checks for the include and loads only its dedicated table. It follows nftables service stops, and the backend follows the pilot firewall. bm uses UFW and keeps the standalone nftables service disabled. Keep that host setting and rehearse full ruleset reloads in a disposable network namespace.
+
+```nft
+include "/etc/sky-cpu/sky-cpu.nft"
+```
+
+In `/etc/sky-cpu/target.env`, set the independent cluster ID, CA digest and approved endpoint mode. Run `systemd-analyze verify` on the installed units and `systemctl daemon-reload`. Leave the application units disabled at boot. Use the bounded marker-backed credential issued below; the API identity check verifies the account. The issuer, session expiry and cutoff timer bound the attended session. Deliver its backend kubeconfig with mode 0600 owned by `sky-cpu`. After issuance and before starting services, arm a stop using the earliest session expiry. Use a three-minute margin for bm's observed 90-second backend stop. The command expects the protected issuance receipts from this session.
+
+```bash
+set -euo pipefail
+earliest=$(for record in "$sessions/backend-a/issued.json" "$sessions/native/issued.json"; do
+  date -u -d "$(jq -er '.expires_at' "$record")" +%s || exit 1
+done | sort -n | head -1)
+stop_epoch=$((earliest - 180))
+(( stop_epoch > $(date -u +%s) ))
+at=$(date -u -d "@$stop_epoch" '+%Y-%m-%d %H:%M:%S UTC')
+unit="sky-cpu-close-$(date -u +%Y%m%d%H%M%S)"
+sudo systemd-run --unit="$unit" --on-calendar="$at" --timer-property=AccuracySec=1s \
+  /usr/bin/systemctl stop sky-cpu-proxy.service sky-cpu.service
+systemctl is-active "$unit.timer"
+systemctl show "$unit.timer" -p NextElapseUSecRealtime
+sudo systemctl start sky-cpu-proxy.service
+```
+
+Starting the proxy pulls in the protected backend and firewall. After renewing during an idle handoff, restart the backend, start the proxy explicitly, and verify the authenticated client reports the expected healthy endpoint and versions. Keep the earlier stop armed until its replacement has a verified firing time within all relevant credential expiries. Check an anonymous TLS request receives 401. Submit only after independent admission, funding and worker checks. At close, stop both application services, revoke each issued session and remove delivered kubeconfig copies as described below.
 
 ## Rotate credentials for an attended CPU session
 
