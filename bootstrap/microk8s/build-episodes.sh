@@ -15,6 +15,16 @@ stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 mkdir "$stage/forecast" "$stage/reader"
 git -C "$1" archive "$forecast_sha" src/opentslm scripts/train_qwen_forecast.py | tar --same-permissions -x -C "$stage/forecast"
+if [[ "$backbone" == flamingo ]]; then
+  reference_checkout=${FLAMINGO_REFERENCE_CHECKOUT:?Set FLAMINGO_REFERENCE_CHECKOUT to the AWS samples git checkout}
+  reference_commit=7967032bfb7dc7925fbe68cd3c3c0daffd13e669
+  reference_path=examples/opentslm-finetune-arfbench/scripts/utils.py
+  mkdir "$stage/forecast/reference"
+  git -C "$reference_checkout" show "$reference_commit:$reference_path" > "$stage/forecast/reference/utils.py"
+  git -C "$reference_checkout" show "$reference_commit:LICENSE" > "$stage/forecast/reference/LICENSE"
+  git -C "$1" show "$forecast_sha:scripts/check_per_series_reference.py" > "$stage/forecast/reference/check_per_series_reference.py"
+  (cd "$stage/forecast/reference" && echo 'c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2  utils.py' | sha256sum --check --strict)
+fi
 git -C "$2" archive "$reader_sha:tools/timenet-smoke" | tar --same-permissions -x -C "$stage/reader"
 infra_sha=$(git -C "$infra" rev-parse HEAD)
 git -C "$infra" archive "$infra_sha:runtime" episode_job.py episode_stop.py stage_episode_inputs.py versioned_episode_inputs.py Dockerfile.episodes Dockerfile.preflight | tar --same-permissions -x -C "$stage"
