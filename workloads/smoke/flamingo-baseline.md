@@ -9,7 +9,7 @@ python3 workloads/smoke/render-flamingo-baseline.py \
   --gpu-limit-bytes "$gpu_limit_bytes" > baseline-review.json
 ```
 
-The review record contains the exact proposed Job JSON and its SHA-256. One Job runs two sequential, fresh Gemma processes and the OpenTSLM freeze comparison. The Job publishes the two original receipt files and freeze.json together under `flamingo-baselines/<run>/baseline` on the training claim. Each process has a distinct receipt identity. Freeze reports their ordered digests and the measured repeat tolerance. Preserve the report, both receipts, Job and Pod UIDs, observed node, provider and image ID in the attended closeout.
+The review record contains the exact proposed Job JSON and its SHA-256. The bounded Job first runs the packaged AWS parity comparator against the same pinned base. Budget the sequential reference and candidate loads, both language reference processes and the freeze comparison in its deadline. The comparator verifies prompt IDs, observation masks, latents, logits and generated IDs and publishes a distinct reference-parity.json receipt. Its SHA-256 is in freeze.json alongside the two independent language receipt hashes. The Job publishes the two original receipt files and freeze.json together under `flamingo-baselines/<run>/baseline` on the training claim. Each process has a distinct receipt identity. Freeze reports their ordered digests and the measured repeat tolerance. Preserve the report, both receipts, Job and Pod UIDs, observed node, provider and image ID in the attended closeout.
 
 ## Pending release requirements
 

@@ -79,7 +79,19 @@ class BaselineTest(unittest.TestCase):
         pins = [hashlib.sha256(b).hexdigest() for b in raw]
         paths = []
 
-        def base(argv, *, cwd, check):
+        def base(argv, *, cwd, check, env=None):
+            if "--reference" in argv:
+                self.assertEqual(env["PYTHONPATH"], cwd)
+                self.assertFalse(paths)
+                self.assertEqual(argv[1:-1], ["/opt/forecast/reference/check_per_series_reference.py",
+                    "--reference", "/opt/forecast/reference/utils.py", "--weights", "/base/weights", "--receipt"])
+                Path(argv[-1]).write_text(json.dumps({
+                    "protocol": "per-series-reference-parity-v1",
+                    "reference_sha256": "c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2",
+                    "weights_manifest_sha256": "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f",
+                    "cases": [{}, {}],
+                }))
+                return
             self.assertTrue(check)
             self.assertEqual(cwd, "/opt/forecast/src")
             self.assertEqual(argv[1:-1], ["-m", "opentslm.flamingo_qualification", "base", "--weights",
@@ -105,6 +117,8 @@ class BaselineTest(unittest.TestCase):
             paths.clear()
             comparison.side_effect = freeze
             collect("sha256:" + PIN, root)
+            self.assertEqual(json.loads((source / "freeze.json").read_bytes())["reference_parity_sha256"],
+                             hashlib.sha256((source / "reference-parity.json").read_bytes()).hexdigest())
             with self.assertRaises(FileExistsError):
                 collect("sha256:" + PIN, root)
             with self.assertRaisesRegex(ValueError, "approval"):

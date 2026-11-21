@@ -18,6 +18,18 @@ def collect(image_digest, output):
     cwd = "/opt/forecast/src"
     with TemporaryDirectory(dir=output) as staging:
         stage = Path(staging)
+        parity = stage / "reference-parity.json"
+        subprocess.run(
+            [sys.executable, "/opt/forecast/reference/check_per_series_reference.py",
+             "--reference", "/opt/forecast/reference/utils.py", "--weights", "/base/weights", "--receipt", str(parity)],
+            cwd=cwd, check=True, env={**os.environ, "PYTHONPATH": cwd},
+        )
+        trace = json.loads(parity.read_bytes())
+        if (trace["protocol"] != "per-series-reference-parity-v1"
+                or trace["reference_sha256"] != "c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2"
+                or trace["weights_manifest_sha256"] != "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f"
+                or len(trace["cases"]) != 2):
+            raise ValueError("The parity receipt differs from the pinned reference and model")
         paths = [stage / "base-1.json", stage / "base-2.json"]
         for path in paths:
             subprocess.run([*cli, "base", "--weights", "/base/weights", "--image-digest", image_digest,
@@ -29,7 +41,8 @@ def collect(image_digest, output):
             raise ValueError("Freeze did not identify these two fresh-process receipts")
         for path, pin in zip(paths, pins):
             path.rename(stage / (pin + ".json"))
-        (stage / "freeze.json").write_bytes(raw)
+        report["reference_parity_sha256"] = hashlib.sha256(parity.read_bytes()).hexdigest()
+        (stage / "freeze.json").write_text(json.dumps(report, sort_keys=True) + "\n")
         os.rename(stage, final)
     print(json.dumps(report, sort_keys=True), flush=True)
 
