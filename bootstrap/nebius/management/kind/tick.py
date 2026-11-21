@@ -167,6 +167,7 @@ def verify_allocated_inventory(profile, scope, baseline, groups):
     if new_groups != {new_group}:
         raise ValueError("Live group differs from the locked release plan")
 
+    approved_data_disks = set(baseline["disk_ids"])
     worker_ids = [(new_group, *new_vms, *new_disks)]
     if stage == "gpu":
         worker_ids.append((scope["support_group_id"], scope["support_instance_id"],
@@ -201,14 +202,19 @@ def verify_allocated_inventory(profile, scope, baseline, groups):
         labels = {"mk8s-cluster-id": cluster, "mk8s-node-group-id": group_id}
         attachments = vm_status.get("disk_attachments", [])
         boot_attachments = [row for row in attachments if row.get("name") == boot["name"]]
-        data_disk_ids = {row.get("id") for row in attachments if row.get("name") != boot["name"]}
+        data_attachments = [row for row in attachments if row.get("name") != boot["name"]]
         if (
             (resources["platform"], resources["preset"]) != expected
             or boot["name"] != disk["metadata"]["name"]
             or len(boot_attachments) != 1
             or boot_attachments[0].get("id") != disk_id
             or boot_attachments[0].get("is_managed") is not True
-            or not data_disk_ids <= set(baseline["disk_ids"])
+            or any(
+                row.get("id") not in approved_data_disks
+                or row.get("is_managed", False) is not False
+                or disk_rows[row["id"]]["status"].get("managed_by")
+                for row in data_attachments
+            )
             or any(row.get("labels", {}).get(k) != v for row in
                    (vm["metadata"], boot, disk["metadata"]) for k, v in labels.items())
         ):

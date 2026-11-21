@@ -140,11 +140,16 @@ class KindBackup(unittest.TestCase):
                     tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
 
             retained = {"name": "postgres-csi", "id": "approved-csi", "is_managed": False}
-            with patch.dict(inventory["disk"], **{"approved-csi": {"metadata": {"name": "postgres-csi"}}}), \
+            retained_disk = {"metadata": {"name": "postgres-csi"}, "status": {"state": "READY"}}
+            with patch.dict(inventory["disk"], **{"approved-csi": retained_disk}), \
                  patch.dict(baseline, disk_ids=["approved-csi"]), \
                  patch.dict(vm_status, disk_attachments=[*vm_status["disk_attachments"], retained]):
                 tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
                 with patch.dict(retained, id="unapproved-csi"), self.assertRaises(ValueError):
+                    tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
+                with patch.dict(retained, is_managed=True), self.assertRaises(ValueError):
+                    tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
+                with patch.dict(retained_disk["status"], managed_by="vm"), self.assertRaises(ValueError):
                     tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
 
             gpu_group = deepcopy(inventory["node-group"]["cpu"])
