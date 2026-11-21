@@ -38,6 +38,11 @@ spec:
   variables:
     - name: pod
       expression: object.spec.template.spec
+    - name: usesGPU
+      expression: >-
+        variables.pod.containers.exists(c, has(c.resources) &&
+          ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
+           (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
   validations:
     # The signed trainer and preflight release will replace this hold.
     - expression: "false"
@@ -66,6 +71,23 @@ spec:
         (has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name == 'episode-tracking'
         && e.valueFrom.secretKeyRef.key == 'token'))))
       message: Permit only the training tracking URI and token as configuration references.
+    - expression: >-
+        (!has(variables.pod.nodeName) || variables.pod.nodeName == '') &&
+        (!has(variables.pod.schedulerName) || variables.pod.schedulerName == 'default-scheduler') &&
+        has(variables.pod.nodeSelector) && 'airaware.training/pool' in variables.pod.nodeSelector &&
+        variables.pod.nodeSelector['airaware.training/pool'] == (variables.usesGPU ? 'training-gpu' : 'training-cpu')
+      message: Require the default scheduler and the matching CPU or GPU training pool.
+    - expression: >-
+        variables.usesGPU ||
+        (has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 600 &&
+        (!has(variables.pod.tolerations) || size(variables.pod.tolerations) == 0))
+      message: CPU preflight requires a deadline of at most 600 seconds and no tolerations.
+    - expression: >-
+        !variables.usesGPU || variables.pod.containers.all(c,
+        has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests && c.resources.requests['nvidia.com/gpu'] == '1' &&
+        has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits && c.resources.limits['nvidia.com/gpu'] == '1' &&
+        (!has(c.command) || !('--preflight' in c.command)) && (!has(c.args) || !('--preflight' in c.args)))
+      message: GPU jobs must request and limit exactly one GPU and run training or inference.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

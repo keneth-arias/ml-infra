@@ -253,7 +253,9 @@ def main():
                 volume["persistentVolumeClaim"]["readOnly"] = True
         if a.format != "sky":
             spec["serviceAccountName"] = "episode-worker"
-        if a.format != "preflight":
+        if a.format == "preflight":
+            spec["nodeSelector"] = {"airaware.training/pool": "training-cpu"}
+        else:
             spec["nodeSelector"] = {"airaware.training/pool": "training-gpu"}
             spec["tolerations"] = [
                 {"key": "nvidia.com/gpu", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
@@ -287,6 +289,10 @@ def main():
             c["resources"]["limits"]["nvidia.com/gpu"] = 1
             c["resources"]["requests"]["nvidia.com/gpu"] = 1
         spec.update(restartPolicy="Never", automountServiceAccountToken=False)
+        deadline = a.deadline_seconds
+        if production and a.format == "preflight":
+            # The launcher waits ten minutes before abandoning the preflight.
+            deadline = min(deadline, 600)
         template = {"metadata": {"labels": {"app": "airaware-episodes", **labels}}, "spec": spec}
         result = {
             "apiVersion": "batch/v1",
@@ -299,7 +305,7 @@ def main():
             },
             "spec": {
                 "backoffLimit": 0,
-                "activeDeadlineSeconds": a.deadline_seconds,
+                "activeDeadlineSeconds": deadline,
                 "template": template,
             },
         }
