@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+[[ $(id -u) == 1000 && ${SKYPILOT_POD_NODE_TYPE:-} == head ]]
+umask 077
+mkdir -p "$HOME/.ssh" "$HOME/.sky"
+cat > "$HOME/.ssh/authorized_keys"
+ssh-keygen -l -f "$HOME/.ssh/authorized_keys" >/dev/null
+if [[ ! -f "$HOME/.ssh/host_ed25519" ]]; then
+  ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/host_ed25519"
+fi
+/usr/sbin/sshd -t -f /opt/sky-cpu/sshd_config
+command -v python3 > "$HOME/.sky/python_path"
+command -v ray > "$HOME/.sky/ray_path"

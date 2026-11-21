@@ -1,0 +1,8 @@
+{
+  "repository": "ghcr.io/keneth-arias/ml-infra-sky-cpu",
+  "role": "rootless-cpu",
+  "build_commit": "a56cf74b41bccb94c21df282ad959edf2ebc2736",
+  "index": "sha256:cb68d75ec0c035420cadc896751df00d7f1639b45de2afbf9959c47c341d5381",
+  "linux_amd64": "sha256:5de80e72b8d7fb7553ae3eebeba14de557da466fcb9fed8307c39603cdd1d5dd",
+  "config": "sha256:1b4260bd90e5c7dc441d01dd9c9fa7f329170d5626b9b17425bd627dabc0dce8"
+}
