@@ -45,3 +45,9 @@ class CleanupAlertTest(TestCase):
                     notify.send(url, "fixture-token", b"record")
                 conn.request.assert_called_once()
                 conn.close.assert_called_once()
+
+    def test_missing_private_ca_refuses_before_sending_bearer(self):
+        with patch.object(notify, "HTTPSConnection") as conn, self.assertRaises(FileNotFoundError):
+            notify.send("https://192.168.50.155:8443/insert/opentelemetry/v1/logs",
+                        "fixture", b"data", cafile="/missing/cleanup-fixture-ca.crt")
+        conn.assert_not_called()
