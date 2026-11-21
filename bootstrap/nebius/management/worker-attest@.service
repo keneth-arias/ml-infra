@@ -1,0 +1,23 @@
+[Unit]
+Description=Publish timer and credential evidence for Nebius allocation %i
+After=network-online.target
+[Service]
+Type=oneshot
+User=nebius-cleanup
+UMask=0077
+StateDirectory=nebius-cleanup
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/nebius-cleanup
+Environment=PATH=/opt/nebius-cleanup/bin:/usr/bin:/bin
+Environment=ML_INFRA_ENV_FILE=/var/lib/nebius-cleanup/state.env
+Environment=NEBIUS_PRIVATE_KEY_FILE=/var/lib/nebius-cleanup/auth.pem
+Environment=TF_DATA_DIR=/var/lib/nebius-cleanup/terraform
+Environment=CHECKPOINT_DISABLE=1
+EnvironmentFile=/etc/nebius-cleanup/%i.env
+WorkingDirectory=/opt/ml-infra/bootstrap/nebius
+ExecStart=/opt/ml-infra/bootstrap/nebius/with-credentials /opt/ml-infra/bootstrap/nebius/management/publish-timer-attestation %i
+TimeoutStartSec=3min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

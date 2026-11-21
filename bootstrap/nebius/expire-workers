@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""At cutoff, release only the named run's expired CPU/GPU groups."""
+
+import argparse
+import json
+import os
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+
+GROUPS = {
+    'nebius_mk8s_v1_node_group.training["cpu"]',
+    'nebius_mk8s_v1_node_group.training["gpu"]',
+}
+
+
+def release_candidates(plan, cluster_id, run_id, cutoff_label):
+    if (
+        plan.get("format_version", "").split(".")[0] != "1"
+        or plan.get("complete") is not True
+        or plan.get("errored") is not False
+        or plan.get("deferred_changes")
+        or plan.get("action_invocations")
+    ):
+        raise ValueError("Incomplete or unsupported release plan.")
+    releases = []
+    for resource in plan.get("resource_changes", []):
+        address = resource["address"]
+        change = resource["change"]
+        actions = change["actions"]
+        before = change.get("before") or {}
+        labels = before.get("labels") or {}
+        owned = (
+            address in GROUPS
+            and before.get("parent_id") == cluster_id
+            and labels.get("airaware-run") == run_id
+            and labels.get("airaware-cutoff") == cutoff_label
+        )
+        if actions == ["no-op"] and not owned:
+            continue
+        if resource["mode"] == "data" and actions == ["read"]:
+            continue
+        if actions != ["delete"] or not owned:
+            raise ValueError(f"Unexpected change at cutoff: {address} {actions}")
+        releases.append(address)
+    return releases
+
+
+def verify_inventory(profile, project_id, cluster_id, baseline):
+    """An orphan with missing Terraform state still appears in project inventory."""
+    if (baseline["project_id"], baseline["cluster_id"]) != (project_id, cluster_id):
+        raise ValueError("Inventory baseline belongs to another target")
+    for key, service, resource, parent in (
+        ("instance_ids", "compute", "instance", project_id),
+        ("disk_ids", "compute", "disk", project_id),
+        ("group_ids", "mk8s", "node-group", cluster_id),
+    ):
+        proc = subprocess.check_output(
+            ["nebius", "-p", profile, service, resource, "list", "--all", "--parent-id", parent, "--format", "json"],
+            env={**os.environ, "AI_AGENT": os.environ.get("AI_AGENT") or "worker-cleanup"}, timeout=45
+        )
+        response = json.loads(proc)
+        if not isinstance(response, dict) or response.keys() - {"items", "next_page_token"}:
+            raise ValueError("Unrecognized " + key + " inventory response")
+        if not isinstance(baseline[key], list) or not all(isinstance(x, str) and x for x in baseline[key]):
+            raise ValueError("Invalid " + key + " baseline")
+        if response.get("next_page_token"):
+            raise ValueError("Incomplete " + key + " inventory")
+        ids = {item["metadata"]["id"] for item in response.get("items", [])}
+        unexpected = ids - set(baseline[key])
+        if unexpected:
+            raise ValueError(f"Inventory has {len(unexpected)} unaccounted {key}; keep cleanup armed")
+    print("Provider inventory reconciled against the off-host baseline.", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cluster-id", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--cutoff", required=True, help="The worker_run cutoff in UTC (Z).")
+    parser.add_argument("--apply", action="store_true", help="Apply the checked release plan.")
+    parser.add_argument("--release-now", action="store_true", help="Check an early release after removing the owned pool from desired configuration.")
+    parser.add_argument("--inventory", type=Path, help="Protected pre-run baseline of shared resources")
+    parser.add_argument("--project-id")
+    parser.add_argument("--profile", default="ml-prod")
+    args = parser.parse_args()
+    if args.inventory and not args.project_id:
+        parser.error("Inventory verification requires the project ID")
+    if not args.cutoff.endswith("Z"):
+        parser.error("Expected a UTC timestamp ending in Z.")
+    try:
+        cutoff = datetime.fromisoformat(args.cutoff.replace("Z", "+00:00"))
+    except ValueError:
+        parser.error("Invalid cutoff timestamp.")
+    if not args.release_now and datetime.now(timezone.utc) < cutoff:
+        return
+
+    with TemporaryDirectory() as directory:
+        saved = Path(directory) / "release.tfplan"
+        subprocess.run(["terraform", "plan", "-input=false", "-no-color",
+                        "-lock-timeout=60s", f"-out={saved}"], check=True)
+        raw = subprocess.check_output(["terraform", "show", "-json", saved])
+        try:
+            releases = release_candidates(json.loads(raw), args.cluster_id, args.run_id,
+                                          cutoff.strftime("%Y%m%d%H%M%S"))
+        except (KeyError, ValueError) as exc:
+            parser.exit(1, f"Refusing release: {exc}\n")
+        print(f"Verified {len(releases)} expired worker group(s) for {args.run_id}.", flush=True)
+        if releases and args.apply:
+            subprocess.run(["terraform", "apply", "-input=false", "-lock-timeout=60s",
+                            "-no-color", saved], check=True)
+    if args.inventory and (args.apply or not releases):
+        verify_inventory(args.profile, args.project_id, args.cluster_id, json.loads(args.inventory.read_text()))
+
+
+if __name__ == "__main__":
+    main()

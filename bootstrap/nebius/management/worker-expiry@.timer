@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile the Nebius worker cutoff for %i
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+AccuracySec=2s
+[Install]
+WantedBy=timers.target

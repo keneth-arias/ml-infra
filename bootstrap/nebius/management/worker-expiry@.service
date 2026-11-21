@@ -1,0 +1,26 @@
+[Unit]
+Description=Release and check Nebius worker inventory for %i
+After=network-online.target
+OnFailure=worker-cleanup-alert@%i.service
+[Service]
+Type=oneshot
+TimeoutStartSec=12min
+TimeoutStopSec=30s
+User=nebius-cleanup
+UMask=0077
+StateDirectory=nebius-cleanup
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/nebius-cleanup
+Environment=PATH=/opt/nebius-cleanup/bin:/usr/bin:/bin
+Environment=ML_INFRA_ENV_FILE=/var/lib/nebius-cleanup/state.env
+Environment=NEBIUS_PRIVATE_KEY_FILE=/var/lib/nebius-cleanup/auth.pem
+Environment=TF_DATA_DIR=/var/lib/nebius-cleanup/terraform
+Environment=TF_IN_AUTOMATION=1
+Environment=CHECKPOINT_DISABLE=1
+EnvironmentFile=/etc/nebius-cleanup/%i.env
+WorkingDirectory=/opt/ml-infra/bootstrap/nebius
+ExecStart=/opt/ml-infra/bootstrap/nebius/with-credentials /opt/ml-infra/bootstrap/nebius/expire-workers --apply --cluster-id ${CLUSTER_ID} --project-id ${PROJECT_ID} --run-id %i --cutoff ${CUTOFF} --inventory /etc/nebius-cleanup/%i-inventory.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
