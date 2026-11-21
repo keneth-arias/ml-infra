@@ -156,6 +156,10 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
                             "--project-id", scope["project_id"], "--cluster-id", scope["cluster_id"],
                             "--inventory", str(scope_dir / "inventory.json")], check=True)
             return
+        # Missing alert credentials block a new allocation but never prevent cutoff cleanup.
+        bearer = Path("/identity/otlp-bearer").read_text().strip()
+        if not bearer or any(c.isspace() for c in bearer):
+            raise ValueError("Missing or invalid fw13 alert credential")
         verify_inventory("ml-prod", scope["project_id"], scope["cluster_id"], baseline, before_stage=scope)
         groups, _ = plan_release(Path(scratch) / "rehearsal.tfplan", profile="ml-prod", cluster_id=scope["cluster_id"],
                                  run_id=run, cutoff_label=cutoff.strftime("%Y%m%d%H%M%S"))
