@@ -75,10 +75,9 @@ class TrackingStackTest(unittest.TestCase):
                 self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
                 for pair in ("requests", "limits"):
                     self.assertEqual(set(container["resources"][pair]), {"cpu", "memory", "ephemeral-storage"})
-        claim = self.get("PersistentVolumeClaim", "postgres")["spec"]
-        self.assertEqual(claim["storageClassName"], "airaware-network-retain")
-        self.assertEqual(claim["accessModes"], ["ReadWriteOnce"])
-        self.assertEqual(claim["resources"]["requests"]["storage"], "16Gi")
+        postgres = self.get("StatefulSet", "postgres")["spec"]["template"]["spec"]
+        self.assertIn({"name": "pg-data", "persistentVolumeClaim": {"claimName": "postgres"}}, postgres["volumes"])
+        self.assertNotIn(("PersistentVolumeClaim", "postgres"), self.objects)
         self.assertFalse(any(kind in {"Secret", "ClusterRoleBinding", "RoleBinding"} for kind, _ in self.objects))
 
     def test_network_is_default_deny_with_exact_artifact_fqdn(self):

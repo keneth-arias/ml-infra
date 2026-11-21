@@ -94,6 +94,8 @@ The native probe uses the admitted public Python image. Qualify the separate sig
 
 ## Check the allocation
 
+Before preparing the combined support and GPU window, complete the separately funded [retained storage release](../../../platform/retained-storage/README.md) and use its exact baseline on both cleanup hosts. The standalone CPU pilot keeps its independently approved inventory.
+
 Keep the reviewed source, backend key, provider lock and off-host ledger under operator control. Write the scope JSON in a private file. The guard expects these keys.
 
 | Key | Input |

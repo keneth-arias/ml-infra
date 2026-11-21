@@ -39,21 +39,18 @@ class ProductionFluxTests(unittest.TestCase):
         for bad in ("main", "0" * 40):
             self.assertNotEqual(subprocess.run([sys.executable, RENDER, bad], capture_output=True).returncode, 0)
 
-    def test_claims_bind_on_first_consumer_and_survive_pruning(self):
+    def test_legacy_storage_class_survives_pruning(self):
         rendered = subprocess.check_output(["kubectl", "kustomize", ROOT / "platform/overlays/prod"])
         objects = list(yaml.safe_load_all(rendered))
-        classes = {o["metadata"]["name"]: o for o in objects if o["kind"] == "StorageClass"}
-        claims = [o for o in objects if o["kind"] == "PersistentVolumeClaim"]
-        self.assertEqual({o["metadata"]["name"] for o in claims}, {"airaware-checkpoints", "airaware-model-state"})
-        for claim in claims:
-            storage = classes[claim["spec"]["storageClassName"]]
-            self.assertEqual(storage["reclaimPolicy"], "Retain")
-            self.assertEqual(storage["volumeBindingMode"], "WaitForFirstConsumer")
-            self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "64Gi")
+        storage, = [o for o in objects if o["kind"] == "StorageClass"]
+        self.assertEqual(storage["metadata"]["name"], "airaware-network-retain")
+        self.assertEqual(storage["reclaimPolicy"], "Retain")
+        self.assertEqual(storage["volumeBindingMode"], "WaitForFirstConsumer")
         for obj in objects:
-            if obj["kind"] in ("Namespace", "PersistentVolumeClaim", "StorageClass"):
+            if obj["kind"] in ("Namespace", "StorageClass"):
                 self.assertEqual(obj["metadata"]["annotations"]["kustomize.toolkit.fluxcd.io/prune"], "disabled")
-        self.assertFalse({"Job", "Pod", "Deployment", "StatefulSet"} & {o["kind"] for o in objects})
+        self.assertFalse({"Job", "Pod", "Deployment", "StatefulSet", "PersistentVolumeClaim"}
+                         & {o["kind"] for o in objects})
 
     def test_pilot_reconciles_only_three_existing_objects(self):
         flux = ROOT / "bootstrap/nebius/management/flux"

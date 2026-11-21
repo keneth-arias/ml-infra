@@ -1,0 +1,12 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: airaware-network-retain-immediate
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+provisioner: compute.csi.nebius.com
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  type: NETWORK_SSD
+  csi.storage.k8s.io/fstype: ext4
