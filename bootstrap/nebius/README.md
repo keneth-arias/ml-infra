@@ -191,3 +191,23 @@ kubectl --context prod-nebius -n training exec "$pod" -c "$container" -- \
 ```
 
 An interrupted fit exits 75. A stop before the first update can have no generation to restore. If the helper times out, check the worker exit and verify the last complete checkpoint before retrying within the original cutoff. Inspect quarantined `.damaged-*` and `.superseded-*` directories with writers stopped. Reclaim space only after verifying an independent restorable copy.
+
+### Qualify the tracking service on the support and GPU workers
+
+During a funded window, use the separate qualification operator and the signed trainer image to test the same `training/episode-tracking` HTTPS URI and bearer token as the training client. The certificate chain and service hostname must verify in the released trainer. The server needs backed-up PostgreSQL metadata and a proxied experiment artifact root in the approved private object store. The probe rejects direct object-store artifact locations. The production service, DNS, trust configuration, backup and cost through expiry must be in place before this check.
+
+Run from the approved deployment checkout with the operator kubeconfig in `NEBIUS_SUBMIT_KUBECONFIG`, the operator username in `NEBIUS_STAGING_OPERATOR_IDENTITY`, and the managed cluster and CA pins used for staging. Supply the Ready node name from the funded allocation receipt. The first command submits a server dry-run. The second executes one bounded CPU-only Job on that node.
+
+```sh
+python3 workloads/smoke/check-tracking-job.py --pool cpu --node "$support_node"
+python3 workloads/smoke/check-tracking-job.py --pool cpu --node "$support_node" --execute > support-tracking.json
+```
+
+The probe requires denials for both anonymous and invalid-bearer reads of experiment metadata and the synthetic artifact. The authenticated client uses the trainer’s five-second request timeout and zero retries. With the training credential it logs one synthetic metric and a 64-byte artifact, finishes the marked run in `airaware-pm25` and verifies the bytes through a fresh client. Keep the Job, Pod, provider and signed-image receipt with the run record. The Job expires an hour after completion. If creation or completion is ambiguous, inspect the printed Job name before retrying. Repeat using `--pool gpu --node "$gpu_node"` on the actual funded GPU worker before the first fit. This measures the GPU worker’s tracking route and consumes CPU only.
+
+For the backup drill, restore both PostgreSQL and the corresponding artifact objects into fresh storage. Point an isolated HTTPS tracking service at the restored stores. With its scoped credential and the original experiment name, pass the inner `tracking` receipt to the probe inside the qualified trainer. Save the repeated artifact digest with the backup evidence.
+
+```sh
+jq .tracking support-tracking.json > original-run.json
+/opt/conda/bin/python -I tracking-roundtrip.py --read-receipt original-run.json
+```
