@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read managed storage evidence and build an exact worker-release inventory."""
+"""Submit reviewed retained claims and capture exact managed storage evidence."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -60,12 +60,16 @@ def indexed(rows, identity):
     return result
 
 
-def reconcile(phase, approval, storage_class, claims, volumes, disks, attachments, db_receipt=None):
+def require_class(storage_class):
     if storage_class["metadata"]["name"] != CLASS or (
         storage_class["provisioner"], storage_class["volumeBindingMode"], storage_class["reclaimPolicy"],
         storage_class["parameters"],
     ) != (DRIVER, "Immediate", "Retain", {"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"}):
         raise ValueError("The retained StorageClass differs from the reviewed manifest")
+
+
+def reconcile(phase, approval, storage_class, claims, volumes, disks, attachments, db_receipt=None):
+    require_class(storage_class)
     expected = {DB: CLAIMS[DB]} if phase == "db" else CLAIMS
     claims = indexed(claims, lambda row: (row["metadata"]["namespace"], row["metadata"]["name"]))
     volumes = indexed(volumes, lambda row: row["metadata"]["name"])
@@ -80,7 +84,7 @@ def reconcile(phase, approval, storage_class, claims, volumes, disks, attachment
         claim = claims[namespace, name]
         meta, spec = claim["metadata"], claim["spec"]
         pv_name = spec.get("volumeName")
-        if (claim.get("status", {}).get("phase") != "Bound" or pv_name not in volumes
+        if (meta.get("deletionTimestamp") or claim.get("status", {}).get("phase") != "Bound" or pv_name not in volumes
                 or meta.get("labels", {}).get(OWNER) != reservation or not meta.get("uid")
                 or spec["storageClassName"] != CLASS or spec["accessModes"] != ["ReadWriteOnce"]
                 or spec.get("volumeMode", "Filesystem") != "Filesystem"
@@ -90,7 +94,7 @@ def reconcile(phase, approval, storage_class, claims, volumes, disks, attachment
         volume = pv["spec"]
         ref, csi = volume.get("claimRef", {}), volume.get("csi", {})
         handle = csi.get("volumeHandle", "")
-        if (not pv["metadata"].get("uid") or pv.get("status", {}).get("phase") != "Bound"
+        if (pv["metadata"].get("deletionTimestamp") or not pv["metadata"].get("uid") or pv.get("status", {}).get("phase") != "Bound"
                 or (ref.get("namespace"), ref.get("name"), ref.get("uid")) != (namespace, name, meta["uid"])
                 or volume["persistentVolumeReclaimPolicy"] != "Retain" or volume["storageClassName"] != CLASS
                 or volume["capacity"]["storage"] != f"{size}Gi" or volume["accessModes"] != ["ReadWriteOnce"]
@@ -102,7 +106,7 @@ def reconcile(phase, approval, storage_class, claims, volumes, disks, attachment
         status = disk["status"]
         if (disk["metadata"]["parent_id"] != project or disk["spec"]["type"] != "NETWORK_SSD"
                 or int(disk["spec"]["size_gibibytes"]) != size or status["state"] != "READY"
-                or status.get("reconciling") or status.get("read_write_attachment")
+                or status.get("reconciling") or status.get("managed_by") or status.get("read_write_attachment")
                 or status.get("read_only_attachments")):
             raise ValueError("Expected the exact Ready and detached workload-project Network SSD")
         handles.add(handle)
@@ -127,9 +131,14 @@ def query(argv):
     return json.loads(subprocess.run(argv, capture_output=True, check=True, timeout=40).stdout)
 
 
-def capture(args, approval, approval_hash):
+def kube(args, timeout=15):
+    return ["kubectl", "--kubeconfig", str(args.kubeconfig), "--context", args.context,
+            f"--request-timeout={timeout}s"]
+
+
+def observe(args, approval):
     project, cluster, tenant = (approval[key] for key in ("project_id", "cluster_id", "tenant_id"))
-    k = ["kubectl", "--kubeconfig", str(args.kubeconfig), "--context", args.context, "--request-timeout=15s"]
+    k = kube(args)
     n = ["nebius", "-p", args.profile, "--no-browser"]
     pinned_kubeconfig_ca(k, cluster, args.ca_sha256, endpoint=args.endpoint, direct=True)
     target = query([*n, "mk8s", "cluster", "get", "--id", cluster, "--format", "json"])
@@ -138,11 +147,6 @@ def capture(args, approval, approval_hash):
     owner = query([*n, "iam", "project", "get", "--id", project, "--format", "json"])
     if owner["metadata"]["parent_id"] != tenant or owner["status"]["region"] != "eu-south1":
         raise ValueError("Expected the approved eu-south1 tenant and workload project")
-    quota = query([*n, "quotas", "quota-allowance", "get-by-name", "--parent-id", tenant,
-                   "--name", "compute.disk.count", "--region", "eu-south1", "--format", "json"])
-    quota_limit = int(quota["spec"]["limit"])
-    if quota_limit < 5:
-        raise ValueError("The combined topology requires an effective five-disk quota")
     if (cloud_items(args.profile, "mk8s", "node-group", cluster)
             or cloud_items(args.profile, "compute", "instance", project)):
         raise ValueError("Expected zero managed worker groups and Compute instances")
@@ -159,56 +163,193 @@ def capture(args, approval, approval_hash):
     if len(drivers) != 1 or drivers[0]["spec"].get("attachRequired") is not True:
         raise ValueError("Expected the registered managed Compute CSI driver")
     classes = [row for row in kinds.get("StorageClass", []) if row["metadata"]["name"] == CLASS]
-    claims, volumes, attachments = (kinds.get(kind, []) for kind in
-                                     ("PersistentVolumeClaim", "PersistentVolume", "VolumeAttachment"))
-    held = funding(approval, datetime.now(timezone.utc))
     namespaces = query([*k, "get", "namespace", "tracking", "training", "-o", "json"])
     namespace_uids = {row["metadata"]["name"]: row["metadata"]["uid"] for row in namespaces["items"]}
-    if set(namespace_uids) != {"tracking", "training"} or not all(namespace_uids.values()):
-        raise ValueError("Expected the canonical training and tracking namespace identities")
-    receipt = dict(observed_at=datetime.now(timezone.utc).isoformat(), approval_sha256=approval_hash,
-                   namespace_uids=namespace_uids,
-                   phase=args.phase, project_id=project, cluster_id=cluster, disk_quota_limit=quota_limit,
-                   priced_storage_bound_usd=str(held))
-    if args.phase == "preflight":
+    if (set(namespace_uids) != {"tracking", "training"} or not all(namespace_uids.values())
+            or any(row["metadata"].get("deletionTimestamp") for row in namespaces["items"])):
+        raise ValueError("Expected the canonical, active training and tracking namespaces")
+    return dict(storage_classes=classes, claims=kinds.get("PersistentVolumeClaim", []),
+                volumes=kinds.get("PersistentVolume", []), disks=disks,
+                attachments=kinds.get("VolumeAttachment", []), namespace_uids=namespace_uids,
+                project_id=project, cluster_id=cluster)
+
+
+def evidence(path, phase, receipt, approval):
+    value = json.loads(path.read_bytes())
+    if (value.get("phase") != phase or any(value.get(key) != receipt[key] for key in
+                                         ("approval_sha256", "namespace_uids", "project_id", "cluster_id"))
+            or not utc(approval["approved_at"]) <= utc(value["observed_at"]) <= utc(receipt["observed_at"])):
+        raise ValueError("Storage evidence belongs to a different approval, target, phase or time")
+    return value
+
+
+def object_key(row):
+    return (row["kind"], row["metadata"].get("namespace", ""), row["metadata"]["name"])
+
+
+def submitted_uids(submission, objects, expected):
+    records = {tuple(row["key"]): row["uid"] for row in submission["created_objects"]}
+    if (set(records) != expected or len(records) != len(submission["created_objects"])
+            or records != {object_key(row): row["metadata"]["uid"] for row in objects}):
+        raise ValueError("Live claim identities differ from the create-only submission receipt")
+
+
+def disk_quota(n, tenant, owned_disks):
+    quota = query([*n, "quotas", "quota-allowance", "get-by-name", "--parent-id", tenant,
+                   "--name", "compute.disk.count", "--region", "eu-south1", "--format", "json"])
+    limit = int(quota["spec"]["limit"])
+    status = quota["status"]
+    if status.get("usage") is None and status.get("usage_state") != "USAGE_STATE_NOT_USED":
+        raise ValueError("Nebius did not report disk quota usage")
+    usage = int(status.get("usage") or 0)
+    if limit < 5 or usage > limit - 5 + owned_disks:
+        raise ValueError("The combined topology requires five available tenant disks")
+    return limit
+
+
+def capture(args, approval, approval_hash):
+    phase = {"submit-db": "preflight", "submit-training": "db-live"}.get(args.phase, args.phase)
+    state = observe(args, approval)
+    n = ["nebius", "-p", args.profile, "--no-browser"]
+    limit = disk_quota(n, approval["tenant_id"], len(state["disks"]))
+    if state["namespace_uids"] != approval["namespace_uids"]:
+        raise ValueError("The namespace identities differ from the approved scope")
+    now = datetime.now(timezone.utc)
+    receipt = {key: state[key] for key in ("namespace_uids", "project_id", "cluster_id")}
+    receipt.update(observed_at=now.isoformat(), approval_sha256=approval_hash, phase=phase,
+                   disk_quota_limit=limit, priced_storage_bound_usd=str(funding(approval, now)))
+    classes, claims, volumes, disks, attachments = (state[key] for key in
+        ("storage_classes", "claims", "volumes", "disks", "attachments"))
+    if phase == "preflight":
         if classes or claims or volumes or disks or attachments:
             raise ValueError("Existing claims or storage require a separately reviewed compatibility plan")
-        workloads = query([*k, "get", "deployments,daemonsets,statefulsets,pods", "-A", "-o", "json"])
-        receipt["visible_csi_workloads"] = [
-            {"kind": row["kind"], "namespace": row["metadata"]["namespace"],
-             "name": row["metadata"]["name"], "ready": row.get("status", {}).get(
-                 "readyReplicas", row.get("status", {}).get("numberReady", 0))}
-            for row in workloads["items"] if "csi" in row["metadata"]["name"].lower()
-        ]
         return receipt
-    if len(classes) != 1:
-        raise ValueError("Expected exactly one funded Immediate StorageClass")
-    first = json.loads(args.db_receipt.read_bytes()) if args.db_receipt else None
-    if first is not None and (first.get("approval_sha256"), first.get("namespace_uids")) != (approval_hash, namespace_uids):
-        raise ValueError("First-stage receipt belongs to a different funding approval")
-    if args.phase == "db":
-        if len(claims) != 1:
-            raise ValueError("The database must be the only first-stage claim")
-        created = utc(claims[0]["metadata"]["creationTimestamp"])
-        now = datetime.now(timezone.utc)
-        if not utc(approval["approved_at"]) <= created <= now <= created + timedelta(minutes=5):
+    if (len(classes) != 1 or classes[0]["metadata"].get("deletionTimestamp")
+            or classes[0]["metadata"].get("labels", {}).get(OWNER) != approval["reservation_id"]):
+        raise ValueError("Expected exactly one active funded Immediate StorageClass")
+    start = utc(approval["approved_at"])
+    if any(not start <= utc(row["metadata"]["creationTimestamp"]) <= now for row in [*classes, *claims, *volumes]):
+        raise ValueError("Kubernetes storage evidence was created outside this acquisition")
+    if any(not start <= utc(row["metadata"]["created_at"]) <= now for row in disks):
+        raise ValueError("Provider disk evidence was created outside this acquisition")
+    db_claims = [row for row in claims if object_key(row) == ("PersistentVolumeClaim", *DB)]
+    if len(db_claims) != 1:
+        raise ValueError("Expected exactly one final database claim")
+    db_created = utc(db_claims[0]["metadata"]["creationTimestamp"])
+    db_objects = [*classes, *db_claims]
+    db_keys = {("StorageClass", "", CLASS), ("PersistentVolumeClaim", *DB)}
+    if phase == "db":
+        submission = evidence(args.submission, "submit-db", receipt, approval)
+        submitted_uids(submission, db_objects, db_keys)
+        if not utc(submission["observed_at"]) <= now <= db_created + timedelta(minutes=5):
             raise ValueError("The first worker-free database bind missed its five-minute evidence window")
-    return receipt | reconcile(args.phase, approval, classes[0], claims, volumes, disks, attachments, first)
+        receipt["db_objects"] = submission["created_objects"]
+        return receipt | reconcile("db", approval, classes[0], claims, volumes, disks, attachments)
+    first = evidence(args.db_receipt, "db", receipt, approval)
+    submitted_uids({"created_objects": first["db_objects"]}, db_objects, db_keys)
+    if not db_created <= utc(first["observed_at"]) <= db_created + timedelta(minutes=5):
+        raise ValueError("The database receipt did not complete within five minutes of claim creation")
+    if phase == "db-live":
+        live = reconcile("db", approval, classes[0], claims, volumes, disks, attachments)
+        if live["bindings"] != first["bindings"]:
+            raise ValueError("The first database binding changed before training submission")
+        return receipt
+    training = [row for row in claims if row not in db_claims]
+    submission = evidence(args.submission, "submit-training", receipt, approval)
+    if utc(submission["observed_at"]) < utc(first["observed_at"]):
+        raise ValueError("Training submission predates the database qualification")
+    submitted_uids(submission, training, {("PersistentVolumeClaim", *key) for key in CLAIMS if key != DB})
+    return receipt | reconcile("all", approval, classes[0], claims, volumes, disks, attachments, first)
+
+
+def submission_seconds(approval, checked_at, now):
+    limit = min(utc(approval["acquisition_deadline"]), checked_at + timedelta(minutes=1))
+    remaining = int((limit - now).total_seconds())
+    if remaining < 1:
+        raise ValueError("Storage submission approval or live guard checks expired")
+    return min(15, remaining)
+
+
+def create_object(args, obj, seconds):
+    completed = subprocess.run([*kube(args, seconds), "create", "--validate=strict", "-f", "-", "-o", "json"],
+                               input=json.dumps(obj).encode(), capture_output=True, check=True, timeout=seconds)
+    created = json.loads(completed.stdout)
+    if (object_key(created) != object_key(obj) or not created["metadata"].get("uid")
+            or created["metadata"].get("deletionTimestamp")
+            or created["metadata"].get("labels", {}).get(OWNER) != obj["metadata"]["labels"][OWNER]):
+        raise ValueError("Create-only response differs from the scoped manifest")
+    return {"key": object_key(created), "uid": created["metadata"]["uid"]}
+
+
+def submit(args, approval, approval_hash):
+    checked_at = datetime.now(timezone.utc)
+    receipt = capture(args, approval, approval_hash)
+    import yaml
+
+    phase = "db" if args.phase == "submit-db" else "training"
+    manifest = subprocess.check_output(["kubectl", "kustomize", Path(__file__).parent / phase], timeout=10)
+    items = list(yaml.safe_load_all(manifest))
+    expected = ([("StorageClass", "", CLASS), ("PersistentVolumeClaim", *DB)] if phase == "db" else
+                [("PersistentVolumeClaim", *key) for key in CLAIMS if key != DB])
+    actual = indexed(items, object_key)
+    if set(actual) != set(expected):
+        raise ValueError("Rendered objects differ from the reviewed stage identities")
+    for key in expected:
+        obj = actual[key]
+        if key[0] == "StorageClass":
+            require_class(obj)
+            continue
+        storage = {"accessModes": ["ReadWriteOnce"], "storageClassName": CLASS,
+                   "resources": {"requests": {"storage": f"{CLAIMS[key[1:]]}Gi"}}}
+        if obj["spec"] != storage:
+            raise ValueError("Rendered claim differs from the funded blank storage specification")
+    created = []
+    for key in expected:
+        item = actual[key]
+        item["metadata"].setdefault("labels", {})[OWNER] = approval["reservation_id"]
+        seconds = submission_seconds(approval, checked_at, datetime.now(timezone.utc))
+        k = kube(args, seconds)
+        pinned_kubeconfig_ca(k, approval["cluster_id"], args.ca_sha256, endpoint=args.endpoint, direct=True)
+        subject = query([*k, "auth", "whoami", "-o", "json"])["status"]["userInfo"]["username"]
+        if subject != approval["operator_username"]:
+            raise ValueError("Kubernetes operator differs from the approval")
+        if key[1]:
+            namespace = query([*k, "get", "namespace", key[1], "-o", "json"])["metadata"]
+            if namespace["uid"] != approval["namespace_uids"][key[1]] or namespace.get("deletionTimestamp"):
+                raise ValueError("The approved claim namespace changed before submission")
+        owned = int(phase == "training") + sum(row["key"][0] == "PersistentVolumeClaim" for row in created)
+        disk_quota(["nebius", "-p", args.profile, "--no-browser"], approval["tenant_id"], owned)
+        now = datetime.now(timezone.utc)
+        funding(approval, now)
+        created.append(create_object(args, item, submission_seconds(approval, checked_at, now)))
+    return receipt | dict(phase=args.phase, observed_at=datetime.now(timezone.utc).isoformat(), created_objects=created)
+
+
+def private_output(path):
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
+
+
+def write_receipt(out, obj):
+    raw = (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode()
+    out.write(raw)
+    out.flush()
+    os.fsync(out.fileno())
+    return hashlib.sha256(raw).hexdigest()
 
 
 def write(path, obj):
-    raw = (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode()
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
-        out.write(raw)
-    return hashlib.sha256(raw).hexdigest()
+    with private_output(path) as out:
+        return write_receipt(out, obj)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("preflight", "db", "all"))
+    parser.add_argument("phase", choices=("preflight", "submit-db", "db", "submit-training", "all"))
     parser.add_argument("--approval", required=True, type=Path)
+    parser.add_argument("--approval-sha256", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--db-receipt", type=Path)
+    parser.add_argument("--submission", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--kubeconfig", required=True, type=Path)
     parser.add_argument("--context", required=True)
@@ -216,19 +357,33 @@ def main():
     parser.add_argument("--ca-sha256", required=True)
     parser.add_argument("--profile", default="ml-prod")
     args = parser.parse_args()
-    if (args.phase == "all") != bool(args.baseline) or (args.phase == "all") != bool(args.db_receipt):
-        parser.error("Only all-stage capture requires both an earlier DB receipt and a new baseline path")
+    if ((args.phase == "all") != bool(args.baseline)
+            or (args.phase in ("submit-training", "all")) != bool(args.db_receipt)
+            or (args.phase in ("db", "all")) != bool(args.submission)):
+        parser.error("Specify the stage's required prior receipts and baseline output")
+    if args.output.exists() or (args.baseline and (args.baseline == args.output or args.baseline.exists())):
+        parser.error("Choose fresh private output paths")
     os.environ.setdefault("AI_AGENT", "codex")
     raw = args.approval.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != args.approval_sha256:
+        parser.exit(1, "Approval bytes differ from the independently reviewed digest\n")
     approval = json.loads(raw)
     try:
         funding(approval, datetime.now(timezone.utc))
-        receipt = capture(args, approval, hashlib.sha256(raw).hexdigest())
-        if args.baseline:
-            receipt["baseline_sha256"] = write(args.baseline, receipt["baseline"])
-        digest = write(args.output, receipt)
+        if args.phase.startswith("submit-"):
+            # Reserve the private receipt before a paid request. An empty file records an incomplete stage.
+            with private_output(args.output) as out:
+                digest = write_receipt(out, submit(args, approval, digest))
+        else:
+            receipt = capture(args, approval, digest)
+            if args.baseline:
+                receipt["baseline_sha256"] = write(args.baseline, receipt["baseline"])
+            digest = write(args.output, receipt)
     except ValueError as error:
         parser.exit(1, f"{error}\n")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        parser.exit(1, "A guarded operation failed or timed out. Reconcile exact live objects before retrying.\n")
     print(f"Verified {args.phase} storage evidence SHA-256 {digest}")
 
 

@@ -1,10 +1,14 @@
 """Exercise operator-only retained storage renders and funded binding checks."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -43,6 +47,61 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                                 and o["metadata"]["annotations"]["kustomize.toolkit.fluxcd.io/prune"] == "disabled"
                                 for o in claims))
 
+    def test_submission_fails_closed_before_create(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        now = datetime(2026, 10, 1, 20, 20, tzinfo=timezone.utc)
+        approval = {"acquisition_deadline": "2026-10-01T20:20:30Z"}
+        self.assertLessEqual(helper.submission_seconds(approval, now, now), 30)
+        with self.assertRaises(ValueError):
+            helper.submission_seconds(approval, now - timedelta(minutes=2), now)
+        with self.assertRaises(ValueError):
+            helper.submission_seconds(approval, now, now + timedelta(seconds=30))
+        with patch.object(helper, "capture", side_effect=ValueError("quota")), patch.object(helper, "create_object") as create:
+            with self.assertRaisesRegex(ValueError, "quota"):
+                helper.submit(type("Args", (), {"phase": "submit-db"})(), approval, "a" * 64)
+            create.assert_not_called()
+
+    def test_creation_uses_strict_create_only_and_pins_response_uid(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        args = SimpleNamespace(kubeconfig=Path("/example/kubeconfig"), context="example")
+        claim = {"kind": "PersistentVolumeClaim", "metadata": {"name": "postgres", "namespace": "tracking",
+                 "labels": {helper.OWNER: "approved"}}}
+        result = {**claim, "metadata": {**claim["metadata"], "uid": "created-uid"}}
+        with patch.object(helper.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps(result))) as run:
+            receipt = helper.create_object(args, claim, 7)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[-6:], ["create", "--validate=strict", "-f", "-", "-o", "json"])
+        self.assertIn("--request-timeout=7s", cmd)
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+        self.assertEqual(receipt["uid"], "created-uid")
+        identity = {("PersistentVolumeClaim", "tracking", "postgres")}
+        helper.submitted_uids({"created_objects": [receipt]}, [result], identity)
+        result["metadata"]["uid"] = "different"
+        with self.assertRaises(ValueError):
+            helper.submitted_uids({"created_objects": [receipt]}, [result], identity)
+
+    def test_future_or_old_phase_evidence_is_rejected(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        live = dict(observed_at="2026-10-01T20:20:00Z", approval_sha256="a" * 64,
+                    namespace_uids={"tracking": "tracking-uid", "training": "training-uid"},
+                    project_id="project-synthetic", cluster_id="mk8scluster-synthetic")
+        funding = {"approved_at": "2026-10-01T20:00:00Z"}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            for observed_at in ("2026-10-01T19:59:59Z", "2026-10-01T20:20:01Z"):
+                path.write_text(json.dumps(live | dict(phase="db", observed_at=observed_at)))
+                with self.assertRaises(ValueError):
+                    helper.evidence(path, "db", live, funding)
+            path.write_text(json.dumps(live | {"phase": "submit-db"}))
+            with self.assertRaises(ValueError):
+                helper.evidence(path, "db", live, funding)
+
     def test_bounds_and_exact_binding(self):
         spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
         helper = importlib.util.module_from_spec(spec)
@@ -79,6 +138,15 @@ class RetainedStorageReleaseTest(unittest.TestCase):
         self.assertNotIn("baseline", first)
         with self.assertRaises(ValueError):
             helper.reconcile("all", approval, sc, claims, volumes, disks, [])
+        for obj in (claims[0], volumes[0]):
+            obj["metadata"]["deletionTimestamp"] = "2026-10-01T20:20:00Z"
+            with self.assertRaises(ValueError):
+                helper.reconcile("all", approval, sc, claims, volumes, disks, [], first)
+            obj["metadata"].pop("deletionTimestamp")
+        disks[0]["status"]["managed_by"] = "computeinstance-synthetic"
+        with self.assertRaises(ValueError):
+            helper.reconcile("all", approval, sc, claims, volumes, disks, [], first)
+        del disks[0]["status"]["managed_by"]
         volumes[0]["spec"]["claimRef"]["uid"] = "wrong"
         with self.assertRaises(ValueError):
             helper.reconcile("all", approval, sc, claims, volumes, disks, [], first)
