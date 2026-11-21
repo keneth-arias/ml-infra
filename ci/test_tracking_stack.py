@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -22,6 +23,18 @@ class TrackingStackTest(unittest.TestCase):
 
     def get(self, kind, name):
         return self.objects[kind, name]
+
+    def test_issued_leaves_pass_strict_tls_for_only_their_service(self):
+        with tempfile.TemporaryDirectory() as parent:
+            issued = subprocess.run([STACK / "issue-credentials", parent], capture_output=True, text=True, check=True)
+            directory = Path(issued.stdout.strip())
+            for service, other in (("mlflow", "postgres"), ("postgres", "mlflow")):
+                verify = ["openssl", "verify", "-x509_strict", "-purpose", "sslserver", "-CAfile", directory / "ca.crt"]
+                cert = directory / (service + ".crt")
+                for name, expected in ((service, True), (other, False)):
+                    result = subprocess.run([*verify, "-verify_hostname", name + ".tracking.svc.cluster.local", cert],
+                                            capture_output=True)
+                    self.assertEqual(result.returncode == 0, expected)
 
     def test_private_proxy_and_postgres(self):
         proxy = self.get("Service", "mlflow")["spec"]
