@@ -25,6 +25,40 @@ class BundleTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 flamingo_binding(pin, left, right)
 
+    def test_flamingo_terminal_qualification_requires_two_verified_restores(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import Mock, patch
+        from episode_job import verify_flamingo_selection
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            artifact = work / "direct-result.json"
+            selected = "3" * 64
+            artifact.write_text(json.dumps({"best_step": 500, "selected_manifest_sha256": selected}))
+            module = ModuleType("opentslm.flamingo_qualification")
+            module.compare = Mock(side_effect=ValueError("restore differs"))
+            baselines = [work / "first", work / "repeat"]
+            pins = ["1" * 64, "2" * 64]
+            def produce(command, *, check):
+                self.assertTrue(check)
+                self.assertEqual(command[command.index("--checkpoint") + 1], str(work / "step-00000500"))
+                self.assertEqual(command[command.index("--selected-receipt-sha256") + 1], sha256(artifact))
+                Path(command[command.index("--output") + 1]).write_text("{}")
+            with patch.dict(sys.modules, {"opentslm.flamingo_qualification": module}), patch(
+                "episode_job.subprocess.run", side_effect=produce
+            ) as child:
+                with self.assertRaisesRegex(ValueError, "restore differs"):
+                    verify_flamingo_selection(work / "weights", artifact, baselines, pins, "sha256:" + "a"*64)
+                self.assertFalse(list(work.rglob("comparison.json")))
+                module.compare.side_effect = None
+                module.compare.return_value = {"matching_horizons": 6}
+                folder = verify_flamingo_selection(work / "weights", artifact, baselines, pins, "sha256:" + "a"*64)
+                self.assertEqual(child.call_count, 2)
+                module.compare.assert_called_with(baselines, pins, [folder / "restore-1.json", folder / "restore-2.json"],
+                                                  sha256(artifact), selected)
+                self.assertEqual(json.loads((folder / "comparison.json").read_bytes()), {"matching_horizons": 6})
+
     def test_stage_identity_and_exact_files(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

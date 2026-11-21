@@ -155,9 +155,11 @@ class ProfileTest(unittest.TestCase):
                 "--image", "trainer@sha256:" + "a"*64, "--preflight-image", "preflight@sha256:" + "b"*64,
                 "--cached-weights-sha256", "e"*64, "--bundle-sha256", "c"*64,
                 "--validation-sha256", "d"*64, "--step", "14084", "--schedule", "14084",
-                "--direct-objective", "normalized-mse", "--graceful-stop", "--flamingo-binding-sha256", pin]
+                "--direct-objective", "normalized-mse", "--graceful-stop", "--flamingo-binding-sha256", pin, "--flamingo-baselines", "1"*64, "2"*64]
         pre, job = (subprocess.check_output([sys.executable, script, mode, *args]) for mode in ("preflight", "job"))
         self.assertEqual(describe(pre, job)["pair"]["flamingo_binding"], pin)
+        self.assertEqual(describe(pre, job)["pair"]["flamingo_baselines"], ["1"*64, "2"*64])
+        self.assertNotEqual(subprocess.run([sys.executable, script, "job", *args[:-3]], capture_output=True).returncode, 0)
         for target, mode in (("dev-bm", "job"), ("prod-nebius", "sky")):
             with self.subTest(target=target, mode=mode):
                 args[args.index("--target") + 1] = target

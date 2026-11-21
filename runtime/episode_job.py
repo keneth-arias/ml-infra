@@ -42,6 +42,55 @@ def flamingo_binding(digest, fit, validation):
     return raw
 
 
+def validated_baselines(state, digests, image_digest):
+    import torch
+    from importlib.metadata import version
+    from opentslm.flamingo_qualification import compare
+
+    folder = state / "flamingo-baselines"
+    if folder.is_symlink():
+        raise ValueError("Invalid baseline receipt directory")
+    paths = [folder / (digest + ".json") for digest in digests]
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("Invalid baseline receipt file")
+    compare(paths, list(digests))
+    baseline = json.loads(paths[0].read_bytes())
+    runtime = {"device": "cuda:0", "gpu": torch.cuda.get_device_name(0), "cuda": torch.version.cuda,
+               "torch": str(torch.__version__), "transformers": version("transformers"),
+               "peft": version("peft"), "image_digest": image_digest}
+    if baseline["runtime"] != runtime:
+        raise ValueError("Approved Flamingo baseline differs from this training runtime")
+    return paths
+
+
+def verify_flamingo_selection(weights, result_file, paths, digests, image_digest):
+    """Qualify the actual selected generation before publishing terminal success."""
+    from opentslm.flamingo_qualification import compare
+
+    state = result_file.parent
+    terminal = json.loads(result_file.read_bytes())
+    generation = state / f"step-{terminal['best_step']:08d}"
+    result_pin = sha256(result_file)
+    selected_pin = terminal["selected_manifest_sha256"]
+    folder = state / "flamingo-qualification" / result_pin
+    if folder.parent.is_symlink() or folder.is_symlink():
+        raise ValueError("Invalid qualification receipt directory")
+    folder.mkdir(parents=True, exist_ok=True)
+    restored = [folder / f"restore-{n}.json" for n in (1, 2)]
+    for out in restored:
+        if out.is_symlink():
+            raise ValueError("Invalid restore receipt file")
+        if not out.exists():
+            subprocess.run([
+                sys.executable, "-m", "opentslm.flamingo_qualification", "restore",
+                "--weights", str(weights), "--checkpoint", str(generation), "--image-digest", image_digest,
+                "--selected-receipt", str(result_file), "--selected-receipt-sha256", result_pin, "--output", str(out),
+            ], check=True)
+    report = compare(paths, list(digests), restored, result_pin, selected_pin)
+    bind_file(folder / "comparison.json", report)
+    return folder
+
+
 def bundle_manifest(manifest, digest, phase, head, *, paired=False):
     if manifest.is_symlink() or sha256(manifest) != digest:
         raise ValueError("Phase manifest checksum mismatch")
@@ -353,6 +402,7 @@ def main():
     parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
     parser.add_argument("--validation-sha256")
     parser.add_argument("--flamingo-binding-sha256")
+    parser.add_argument("--flamingo-baselines", nargs=2, metavar=("FIRST_SHA", "REPEAT_SHA"))
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     parser.add_argument("--resume", action="store_true")
@@ -363,7 +413,12 @@ def main():
     parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
     binding = None
+    if bool(args.flamingo_binding_sha256) != bool(args.flamingo_baselines):
+        parser.error("Bind the Flamingo recipe and both approved language baselines together")
     if args.flamingo_binding_sha256 is not None:
+        if (not all(re.fullmatch("[0-9a-f]{64}", d) for d in args.flamingo_baselines)
+                or len(set(args.flamingo_baselines)) != 2):
+            parser.error("Two distinct approved Flamingo baselines are required")
         if not args.direct_objective:
             parser.error("Flamingo requires a paired direct forecast fit")
         binding = flamingo_binding(args.flamingo_binding_sha256, args.bundle_sha256, args.validation_sha256)
@@ -545,9 +600,18 @@ def main():
         ]
     work = Path("/state") if args.phase == "fit" else artifact.parent
 
+    baselines = []
+    evidence = None
+    if binding:
+        image_digest = os.environ["EPISODE_IMAGE"].rsplit("@", 1)[-1]
+        baselines = validated_baselines(work, args.flamingo_baselines, image_digest)
+
     def verify_result(generation=None):
+        nonlocal evidence
         if args.phase == "fit":
             verify_fit_result(artifact, args, spec, generation=generation)
+            if binding and generation is None:
+                evidence = verify_flamingo_selection(weights, artifact, baselines, args.flamingo_baselines, image_digest)
         else:
             with (
                 np.load(data, allow_pickle=False) as inputs,
@@ -577,7 +641,7 @@ def main():
     identity = {
         k: v
         for k, v in vars(args).items()
-        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256"))
+        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256", "flamingo_baselines"))
         and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]
@@ -698,6 +762,12 @@ def main():
                 acknowledge(control, "interrupted", generation)
                 raise SystemExit(75)
         publish_verified()
+        if evidence is not None:
+            for path in baselines:
+                mlflow.log_artifact(str(path), "qualification/baselines")
+            for filename in ("comparison.json", "restore-1.json", "restore-2.json"):
+                mlflow.log_artifact(str(evidence / filename), "qualification")
+            mlflow.set_tag("flamingo_qualification_sha256", sha256(evidence / "comparison.json"))
         selected_dir = artifact.parent
         if args.direct_objective:
             terminal = json.loads(artifact.read_bytes())

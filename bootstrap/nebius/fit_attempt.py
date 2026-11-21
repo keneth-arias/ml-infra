@@ -56,6 +56,8 @@ def describe(preflight, task):
     }
     if "--flamingo-binding-sha256" in cmd:
         pair["flamingo_binding"] = arg("flamingo-binding-sha256")
+        first = cmd.index("--flamingo-baselines") + 1
+        pair["flamingo_baselines"] = cmd[first:first + 2]
     return {
         "mode": mode,
         "task_sha256": digest(task),
