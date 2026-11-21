@@ -33,18 +33,17 @@ def tracking_target():
     return uri
 
 
-def check_authentication(uri, experiment):
+def denied_without_bearer(url, params=None):
     import requests
 
-    url = uri + "/api/2.0/mlflow/experiments/get-by-name"
     verify = os.environ.get("MLFLOW_TRACKING_SERVER_CERT_PATH") or True
     statuses = []
     with requests.Session() as session:
         session.trust_env = False
         for token in (None, secrets.token_hex(32)):
             headers = {"Authorization": "Bearer " + token} if token else {}
-            with session.get(url, params={"experiment_name": experiment}, headers=headers,
-                             allow_redirects=False, verify=verify, timeout=(5, 10), stream=True) as reply:
+            with session.get(url, params=params, headers=headers,
+                             allow_redirects=False, verify=verify, timeout=5, stream=True) as reply:
                 statuses.append(reply.status_code)
     if any(status not in (401, 403) for status in statuses):
         raise ValueError(f"Expected a credential denial for both requests, received {statuses}")
@@ -70,12 +69,13 @@ def readback(client, experiment_id, run_id, digest):
         saved = Path(client.download_artifacts(run_id, ARTIFACT, dst_path=folder))
         if saved.stat().st_size != 64 or hashlib.sha256(saved.read_bytes()).hexdigest() != digest:
             raise ValueError("Downloaded synthetic artifact differs from the receipt")
+    return run.info.artifact_uri
 
 
 def qualify(read_receipt):
     uri = tracking_target()
     name = os.environ.get("MLFLOW_TRACKING_EXPERIMENT", EXPERIMENT)
-    statuses = check_authentication(uri, name)
+    statuses = denied_without_bearer(uri + "/api/2.0/mlflow/experiments/get-by-name", {"experiment_name": name})
     import mlflow
     from mlflow import MlflowClient
 
@@ -108,9 +108,14 @@ def qualify(read_receipt):
             client.set_terminated(run_id, status="FAILED")
             raise
         client.set_terminated(run_id, status="FINISHED")
-    readback(MlflowClient(tracking_uri=uri), experiment.experiment_id, run_id, digest)
+    artifact_root = readback(MlflowClient(tracking_uri=uri), experiment.experiment_id, run_id, digest)
+    from mlflow.store.artifact.mlflow_artifacts_repo import MlflowArtifactsRepository
+
+    artifact_url = MlflowArtifactsRepository.resolve_uri(artifact_root.rstrip("/") + "/" + ARTIFACT, uri)
+    artifact_statuses = denied_without_bearer(artifact_url)
     return {"run_id": run_id, "experiment_id": experiment.experiment_id, "artifact_sha256": digest,
                       "anonymous_http": statuses[0], "invalid_bearer_http": statuses[1],
+                      "artifact_anonymous_http": artifact_statuses[0], "artifact_invalid_bearer_http": artifact_statuses[1],
                       "node": os.environ.get("TRACKING_PROBE_NODE"), "mode": "restore" if read_receipt else "roundtrip"}
 
 

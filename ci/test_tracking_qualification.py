@@ -6,7 +6,7 @@ from pathlib import Path
 import runpy
 import sys
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 SMOKE = Path(__file__).resolve().parents[1] / "workloads/smoke"
 WORKER = runpy.run_path(str(SMOKE / "tracking-roundtrip.py"))
@@ -33,6 +33,29 @@ class TrackingQualificationTest(unittest.TestCase):
             with self.subTest(uri=uri), self.assertRaises(ValueError):
                 proxy(uri)
 
+    def test_artifact_endpoint_requires_credential_denial_without_redirects(self):
+        url = "https://tracking.svc/api/2.0/mlflow-artifacts/artifacts/1/sample.bin"
+        for codes in ((401, 403), (401, 200), (302, 401)):
+            requests = MagicMock()
+            session = requests.Session.return_value.__enter__.return_value
+            responses = [MagicMock() for _ in codes]
+            for response, code in zip(responses, codes):
+                response.__enter__.return_value.status_code = code
+            session.get.side_effect = responses
+            with self.subTest(codes=codes), patch.dict(sys.modules, requests=requests):
+                if codes == (401, 403):
+                    self.assertEqual(WORKER["denied_without_bearer"](url), list(codes))
+                else:
+                    with self.assertRaisesRegex(ValueError, "credential denial"):
+                        WORKER["denied_without_bearer"](url)
+            first, second = session.get.call_args_list
+            self.assertEqual(first.args, (url,))
+            self.assertEqual(second.args, (url,))
+            self.assertEqual(first.kwargs["headers"], {})
+            self.assertRegex(second.kwargs["headers"]["Authorization"], r"^Bearer [a-f0-9]{64}$")
+            self.assertFalse(first.kwargs["allow_redirects"])
+            self.assertFalse(session.trust_env)
+
     def test_worker_placement_and_secret_bindings(self):
         for pool in ("cpu", "gpu"):
             job = LAUNCH["render"](IMAGE, "reviewed-node", pool, "tracking-check-test")
@@ -51,6 +74,9 @@ class TrackingQualificationTest(unittest.TestCase):
             self.assertNotIn("nvidia.com/gpu", c["resources"]["requests"])
             secret = [e["valueFrom"]["secretKeyRef"] for e in c["env"] if "secretKeyRef" in e.get("valueFrom", {})]
             self.assertEqual(secret, [{"name":"episode-tracking", "key":"token"}])
+            plain_env = {e["name"]: e["value"] for e in c["env"] if "value" in e}
+            self.assertEqual(plain_env["MLFLOW_HTTP_REQUEST_TIMEOUT"], "5")
+            self.assertEqual(plain_env["MLFLOW_HTTP_REQUEST_MAX_RETRIES"], "0")
 
     def test_dry_run_and_release_rotation(self):
         main = LAUNCH["main"]

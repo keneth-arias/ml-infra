@@ -32,6 +32,8 @@ def render(image, node, pool, name):
             "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
             "env": [
                 {"name": "HOME", "value": "/tmp"}, {"name": "MLFLOW_DISABLE_TELEMETRY", "value": "true"},
+                {"name": "MLFLOW_HTTP_REQUEST_TIMEOUT", "value": "5"},
+                {"name": "MLFLOW_HTTP_REQUEST_MAX_RETRIES", "value": "0"},
                 {"name": "MLFLOW_TRACKING_URI", "valueFrom": {"configMapKeyRef": {"name": "episode-tracking", "key": "https-uri"}}},
                 {"name": "MLFLOW_TRACKING_TOKEN", "valueFrom": {"secretKeyRef": {"name": "episode-tracking", "key": "token"}}},
                 {"name": "TRACKING_PROBE_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
@@ -51,6 +53,9 @@ def main():
     parser.add_argument("--node", required=True, help="Kubernetes node name from the funded worker receipt")
     parser.add_argument("--execute", action="store_true", help="Run in the funded worker window; default is server dry-run")
     args = parser.parse_args()
+    if len(args.node) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", label)
+                                      for label in args.node.split(".")):
+        parser.error("Supply a Kubernetes node name from the allocation receipt")
     identity = os.environ["NEBIUS_STAGING_OPERATOR_IDENTITY"]
     if identity in ("", "system:anonymous", "system:serviceaccount:training:episode-submit"):
         raise ValueError("Use the separate qualification operator")
@@ -90,7 +95,8 @@ def main():
         if (record["node"] != args.node or record["mode"] != "roundtrip"
                 or not re.fullmatch("[0-9a-f]{64}", record["artifact_sha256"])
                 or not re.fullmatch("[0-9a-f]{32}", record["run_id"])
-                or any(record[key] not in (401, 403) for key in ("anonymous_http","invalid_bearer_http"))):
+                or any(record[key] not in (401, 403) for key in ("anonymous_http", "invalid_bearer_http",
+                                                               "artifact_anonymous_http", "artifact_invalid_bearer_http"))):
             raise ValueError("Incomplete tracking round-trip receipt")
         receipt.update(job_uid=uid, pod_uid=pod["metadata"]["uid"], image_id=container["imageID"], tracking=record)
     print(json.dumps(dict(receipt, executed=args.execute)))
