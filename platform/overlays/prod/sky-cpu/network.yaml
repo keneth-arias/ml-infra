@@ -12,7 +12,10 @@ spec:
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: kube-system}
           podSelector:
-            matchLabels: {k8s-app: kube-dns}
+            matchLabels:
+              app.kubernetes.io/instance: coredns
+              app.kubernetes.io/name: coredns
+              k8s-app: coredns
       ports:
         - {port: 53, protocol: UDP}
         - {port: 53, protocol: TCP}

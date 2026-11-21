@@ -18,6 +18,25 @@ uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"
 
 The probe verifies the endpoint, CA, namespace and backend identity. It requires an image-policy denial for a changed digest and admission for the approved digest, both by server-side dry run. Repeat after policy bindings have propagated. Keep allocation closed on a mismatch. After a previous successful release, restore its reviewed policy and matching image reference to roll back, then rerun the probe. On a first deployment, keep submissions closed until the probe passes.
 
+### Check the managed DNS selector
+
+Use the production operator kubeconfig to compare the CPU policy with the CoreDNS Service and its pod template after reconciliation. This check also works before any DNS pods are Ready.
+
+```bash
+set -euo pipefail
+k=(kubectl --kubeconfig "$HOME/.kube/nebius-prod" --context prod-nebius)
+selector=$("${k[@]}" -n kube-system get service coredns -o jsonpath='{.spec.selector}')
+"${k[@]}" -n kube-system get deployment coredns -o jsonpath='{.spec.template.metadata.labels}' |
+  jq -e --argjson dns "$selector" '($dns|length) > 0 and contains($dns)'
+"${k[@]}" -n sky-cpu get networkpolicy dns-only -o json |
+  jq -e --argjson dns "$selector" '.spec.egress | length == 1 and .[0].to == [{
+    namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "kube-system"}},
+    podSelector: {matchLabels: $dns}
+  }] and (.[0].ports | sort_by(.protocol)) == [{port:53,protocol:"TCP"},{port:53,protocol:"UDP"}]'
+```
+
+The policy permits UDP and TCP port 53. During CPU qualification, resolve `kubernetes.default.svc.cluster.local` from the actual pilot pod and verify a connection to the Kubernetes API remains denied. Capture the Ready CoreDNS endpoints and both results before starting training.
+
 ## Credentials and plan
 
 On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebius.env`. The existing CLI profile is `ml-prod`. Run from this directory. Set `NEBIUS_SA_ID` and `NEBIUS_AUTHORIZED_KEY_ID` to the IDs supplied by IAM. The command wrapper points the provider at the protected private key in `~/.config/ml-infra/nebius-private.pem` and maps the workspace's owner-only S3 credential file into the subprocess environment. Override the paths with `NEBIUS_PRIVATE_KEY_FILE` or `ML_INFRA_ENV_FILE`. Keep these files on the runner.
