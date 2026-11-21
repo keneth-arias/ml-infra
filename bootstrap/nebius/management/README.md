@@ -28,7 +28,8 @@ In `/etc/sky-cpu/target.env`, set the independent cluster ID, CA digest and appr
 
 ```bash
 set -euo pipefail
-earliest=$(for record in "$sessions/backend-a/issued.json" "$sessions/native/issued.json"; do
+session_receipts=("$sessions/backend-a/issued.json" "$sessions/native/issued.json")
+earliest=$(for record in "${session_receipts[@]}"; do
   date -u -d "$(jq -er '.expires_at' "$record")" +%s || exit 1
 done | sort -n | head -1)
 stop_epoch=$((earliest - 180))
@@ -42,7 +43,9 @@ systemctl show "$unit.timer" -p NextElapseUSecRealtime
 sudo systemctl start sky-cpu-proxy.service
 ```
 
-Starting the proxy pulls in the protected backend and firewall. After renewing during an idle handoff, restart the backend, start the proxy explicitly, and verify the authenticated client reports the expected healthy endpoint and versions. Keep the earlier stop armed until its replacement has a verified firing time within all relevant credential expiries. Check an anonymous TLS request receives 401. Submit only after independent admission, funding and worker checks. At close, stop both application services, revoke each issued session and remove delivered kubeconfig copies as described below.
+Starting the proxy pulls in the protected backend and firewall. After renewing during an idle handoff, restart the backend, start the proxy explicitly, and verify the authenticated client reports the expected healthy endpoint and versions. To replace the timer after turnover, set `session_receipts` to every session that will still be active (for example `backend-b/issued.json` and the current native receipt). Keep the earlier stop armed until the replacement has a verified firing time within those expiries and the superseded credential has been revoked. Check an anonymous TLS request receives 401. Submit only after independent admission, funding and worker checks. At close, stop both application services, revoke each issued session and remove delivered kubeconfig copies as described below.
+
+From the bm operator account set `NEBIUS_CPU_SKY_URL=https://sky-cpu.localhost:46582` and `SKYPILOT_API_SERVER_ENDPOINT="$NEBIUS_CPU_SKY_URL"`. The management TLS certificate must cover the DNS name `sky-cpu.localhost`. Set `REQUESTS_CA_BUNDLE` to the independently trusted proxy CA and `NETRC` to the operator-owned mode-0600 netrc entry for that hostname. Include the hostname and loopback in `NO_PROXY`. Run `/opt/sky-cpu/bin/sky api info -o json` and verify both versions are 0.14.3, the returned URL matches and the server is healthy. Keep the netrc, keys and session files outside the repository.
 
 ## Rotate credentials for an attended CPU session
 
