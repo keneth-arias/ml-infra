@@ -253,6 +253,27 @@ class TopologyTests(unittest.TestCase):
             sc, plan = preview(stage)
             gpu_window.check_stage(plan, sc, ledger(), NOW)
 
+    def test_gpu_stage_accepts_provider_prefixed_ready_support_version(self):
+        sc, plan = preview("gpu")
+        change = plan["resource_changes"][0]["change"]
+        support = change["after"]
+        support["status"]["version"] = "v1.36.3-nebius-node.81"
+        support["labels_all"] = deepcopy(support["labels"])
+        support["template"]["boot_disk"]["block_size_bytes"] = 0
+        support["template"]["network_interfaces"][0]["security_groups"] = []
+        change["before"] = deepcopy(support)
+        gpu_window.check_stage(plan, sc, ledger(), NOW)
+
+        for version in (
+            "v1.37.3-nebius-node.81",
+            "v1.36.3",
+            "v1.36.3-nebius-node.81-extra",
+        ):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "strategy/version"):
+                support["status"]["version"] = version
+                change["before"] = deepcopy(support)
+                gpu_window.check_stage(plan, sc, ledger(), NOW)
+
     def test_policy_extra_node_and_stale_plan(self):
         for case in (
             "policy",

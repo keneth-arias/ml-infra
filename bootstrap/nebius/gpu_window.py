@@ -172,7 +172,7 @@ def check_support(change, scope):
         or status.get("outdated_node_count", 0)
         or status.get("strategy") != value["strategy"]
         or not re.fullmatch(
-            r"1\.36\.[0-9]+-nebius-node\.[0-9]+", status.get("version", "")
+            r"v?1\.36\.[0-9]+-nebius-node\.[0-9]+", status.get("version", "")
         )
     ):
         raise ValueError(
