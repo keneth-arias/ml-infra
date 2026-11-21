@@ -1,6 +1,9 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
-metadata: {name: sky-cpu-workload}
+metadata:
+  name: sky-cpu-workload
+  annotations:
+    airaware.training/qualification-revision: 9225211f574d405d95a8b6633c19d67e6ed058fc
 spec:
   failurePolicy: Fail
   matchConstraints:
