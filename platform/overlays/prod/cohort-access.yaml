@@ -65,6 +65,31 @@ spec:
     - expression: >-
         variables.container.image == (variables.usesGPU ? variables.trainerImage : variables.preflightImage)
       message: Require the approved image for this native Job role.
+    - expression: >-
+        has(object.spec.parallelism) && object.spec.parallelism == 1 &&
+        has(object.spec.completions) && object.spec.completions == 1 &&
+        has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 &&
+        (!has(object.spec.suspend) || !object.spec.suspend) &&
+        (!has(object.spec.completionMode) || object.spec.completionMode == 'NonIndexed') &&
+        (!has(object.spec.manualSelector) || !object.spec.manualSelector) &&
+        (!has(object.spec.managedBy) || object.spec.managedBy == 'kubernetes.io/job-controller') &&
+        !has(object.spec.podFailurePolicy) && !has(object.spec.successPolicy) &&
+        variables.pod.restartPolicy == 'Never'
+      message: Require a single active Job completion with zero retries.
+    - expression: >-
+        has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds > 0 &&
+        (!variables.usesGPU || object.spec.activeDeadlineSeconds <= 356400)
+      message: Require a positive Job deadline within the 99-hour maximum worker window.
+    - expression: >-
+        !has(variables.pod.resources) && has(variables.container.resources) &&
+        !has(variables.container.resources.claims) &&
+        has(variables.container.resources.requests) && has(variables.container.resources.limits) &&
+        (variables.usesGPU ?
+          (variables.container.resources.requests == {'cpu': '2', 'memory': '12G', 'nvidia.com/gpu': '1'} &&
+           variables.container.resources.limits == {'nvidia.com/gpu': '1'}) :
+          (variables.container.resources.requests == {'cpu': '1', 'memory': '256Mi'} &&
+           variables.container.resources.limits == {'cpu': '2', 'memory': '512Mi'}))
+      message: Require the approved CPU, memory and device resources for this Job role.
     # Native Jobs pass the full argv in command. Keep the interpreter and script
     # outside the variable CLI grammar so neither Python flags nor shell code run.
     - expression: >-
@@ -170,12 +195,6 @@ spec:
         (has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 600 &&
         (!has(variables.pod.tolerations) || size(variables.pod.tolerations) == 0))
       message: CPU preflight requires a deadline of at most 600 seconds and no tolerations.
-    - expression: >-
-        !variables.usesGPU || variables.pod.containers.all(c,
-        has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests && c.resources.requests['nvidia.com/gpu'] == '1' &&
-        has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits && c.resources.limits['nvidia.com/gpu'] == '1' &&
-        (!has(c.command) || !('--preflight' in c.command)) && (!has(c.args) || !('--preflight' in c.args)))
-      message: GPU jobs must request and limit exactly one GPU and run training or inference.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

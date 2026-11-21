@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -128,10 +129,33 @@ class ProductionFluxTests(unittest.TestCase):
             self.assertNotIn("--resume", cases["fresh-retry-" + mode][0]["command"])
             self.assertIn("--resume-checkpoint", cases["retry-" + mode][0]["command"])
             self.assertEqual(cases["inference-" + mode][0]["command"][2:4], ["infer", "quantile"])
+            for label in ("parallelism", "completions", "backoffLimit", "suspend", "cpu-request",
+                          "memory-request", "ephemeral-storage-request"):
+                self.assertIsNotNone(cases[label + "-" + mode][1])
+        for label in ("gpu-deadline-None", "gpu-deadline-356401", "preflight-memory-limit"):
+            self.assertIsNotNone(cases[label][1])
         for name, (_, denial) in cases.items():
             if denial:
                 with self.subTest(name=name):
                     self.assertTrue(any(denial in v["message"] for v in policy["spec"]["validations"]))
+
+    def test_exec_permission_probe_runs_while_held_and_released(self):
+        probe = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))
+        for released in (False, True):
+            seen = set()
+
+            def respond(argv, **kwargs):
+                namespace = argv[argv.index("--namespace") + 1]
+                verb, resource = argv[3:5]
+                if "--subresource=exec" in argv:
+                    seen.add((namespace, verb, resource))
+                allowed = released and (namespace, verb, resource) == ("training", "create", "jobs.batch")
+                return subprocess.CompletedProcess(argv, 0 if allowed else 1, "yes" if allowed else "no", "")
+
+            with patch.object(subprocess, "run", side_effect=respond), patch("builtins.print"):
+                probe["check_permissions"](["kubectl"], released)
+            self.assertEqual(seen, {(namespace, verb, "pods") for namespace in ("training", "episode-scoring")
+                                    for verb in ("get", "create")})
 
     def test_access_probe_uses_the_released_preflight_entrypoint(self):
         render = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))["render_job"]

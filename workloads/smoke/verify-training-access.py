@@ -27,6 +27,31 @@ def render_job(mode, trainer, preflight, *, paired=False, attempt=1, restore=Fal
     ]))
 
 
+def check_permissions(kube, released):
+    for namespace, verb, resource, allowed in (
+        ("training", "create", "jobs.batch", released),
+        ("training", "create", "pods", False),
+        ("training", "create", "pods/exec", False),
+        ("training", "get", "pods/exec", False),
+        ("training", "get", "secrets", False),
+        ("training", "create", "persistentvolumeclaims", False),
+        ("episode-scoring", "get", "secrets", False),
+        ("episode-scoring", "get", "persistentvolumeclaims", False),
+        ("episode-scoring", "get", "pods/log", False),
+        ("episode-scoring", "create", "pods/exec", False),
+        ("episode-scoring", "get", "pods/exec", False),
+        ("episode-scoring", "create", "jobs.batch", False),
+    ):
+        resource, _, subresource = resource.partition("/")
+        cmd = [*kube, "auth", "can-i", verb, resource, "--namespace", namespace]
+        if subresource:
+            cmd.append("--subresource=" + subresource)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if (result.returncode, result.stdout.strip()) != ((0, "yes") if allowed else (1, "no")):
+            raise SystemExit(f"Unexpected permission for {verb} {resource}/{subresource} in {namespace}")
+        print(namespace, verb, resource, subresource, result.stdout.strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trainer-image", help="Verified image from the signed release")
@@ -41,24 +66,7 @@ def main():
         require_image(images, "trainer", args.trainer_image)
         require_image(images, "preflight", args.preflight_image)
     kube = kubectl_client("training", "episode-submit", direct=True)
-    for namespace, verb, resource, allowed in (
-        ("training", "create", "jobs.batch", released),
-        ("training", "create", "pods", False),
-        ("training", "get", "secrets", False),
-        ("training", "create", "persistentvolumeclaims", False),
-        ("episode-scoring", "get", "secrets", False),
-        ("episode-scoring", "get", "persistentvolumeclaims", False),
-        ("episode-scoring", "get", "pods/log", False),
-        ("episode-scoring", "create", "jobs.batch", False),
-    ):
-        resource, _, subresource = resource.partition("/")
-        cmd = [*kube, "auth", "can-i", verb, resource, "--namespace", namespace]
-        if subresource:
-            cmd.append("--subresource=" + subresource)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        if (result.returncode, result.stdout.strip()) != ((0, "yes") if allowed else (1, "no")):
-            raise SystemExit(f"Unexpected permission for {verb} {resource}/{subresource} in {namespace}")
-        print(namespace, verb, resource, subresource, result.stdout.strip())
+    check_permissions(kube, released)
 
     def check(job, label, denial=None):
         result = subprocess.run(
@@ -99,6 +107,16 @@ def exercise_release(trainer_image, preflight_image, check):
         check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2), "fresh-retry-" + mode)
         check(render_job(mode, trainer_image, preflight_image, phase="infer", head="quantile"), "inference-" + mode)
 
+        for field, value in (("parallelism", 2), ("completions", 2), ("backoffLimit", 1), ("suspend", True)):
+            job = render_job(mode, trainer_image, preflight_image)
+            job["spec"][field] = value
+            check(job, f"{field}-{mode}", "single active Job completion")
+        for resource, value in (("cpu", "500m"), ("memory", "128Mi"), ("ephemeral-storage", "1Gi")):
+            job = render_job(mode, trainer_image, preflight_image)
+            requests = job["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"]
+            # Keep each mutant Kubernetes-valid so the admission policy is the observed denial.
+            requests[resource] = value
+            check(job, f"{resource}-request-{mode}", "approved CPU, memory and device resources")
         job = render_job(mode, trainer_image, preflight_image, paired=True, attempt=2, restore=True)
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         pin = command.index("--resume-checkpoint")
@@ -130,6 +148,16 @@ def exercise_release(trainer_image, preflight_image, check):
         job["spec"]["template"]["spec"]["containers"][0]["command"][1] = "/opt/ml-infra/stage_episode_inputs.py"
         check(job, "staging-entrypoint-" + mode, "episode entrypoint")
 
+    for deadline in (None, 356401):
+        job = render_job("job", trainer_image, preflight_image)
+        if deadline is None:
+            del job["spec"]["activeDeadlineSeconds"]
+        else:
+            job["spec"]["activeDeadlineSeconds"] = deadline
+        check(job, f"gpu-deadline-{deadline}", "positive Job deadline")
+    job = render_job("preflight", trainer_image, preflight_image)
+    job["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["memory"] = "1Gi"
+    check(job, "preflight-memory-limit", "approved CPU, memory and device resources")
     job = render_job("preflight", trainer_image, preflight_image)
     pod = job["spec"]["template"]["spec"]
     pod["containers"][0]["command"].pop()

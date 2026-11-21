@@ -199,6 +199,8 @@ def main():
         or (a.phase == "fit" and (a.schedule is None or a.step > a.schedule))
     ):
         p.error("Invalid step, batch or fit schedule")
+    if a.target == "prod-nebius" and a.format == "job" and a.deadline_seconds > 99 * 3600:
+        p.error("Native GPU Job deadline exceeds the maximum 99-hour worker window")
     if a.phase == "infer" and (a.resume or a.schedule is not None):
         p.error("Inference does not use a training schedule or resume")
     cmd = [

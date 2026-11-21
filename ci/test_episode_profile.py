@@ -175,7 +175,7 @@ class NebiusRenderTest(unittest.TestCase):
         args = [str(script), mode, "fit", "direct", "cloud-run", "--image",
                 "ghcr.io/example/trainer@sha256:" + "a" * 64, "--bundle-sha256",
                 "b" * 64, "--schedule", "4", "--step", "4", "--target", "prod-nebius"]
-        return json.loads(subprocess.check_output(["python3", *args, *options]))
+        return json.loads(subprocess.check_output(["python3", *args, *options], stderr=subprocess.PIPE))
 
     def test_cloud_fit_and_cpu_preflight(self):
         for mode in ("job", "preflight"):
@@ -201,6 +201,14 @@ class NebiusRenderTest(unittest.TestCase):
             self.assertEqual(job["spec"]["activeDeadlineSeconds"], expected)
             self.assertEqual(job["spec"]["template"]["spec"]["nodeSelector"], {"airaware.training/pool": "training-cpu"})
         self.assertEqual(self.render("job", "--deadline-seconds", "14400")["spec"]["activeDeadlineSeconds"], 14400)
+
+    def test_native_gpu_job_deadline_fits_maximum_worker_window(self):
+        maximum = 99 * 3600
+        self.assertEqual(self.render("job")["spec"]["activeDeadlineSeconds"], 4 * 3600)
+        self.assertEqual(self.render("job", "--deadline-seconds", str(maximum))["spec"]["activeDeadlineSeconds"], maximum)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.render("job", "--deadline-seconds", str(maximum + 1))
+        self.assertEqual(self.render("preflight", "--deadline-seconds", str(maximum + 1))["spec"]["activeDeadlineSeconds"], 600)
 
     def test_cloud_sky_context_and_deadline(self):
         task = self.render("sky")
