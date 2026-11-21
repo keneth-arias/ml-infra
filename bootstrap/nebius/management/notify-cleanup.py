@@ -73,11 +73,11 @@ def send(url, token, data):
         conn.close()
 
 
-def main(run):
+def main(run, *, host=None):
     event_id = os.environ.get("MONITOR_INVOCATION_ID") or uuid.uuid4().hex
     data = payload(
         run,
-        socket.gethostname(),
+        host or socket.gethostname(),
         event_id,
         os.environ.get("CLEANUP_ALERT_REHEARSAL") == "1",
     )

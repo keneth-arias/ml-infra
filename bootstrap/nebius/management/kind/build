@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Build the kind node's offline-capable backup image from a committed Terraform root.
+set -euo pipefail
+umask 077
+if [[ $# != 3 ]]; then echo "Usage: build COMMIT TOOLS_DIRECTORY NEW_OUTPUT_DIRECTORY" >&2; exit 2; fi
+repo=$(git rev-parse --show-toplevel)
+rev=$(git -C "$repo" rev-parse --verify --end-of-options "$1^{commit}")
+tools=$(realpath -e "$2")
+mkdir -m 700 -- "$3"
+out=$(realpath "$3")
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT
+git -C "$repo" archive "$rev:bootstrap/nebius" | tar -x -C "$scratch"
+docker buildx build --platform linux/amd64 --build-context "tools=$tools" \
+  --build-arg "BUILD_COMMIT=$rev" --provenance=false \
+  -f "$scratch/management/kind/Dockerfile" -t "local/nebius-cleanup:$rev" \
+  --output "type=oci,dest=$out/worker.tar" --metadata-file "$out/build.json" "$scratch"

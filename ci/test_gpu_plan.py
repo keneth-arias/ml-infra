@@ -506,6 +506,10 @@ class ReservationTests(unittest.TestCase):
             state_lineage="lineage",
             baseline_sha256="b" * 64,
             cleanup_accounts={"bm": "primary", "fw13": "backup"},
+            fw13_cronjob={"uid": "cron-uid", "spec_sha256": "c" * 64,
+                          "image": "local/backup@sha256:" + "1" * 64},
+            fw13_tfvars_sha256="d" * 64,
+            fw13_attest_until=utc(NOW + timedelta(minutes=3)),
         )
         grants = {
             host: dict(
@@ -564,6 +568,13 @@ class ReservationTests(unittest.TestCase):
                     account_id=sc["cleanup_accounts"][host],
                     provider_key_id=host + "-key",
                 )
+                if host == "fw13":
+                    data.update(timer="cronjob/expiry-fit", observed_at=utc(NOW), next_tick=utc(NOW + timedelta(minutes=1)),
+                                kind_cronjob=dict(sc["fw13_cronjob"], scheduled_at=utc(NOW), pod_uid="pod", job_uid="job"))
+                    if case == "old-host-timer":
+                        data["timer"] = "worker-expiry@fit.timer"
+                    if case == "swapped-cronjob":
+                        data["kind_cronjob"]["uid"] = "another"
                 if case == "timer" and host == "fw13":
                     data["run_id"] = "old"
                 if case == "old-code":
@@ -612,6 +623,8 @@ class ReservationTests(unittest.TestCase):
                 "timer",
                 "expired",
                 "stale",
+                "old-host-timer",
+                "swapped-cronjob",
                 "wrong-stage",
                 "old-code",
                 "unrehearsed",
@@ -649,6 +662,8 @@ class ReservationTests(unittest.TestCase):
                 "timer",
                 "expired",
                 "stale",
+                "old-host-timer",
+                "swapped-cronjob",
                 "wrong-stage",
                 "old-code",
                 "unrehearsed",
