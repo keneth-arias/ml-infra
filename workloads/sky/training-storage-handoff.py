@@ -66,7 +66,21 @@ def approved_binding(path, digest, cluster):
     item = training[0]
     if item["size_gib"] != 128 or item["csi_handle"] != item["provider_disk_id"]:
         raise ValueError("Training receipt does not bind the consolidated disk")
-    return item["pvc_uid"], item["pv_uid"], item["provider_disk_id"]
+    project = receipt["project_id"]
+    if not re.fullmatch(r"project-[a-z0-9]+", project):
+        raise ValueError("Training receipt must bind the workload project")
+    return project, (item["pvc_uid"], item["pv_uid"], item["provider_disk_id"])
+
+
+def provider_detached(disk, project, disk_id):
+    metadata, spec, status = disk["metadata"], disk["spec"], disk["status"]
+    if (metadata["id"] != disk_id or metadata["parent_id"] != project
+            or spec["type"] != "NETWORK_SSD" or int(spec["size_gibibytes"]) != 128):
+        raise ValueError("Nebius returned a disk different from the funded training disk")
+    # Nebius CLI JSON omits unset protobuf scalar fields.
+    return (status["state"] == "READY" and status.get("reconciling", False) is False
+            and not status.get("managed_by") and not status.get("read_write_attachment")
+            and not status.get("read_only_attachments"))
 
 
 def main():
@@ -81,9 +95,11 @@ def main():
                                   "jsonpath={.status.userInfo.username}"], text=True, timeout=12)
     if who != identity:
         raise ValueError("Unexpected managed Kubernetes storage operator identity")
-    binding = approved_binding(Path(os.environ["NEBIUS_STORAGE_BINDING_RECEIPT"]),
-                               os.environ["NEBIUS_STORAGE_BINDING_SHA256"],
-                               os.environ["NEBIUS_TRAINING_CLUSTER_ID"])
+    project, binding = approved_binding(Path(os.environ["NEBIUS_STORAGE_BINDING_RECEIPT"]),
+                                        os.environ["NEBIUS_STORAGE_BINDING_SHA256"],
+                                        os.environ["NEBIUS_TRAINING_CLUSTER_ID"])
+    disk_id = binding[2]
+    cloud_env = {**os.environ, "AI_AGENT": os.environ.get("AI_AGENT") or "codex"}
     deadline = monotonic() + 120
 
     def read(*args):
@@ -99,8 +115,17 @@ def main():
         if current != binding:
             raise ValueError("Training disk binding changed during storage handoff")
         if idle:
-            return
-        sleep(2)
+            remaining = deadline - monotonic()
+            if remaining < 1:
+                break
+            disk = json.loads(subprocess.check_output(
+                ["nebius", "-p", "ml-prod", "--no-browser", "--no-check-update", "--no-progress",
+                 "--format", "json", "compute", "disk", "get", disk_id],
+                env=cloud_env, timeout=min(remaining, 10),
+            ))
+            if provider_detached(disk, project, disk_id):
+                return
+        sleep(max(0, min(2, deadline - monotonic())))
     raise ValueError("Timed out waiting for training storage to detach")
 
 
