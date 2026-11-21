@@ -1,5 +1,26 @@
 # Worker allocation and cleanup
 
+
+## Rotate credentials for an attended CPU session
+
+The operator on bm can issue a bounded credential for `sky-cpu:sky-backend` or `sky-cpu:cpu-submit` with [cpu-session.py](cpu-session.py). Each session creates an immutable, empty Secret in `sky-cpu`. Kubernetes binds the requested API token to that marker's UID. Revoking one session leaves the ServiceAccount and its other sessions available. The expiry and API audiences in `issued.json` are the values returned by the managed API. [Kubernetes bound service account tokens](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-tokens)
+
+On the trusted operator host, use the production cluster ID and CA digest recorded independently from the Nebius management API. Keep the sessions in a private, operator-owned directory on temporary storage. The protected `kubeconfig` is the only file for delivery to its intended consumer. The marker and issuance receipts can be retained separately for audit.
+
+```bash
+umask 077
+sessions=$(mktemp -d "${XDG_RUNTIME_DIR:?}/cpu-pilot.XXXXXXXX")
+issuer=(python3 bootstrap/nebius/management/cpu-session.py
+  --operator-config "$HOME/.kube/nebius-prod" --endpoint public
+  --cluster-id "$NEBIUS_TRAINING_CLUSTER_ID" --ca-bundle-sha256 "$NEBIUS_CA_BUNDLE_SHA256")
+"${issuer[@]}" issue --account sky-backend --seconds 1800 "$sessions/backend-a"
+"${issuer[@]}" issue --account cpu-submit --seconds 1800 "$sessions/native"
+```
+
+Install the backend kubeconfig atomically with owner `sky-cpu` and mode 0600. Give the native configuration to the native client. Set an attended stop timer before starting the authenticated HTTPS proxy and isolated SkyPilot API. Allow for backend shutdown and restart before the earliest credential expiry. For renewal, issue a second session for the same account into a new directory, atomically replace the delivered file, and restart the backend during an idle handoff. Verify the effective Kubernetes identity, namespace, authenticated client/server version and scoped access with the new credential. A server-side dry run with the released image checks admission. Scheduling and image pulls require a funded worker.
+
+Revoke the old session with `"${issuer[@]}" revoke "$sessions/backend-a"`. The delete is conditional on the original marker UID. Verify that a protected transient copy of the previous credential receives an authentication rejection while the new session still works. At closure stop the attended services, revoke each remaining session, remove delivered credential copies and capture the inventory. If the issue process lost the marker-create response, `intent.json` identifies the marker to reconcile with the operator context. Verify its name, session label, UID and immutable empty contents before removing that orphan. A run interrupted after `marker.json` was written can be closed directly with `revoke`. An unattended token broker remains a separate deployment.
+
 ## Check the allocation
 
 Keep the reviewed source, backend key, provider lock and off-host ledger under operator control. Write the scope JSON in a private file. The guard expects these keys.
