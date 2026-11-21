@@ -4,6 +4,20 @@ This root manages a worker-free MK8s foundation and optionally a private, fixed-
 
 A new managed cluster starts with a private API. For public access, set the approved operator egress IPv4 /32 in private tfvars. Existing-cluster mode reads the supplied cluster and capped spot policy from their IDs. The CPU pilot and paired GPU experiment use the owned foundation. Review the state lineage and existing groups before changing any deployed configuration. Previously provisioned pools must be reconciled before adopting timed allocation windows.
 
+## CPU admission before worker allocation
+
+The standalone [CPU overlay](../../platform/overlays/prod/sky-cpu) targets Kubernetes 1.36. It supplies the Restricted `sky-cpu` namespace, workload and backend identities, quotas, image and Service admission policies, and DNS egress. The local development cluster keeps its own Flux configuration.
+
+Before reconciling this overlay in production, verify the signed release manifest for the rootless CPU worker, trainer and preflight against the independently approved signer. Match the rootless role and index to `skyImage` in the rendered policy. The policy annotation pins the commit containing its qualification receipt. CI checks that receipt against the rendered image literal and verifies its registry signature, including when a newer candidate is staged. Use the bootstrap identity to confirm the package-scoped, pull-only `sky-cpu-pull` exists in `sky-cpu`. Keep its credentials outside Git. The hosted image check verifies registry bytes with the CI identity. The first authorized worker must also cold-pull with its namespace credential.
+
+The existing objects are owned by the `nebius-pilot-bootstrap` field manager. Compare all rendered objects with its server-side dry run before handing them to Flux. Resolve field ownership during the reviewed handoff. After reconciliation and before allocating workers, use the scoped backend kubeconfig and the operator-pinned target environment. Pass the full rootless reference from the verified release.
+
+```sh
+uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"
+```
+
+The probe verifies the endpoint, CA, namespace and backend identity. It requires an image-policy denial for a changed digest and admission for the approved digest, both by server-side dry run. Repeat after policy bindings have propagated. Keep allocation closed on a mismatch. After a previous successful release, restore its reviewed policy and matching image reference to roll back, then rerun the probe. On a first deployment, keep submissions closed until the probe passes.
+
 ## Credentials and plan
 
 On this server, load the verified non-secret IDs with `. ~/.config/ml-infra/nebius.env`. The existing CLI profile is `ml-prod`. Run from this directory. Set `NEBIUS_SA_ID` and `NEBIUS_AUTHORIZED_KEY_ID` to the IDs supplied by IAM. The command wrapper points the provider at the protected private key in `~/.config/ml-infra/nebius-private.pem` and maps the workspace's owner-only S3 credential file into the subprocess environment. Override the paths with `NEBIUS_PRIVATE_KEY_FILE` or `ML_INFRA_ENV_FILE`. Keep these files on the runner.

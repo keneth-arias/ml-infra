@@ -6,6 +6,8 @@ on:
       - bootstrap/nebius/management/rootless/**
       - bootstrap/nebius/releases/**
       - ci/verify-rootless-image.py
+      - ci/cpu_admission_receipt.py
+      - platform/overlays/prod/sky-cpu/**
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,6 +21,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - name: Bind the rendered CPU policy to its qualification receipt
+        run: |
+          set -euo pipefail
+          uv run --with PyYAML==6.0.3 python ci/cpu_admission_receipt.py "$RUNNER_TEMP/admitted.json" > "$RUNNER_TEMP/admitted-revision"
       - name: Prepare verification tools
         run: |
           set -euo pipefail
@@ -39,18 +46,25 @@ jobs:
           export DOCKER_CONFIG
           DOCKER_CONFIG=$(mktemp -d)
           trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
-          receipt=bootstrap/nebius/releases/rootless-candidate.json
-          commit=$(jq -er .build_commit "$receipt")
-          digest=$(jq -er .index "$receipt")
-          [[ $commit =~ ^[0-9a-f]{40}$ && $digest =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(git rev-parse --verify "refs/tags/rootless-build-$commit^{commit}")" = "$commit"
-          git diff --exit-code "$commit" HEAD -- bootstrap/nebius/management/rootless \
-            ':(exclude)bootstrap/nebius/management/rootless/README.md'
-          image="ghcr.io/keneth-arias/ml-infra-sky-cpu@$digest"
           printf '%s' "$REGISTRY_READ_TOKEN" | skopeo login --authfile "$DOCKER_CONFIG/config.json" -u "$GITHUB_ACTOR" --password-stdin ghcr.io
           unset REGISTRY_READ_TOKEN
-          skopeo copy --all --preserve-digests --authfile "$DOCKER_CONFIG/config.json" \
-            "docker://$image" "oci:$RUNNER_TEMP/pulled:qualified"
-          python3 ci/verify-rootless-image.py "$receipt" "$RUNNER_TEMP/pulled"
-          "$RUNNER_TEMP/cosign" verify --key bootstrap/nebius/releases/qualification.pub \
-            --insecure-ignore-tlog=true -a role=rootless-cpu -a "build_commit=$commit" "$image"
+          verify_receipt() {
+            local receipt=$1 source_revision=$2 layout=$3 commit digest image
+            commit=$(jq -er .build_commit "$receipt")
+            digest=$(jq -er .index "$receipt")
+            [[ $commit =~ ^[0-9a-f]{40}$ && $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$(git rev-parse --verify "refs/tags/rootless-build-$commit^{commit}")" = "$commit"
+            git diff --exit-code "$commit" "$source_revision" -- bootstrap/nebius/management/rootless \
+              ':(exclude)bootstrap/nebius/management/rootless/README.md'
+            image="ghcr.io/keneth-arias/ml-infra-sky-cpu@$digest"
+            skopeo copy --all --preserve-digests --authfile "$DOCKER_CONFIG/config.json" \
+              "docker://$image" "oci:$layout:qualified"
+            python3 ci/verify-rootless-image.py "$receipt" "$layout"
+            "$RUNNER_TEMP/cosign" verify --key bootstrap/nebius/releases/qualification.pub \
+              --insecure-ignore-tlog=true -a role=rootless-cpu -a "build_commit=$commit" "$image"
+          }
+          current=bootstrap/nebius/releases/rootless-candidate.json
+          verify_receipt "$current" HEAD "$RUNNER_TEMP/candidate"
+          if ! cmp -s "$current" "$RUNNER_TEMP/admitted.json"; then
+            verify_receipt "$RUNNER_TEMP/admitted.json" "$(cat "$RUNNER_TEMP/admitted-revision")" "$RUNNER_TEMP/admitted"
+          fi
