@@ -10,6 +10,11 @@ https://sky-cpu.localhost:46582 {
 	basic_auth {
 		import /etc/sky-cpu/operators.caddy
 	}
+	handle /.well-known/nebius-target {
+		root * /run/sky-cpu-target
+		rewrite * /target.json
+		file_server
+	}
 	reverse_proxy 127.0.0.1:46581 {
 		header_up -Authorization
 		header_up -X-Auth-Request-User

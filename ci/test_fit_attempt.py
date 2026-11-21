@@ -304,11 +304,14 @@ class FitAttemptTests(unittest.TestCase):
 
     def test_launcher_submits_only_the_reserved_bytes_after_successful_preflight(self):
         # The real renderer, launcher, funding guard and SDK call signatures run.
-        # Stand-ins for the identity probe, two submitters and versioned storage
+        # Stand-ins for the identity and release checks, submitters and storage
         # keep the native and SkyPilot paths entirely local.
-        for mode in ("job", "sky"):
+        for mode in ("job", "sky", "preflight"):
             for outcome in (
                 "approved",
+                "early-release-denied",
+                "late-release-denied",
+                "release-promoted",
                 "preflight-failed",
                 "budget-stop",
                 "wrong-bucket-owner",
@@ -316,8 +319,10 @@ class FitAttemptTests(unittest.TestCase):
                 "dirty-retry",
                 "fresh-retry",
             ):
+                if mode == "preflight" and outcome not in ("approved", "early-release-denied", "preflight-failed"):
+                    continue
                 retry = outcome.endswith("-retry")
-                args, request, task = inputs(mode, *(("--attempt", "2") if retry else ()))
+                args, request, task = inputs("job" if mode == "preflight" else mode, *(("--attempt", "2") if retry else ()))
                 with self.subTest(mode=mode, outcome=outcome), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
 
@@ -329,17 +334,36 @@ class FitAttemptTests(unittest.TestCase):
                     script(
                         "python3",
                         f"""#!/bin/sh
-case "$1" in */production_target.py) exit 0;; esac
+set -eu
+case "$1" in
+  */production_target.py) exit 0;;
+  */production_release.py)
+    [ "$#" -eq 4 ] && [ "$2" = check-episode ] || exit 2
+    stage=early
+    if [ -f "$FIXTURE/preflight" ]; then stage=late; fi
+    cp "$3" "$FIXTURE/$stage-preflight"
+    cp "$4" "$FIXTURE/$stage-task"
+    [ "$OUTCOME" != "$stage-release-denied" ] || exit 1
+    if [ "$OUTCOME" = release-promoted ] && [ "$stage" = late ]; then
+      echo "{'d' * 64}"
+    else
+      echo "{'c' * 64}"
+    fi
+    exit 0;;
+  */fit_attempt.py) touch "$FIXTURE/funding-guard";;
+esac
 exec "{sys.executable}" "$@"
 """,
                     )
                     script(
                         "kubectl",
                         """#!/bin/bash
+set -eu
 case " $* " in
   *" wait "*) [[ $OUTCOME != preflight-failed ]];;
   *" logs "*) exit 0;;
-  *"pre.json"*) echo job/preflight;;
+  *"pre.json"*) while [[ $1 != -f ]]; do shift; done
+    cp "$2" "$FIXTURE/preflight" && echo job/preflight;;
   *"task.yaml"*) cp "${!#}" "$FIXTURE/submitted";;
   *) exit 1;;
 esac
@@ -436,6 +460,29 @@ def client(*a, **kw):
                     )
                     submitted = root / "submitted"
                     hold = json.loads((root / "ledger.json").read_bytes())["active_reservation"]
+                    if mode == "preflight":
+                        self.assertEqual(result.returncode == 0, outcome == "approved", result.stderr)
+                        self.assertEqual((root / "preflight").exists(), outcome != "early-release-denied")
+                        self.assertTrue((root / "early-preflight").is_file())
+                        self.assertFalse((root / "funding-guard").exists())
+                        self.assertFalse((root / "s3-access").exists())
+                        self.assertFalse(submitted.exists())
+                        continue
+                    for stage in ("early", "late"):
+                        if stage == "late" and outcome in ("early-release-denied", "preflight-failed"):
+                            self.assertFalse((root / "late-task").exists())
+                            continue
+                        self.assertEqual((root / f"{stage}-task").read_bytes(), task)
+                        checked_preflight = (root / f"{stage}-preflight").read_bytes()
+                        self.assertEqual(digest(checked_preflight), request["preflight_sha256"])
+                    if outcome == "early-release-denied":
+                        self.assertFalse((root / "preflight").exists())
+                    else:
+                        self.assertEqual(digest((root / "preflight").read_bytes()), request["preflight_sha256"])
+                    if outcome in ("early-release-denied", "late-release-denied", "release-promoted"):
+                        self.assertFalse((root / "funding-guard").exists())
+                        self.assertFalse((root / "s3-access").exists())
+                        self.assertEqual((root / "ledger.json").read_bytes(), raw)
                     if outcome in ("approved", "fresh-retry"):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(submitted.read_bytes(), task)
