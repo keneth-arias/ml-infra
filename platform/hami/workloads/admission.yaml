@@ -86,11 +86,10 @@ spec:
         && object.spec.activeDeadlineSeconds <= 14400
         && object.spec.restartPolicy in ['Never', 'OnFailure']
         && (!has(object.spec.volumes) || object.spec.volumes.all(v,
-        (has(v.emptyDir) && has(v.emptyDir.sizeLimit)) || has(v.configMap)
+        (has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit)) || has(v.configMap)
         || (has(v.persistentVolumeClaim) && has(v.persistentVolumeClaim.readOnly) && v.persistentVolumeClaim.readOnly)))
         && (!has(object.spec.resourceClaims) || size(object.spec.resourceClaims) == 0)
-        && (!has(object.spec.resources) || ((!has(object.spec.resources.requests) || size(object.spec.resources.requests) == 0)
-        && (!has(object.spec.resources.limits) || size(object.spec.resources.limits) == 0)))
+        && !has(object.spec.resources)
         && (!has(object.spec.ephemeralContainers) || size(object.spec.ephemeralContainers) == 0)
         && (!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0))
       message: Require the token-free workload account, a bounded lifetime and approved volume types.
@@ -107,7 +106,7 @@ spec:
         && c.resources.limits.all(k, k in variables.baseKeys || k in variables.shareKeys))
       message: Require digest-pinned images, bounded CPU, memory and storage, and the supported HAMi resource keys.
     - expression: >-
-        !variables.optedIn || (object.spec.containers.exists(c, 'hami.io/gpu' in c.resources.limits)
+        !variables.optedIn || (object.spec.containers.exists(c, has(c.resources) && has(dyn(c.resources).limits) && 'hami.io/gpu' in dyn(c.resources).limits)
         && variables.containers.all(c, !c.resources.limits.exists(k, k in variables.shareKeys)
         || ('hami.io/gpu' in c.resources.limits
         && quantity(string(c.resources.limits['hami.io/gpu'])).isGreaterThan(quantity('0'))
