@@ -3,7 +3,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -137,6 +137,45 @@ class NativePilotTest(unittest.TestCase):
                     with self.assertRaises(subprocess.TimeoutExpired):
                         PILOT["qualify"]([], self.obj, "worker", True)
                 self.assertEqual(sum(a[0] == "delete" for a, _ in calls), 1)
+
+    def test_ambiguous_delete_reconciles_uid_and_pods(self):
+        for current in ("", "replacement", UID):
+            error = subprocess.CalledProcessError(1, "delete")
+            events = [error, current]
+            if current == UID:
+                events.extend(["{}", ""])
+            events.extend(
+                [json.dumps({"items": [self.pod]}), "", json.dumps({"items": []})]
+            )
+            api = Mock(side_effect=events)
+            with (
+                self.subTest(current=current),
+                patch.dict(self.mod, {"kubectl": api}),
+                patch("time.sleep"),
+            ):
+                PILOT["remove"]([], self.name, UID)
+                deletes = [
+                    call for call in api.call_args_list if call.args[1] == "delete"
+                ]
+                self.assertEqual(len(deletes), 2 if current == UID else 1)
+                for call in deletes:
+                    self.assertEqual(call.kwargs["body"]["preconditions"], {"uid": UID})
+
+    def test_probe_and_cleanup_errors_survive(self):
+        api = Mock(side_effect=["dry", json.dumps({"metadata": {"uid": UID}})])
+        with (
+            patch.dict(
+                self.mod,
+                {
+                    "kubectl": api,
+                    "remove": Mock(side_effect=TimeoutError("still owned")),
+                },
+            ),
+            patch.object(subprocess, "run", side_effect=RuntimeError("probe failed")),
+            self.assertRaisesRegex(RuntimeError, "probe failed") as caught,
+        ):
+            PILOT["qualify"]([], self.obj, "worker", True)
+        self.assertIn("still owned", caught.exception.__notes__[0])
 
     def test_refuses_unrelated_pod_or_incomplete_runtime_proof(self):
         for node, owner, log in (

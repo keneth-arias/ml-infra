@@ -186,35 +186,49 @@ def remove(client, name, uid):
         "propagationPolicy": "Foreground",
         "preconditions": {"uid": uid},
     }
-    kubectl(
-        client,
-        "delete",
-        "--raw",
-        f"/apis/batch/v1/namespaces/{NS}/jobs/{name}",
-        "-f",
-        "-",
-        body=options,
-    )
     deadline = time.monotonic() + 60
+    last_error = None
+    delete_again = True
+    accepted = False
     while time.monotonic() < deadline:
-        current = kubectl(
-            client,
-            "get",
-            "job",
-            name,
-            "--ignore-not-found",
-            "-o",
-            "jsonpath={.metadata.uid}",
-        )
-        if current != uid and not owned_pods(client, uid):
-            return
+        if delete_again:
+            delete_again = False
+            try:
+                kubectl(
+                    client,
+                    "delete",
+                    "--raw",
+                    f"/apis/batch/v1/namespaces/{NS}/jobs/{name}",
+                    "-f",
+                    "-",
+                    body=options,
+                )
+                accepted = True
+            except (subprocess.SubprocessError, OSError) as error:
+                last_error = error
+        try:
+            current = kubectl(
+                client,
+                "get",
+                "job",
+                name,
+                "--ignore-not-found",
+                "-o",
+                "jsonpath={.metadata.uid}",
+            )
+            if current == uid:
+                delete_again = not accepted
+            elif not owned_pods(client, uid):
+                return
+        except (subprocess.SubprocessError, OSError) as error:
+            last_error = error
         time.sleep(2)
-    raise TimeoutError("Verify cleanup of the recorded Job and Pod UIDs")
+    raise TimeoutError(f"Reconcile Job {name} UID {uid} and its Pods") from last_error
 
 
 def qualify(client, manifest, node, execute):
     name = manifest["metadata"]["name"]
-    # Read the admitted shape before sending a persistent create. No apply/adoption on retry.
+    # Check admission before sending a persistent create. Each run creates its own Job.
     kubectl(
         client,
         "create",
@@ -250,8 +264,13 @@ def qualify(client, manifest, node, execute):
         (pod,) = owned_pods(client, uid)
         logs = kubectl(client, "logs", pod["metadata"]["name"], "-c", "probe")
         receipt = verify(pod, logs, name, uid, node)
-    finally:
-        remove(client, name, uid)
+    except BaseException as error:
+        try:
+            remove(client, name, uid)
+        except Exception as cleanup:
+            error.add_note(f"Cleanup of {name} UID {uid} also failed: {cleanup}")
+        raise
+    remove(client, name, uid)
     return dict(receipt, executed=True, cleanup="verified")
 
 
