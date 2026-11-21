@@ -90,6 +90,15 @@ class FencedReaderTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different run"):
                 READER["inspect"](root, 1 << 20, IDENTITY | {"logical_run": "different"}, CHECKPOINT)
 
+    def test_cumulative_inspection_is_bounded(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = make_generation(root, 100)
+            second = make_generation(root, 200)
+            bound = max(READER["safe_files"](path, 1 << 20) for path in (first, second))
+            with self.assertRaisesRegex(ValueError, "cumulative"):
+                READER["inspect"](root, bound, IDENTITY, CHECKPOINT)
+
     def test_corrupt_latest_preserves_in_bounds_previous_generation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

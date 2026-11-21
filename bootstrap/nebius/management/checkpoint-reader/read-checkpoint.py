@@ -4,13 +4,11 @@
 import argparse
 import json
 import os
-import os
 from pathlib import Path
 import re
 import stat
 import sys
 import tarfile
-from time import sleep
 from time import sleep
 
 ROOT = Path("/state")
@@ -83,6 +81,8 @@ def inspect(root, max_bytes, expected, checkpoint):
     if len(candidates) > MAX_GENERATIONS:
         raise ValueError("Too many generations for the approved qualification")
     sizes = {path: safe_files(path, max_bytes) for path in candidates}
+    if sum(sizes.values()) > max_bytes:
+        raise ValueError("Candidate generations exceed the approved cumulative read bound")
     verified = None
     for path in candidates:
         manifest = checkpoint.read_manifest(path)
@@ -169,13 +169,6 @@ def main():
     args = parser.parse_args()
     if not ROOT.is_mount() or not os.statvfs(ROOT).f_flag & os.ST_RDONLY:
         raise ValueError("Checkpoint mount is not read-only")
-    if args.wait_for_operator:
-        if args.max_bytes is not None or args.export_checkpoint is not None or args.identity is not None:
-            parser.error("Wait mode does not read any checkpoint")
-        sleep(600)
-        return
-    if args.max_bytes is None:
-        parser.error("Supply the independently funded byte limit")
     if args.wait_for_operator:
         if args.max_bytes is not None or args.export_checkpoint is not None or args.identity is not None:
             parser.error("Wait mode does not read any checkpoint")
