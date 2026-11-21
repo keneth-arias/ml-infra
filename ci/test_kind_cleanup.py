@@ -99,10 +99,12 @@ class KindBackup(unittest.TestCase):
             "node-group": {"cpu": {"metadata": {"parent_id": "cluster", "labels": group_labels},
                                    "status": {"state": "RUNNING", "ready_node_count": "1",
                                               "node_count": "1", "target_node_count": "1"}}},
-            "instance": {"vm": {"metadata": {"labels": labels}, "status": {"state": "RUNNING"},
+            "instance": {"vm": {"metadata": {"labels": labels}, "status": {"state": "RUNNING", "disk_attachments": [
+                                    {"name": "boot", "id": "disk", "is_managed": True}]},
                                 "spec": {"resources": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
                                          "boot_disk": {"managed_disk": {"name": "boot", "labels": labels}}}}},
-            "disk": {"disk": {"metadata": {"name": "boot", "labels": labels}}},
+            "disk": {"disk": {"metadata": {"name": "boot", "labels": labels},
+                              "status": {"state": "READY", "read_write_attachment": "vm"}}},
         }
         with patch.object(tick, "cloud_items", side_effect=lambda _, service, kind, parent: inventory[kind]):
             tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
@@ -123,11 +125,27 @@ class KindBackup(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
 
+            vm_status = inventory["instance"]["vm"]["status"]
+            disk_status = inventory["disk"]["disk"]["status"]
+            for status, changes in (
+                (vm_status, {"disk_attachments": []}),
+                (vm_status, {"disk_attachments": [{"name": "boot", "id": ""}]}),
+                (vm_status, {"disk_attachments": [{"name": "boot", "id": "wrong", "is_managed": True}]}),
+                (vm_status, {"reconciling": True}),
+                (disk_status, {"state": "BROKEN"}),
+                (disk_status, {"read_write_attachment": "wrong"}),
+                (disk_status, {"reconciling": True}),
+            ):
+                with self.subTest(changes=changes), patch.dict(status, changes), self.assertRaises(ValueError):
+                    tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu"})
+
             gpu_group = deepcopy(inventory["node-group"]["cpu"])
             gpu_vm = deepcopy(inventory["instance"]["vm"])
             gpu_disk = deepcopy(inventory["disk"]["disk"])
             gpu_vm["spec"]["resources"] = {"platform": "gpu-rtx6000-a", "preset": "1gpu-24vcpu-218gb"}
             gpu_vm["spec"]["boot_disk"]["managed_disk"]["name"] = gpu_disk["metadata"]["name"] = "gpu-boot"
+            gpu_vm["status"]["disk_attachments"] = [{"name": "gpu-boot", "id": "gpu-disk", "is_managed": True}]
+            gpu_disk["status"]["read_write_attachment"] = "gpu-vm"
             gpu_labels = {**labels, "mk8s-node-group-id": "gpu"}
             for record in (gpu_vm["metadata"], gpu_disk["metadata"], gpu_vm["spec"]["boot_disk"]["managed_disk"]):
                 record["labels"] = gpu_labels
@@ -138,6 +156,29 @@ class KindBackup(unittest.TestCase):
             tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu", "gpu"})
             with patch.dict(scope, support_instance_id="gpu-vm"), self.assertRaises(ValueError):
                 tick.verify_allocated_inventory("ml-prod", scope, baseline, {"cpu", "gpu"})
+
+    def test_locked_rehearsal_uses_group_inventory_after_allocate_commits(self):
+        import worker_cleanup
+        addr = 'nebius_mk8s_v1_node_group.training["cpu"]'
+        labels = {"airaware-run": "demo", "airaware-cutoff": "20261121110000"}
+        worker = dict(id="cpu", parent_id="cluster", labels=labels)
+        change = dict(address=addr, mode="managed", change=dict(actions=["delete"], before=worker))
+        plan = dict(format_version="1.2", complete=False, errored=False, applyable=True,
+                    resource_changes=[change])
+        live = {}
+
+        def terraform(action, *args, **kwargs):
+            if action == "plan":
+                # The funding apply finishes while the rehearsal waits for its lock.
+                live["cpu"] = {"metadata": worker}
+                return None
+            return json.dumps(plan).encode()
+
+        with patch.object(worker_cleanup, "terraform", side_effect=terraform), \
+             patch.object(worker_cleanup, "cloud_items", side_effect=lambda *args: dict(live)):
+            self.assertEqual(worker_cleanup.plan_release(
+                "rehearsal", profile="ml-prod", cluster_id="cluster", run_id="demo",
+                cutoff_label="20261121110000"), ({"cpu"}, set()))
 
     def test_cutoff_remains_effective_without_control_storage_after_proofs_expire(self):
         with TemporaryDirectory() as folder:

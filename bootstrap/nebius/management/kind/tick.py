@@ -174,6 +174,8 @@ def verify_allocated_inventory(profile, scope, baseline, groups):
     for group_id, vm_id, disk_id in worker_ids:
         group, vm, disk = group_rows[group_id], vm_rows[vm_id], disk_rows[disk_id]
         status = group["status"]
+        vm_status = vm["status"]
+        disk_status = disk["status"]
         metadata = group["metadata"]
         group_labels = metadata.get("labels", {})
         if (
@@ -183,19 +185,28 @@ def verify_allocated_inventory(profile, scope, baseline, groups):
             or status["state"] != "RUNNING"
             or status.get("reconciling")
             or status.get("outdated_node_count") not in (None, 0, "0")
-            or vm["status"]["state"] != "RUNNING"
+            or vm_status["state"] != "RUNNING"
+            or vm_status.get("reconciling")
+            or disk_status["state"] != "READY"
+            or disk_status.get("reconciling")
+            or disk_status.get("read_write_attachment") != vm_id
             or any(str(status.get(k)) != "1" for k in
                    ("node_count", "target_node_count", "ready_node_count"))
         ):
-            raise ValueError("Allocated group or VM is not owned and healthy")
+            raise ValueError("Allocated group, VM or boot disk is not owned and healthy")
         resources = vm["spec"]["resources"]
         expected = (("gpu-rtx6000-a", "1gpu-24vcpu-218gb") if stage == "gpu" and group_id == new_group
                     else ("cpu-d3", "4vcpu-16gb"))
         boot = vm["spec"]["boot_disk"]["managed_disk"]
         labels = {"mk8s-cluster-id": cluster, "mk8s-node-group-id": group_id}
+        attachments = [row for row in vm_status.get("disk_attachments", [])
+                       if row.get("name") == boot["name"]]
         if (
             (resources["platform"], resources["preset"]) != expected
             or boot["name"] != disk["metadata"]["name"]
+            or len(attachments) != 1
+            or attachments[0].get("id") != disk_id
+            or attachments[0].get("is_managed") is not True
             or any(row.get("labels", {}).get(k) != v for row in
                    (vm["metadata"], boot, disk["metadata"]) for k, v in labels.items())
         ):
