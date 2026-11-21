@@ -108,6 +108,35 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                 helper.submit(type("Args", (), {"phase": "submit-db"})(), approval, "a" * 64)
             create.assert_not_called()
 
+    def test_funding_read_cannot_outlive_the_last_create_deadline(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        start = datetime(2026, 10, 1, 20, 20, tzinfo=timezone.utc)
+        deadline = start + timedelta(seconds=30)
+        approval = {
+            "tenant_id": "tenant-test", "cluster_id": "mk8scluster-test",
+            "reservation_id": "test", "operator_username": "operator",
+            "acquisition_deadline": deadline.isoformat(),
+        }
+        args = type("Args", (), {"phase": "submit-db", "profile": "unused", "endpoint": "public",
+                                "ca_sha256": "a" * 64})()
+        with (patch.object(helper, "datetime", wraps=datetime) as clock,
+              patch.object(helper, "capture", return_value={}),
+              patch.object(helper, "kube", return_value=["kubectl"]),
+              patch.object(helper, "pinned_kubeconfig_ca"),
+              patch.object(helper, "query", return_value={"status": {"userInfo": {"username": "operator"}}}),
+              patch.object(helper, "disk_quota"), patch.object(helper, "funding") as funding,
+              patch.object(helper, "create_object") as create):
+            clock.now.return_value = start
+            def slow_funding(*_):
+                clock.now.return_value = deadline
+
+            funding.side_effect = slow_funding
+            with self.assertRaisesRegex(ValueError, "expired"):
+                helper.submit(args, approval, "a" * 64)
+            create.assert_not_called()
+
     def test_creation_uses_strict_create_only_and_pins_response_uid(self):
         spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
         helper = importlib.util.module_from_spec(spec)
@@ -180,7 +209,8 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                             csi=dict(driver=helper.DRIVER, fsType="ext4", volumeHandle=provider_id)))
         disk = dict(metadata=dict(id=provider_id, parent_id=state["project_id"],
                                   created_at="2026-10-01T20:20:01.300000Z"),
-                    spec=dict(type="NETWORK_SSD", size_gibibytes="16"), status={"state": "READY"})
+                    spec=dict(type="NETWORK_SSD", size_bytes="17179869184"),
+                    status={"state": "READY", "size_bytes": "17179869184"})
         live = state | dict(storage_classes=[cls], claims=[claim], volumes=[pv], disks=[disk], attachments=[])
         created = [{"key": helper.object_key(obj), "uid": obj["metadata"]["uid"]} for obj in (cls, claim)]
         with TemporaryDirectory() as directory:
@@ -188,10 +218,11 @@ class RetainedStorageReleaseTest(unittest.TestCase):
             submission.write_text(json.dumps(state | dict(phase="submit-db", approval_sha256=approval_hash,
                                   observed_at="2026-10-01T20:02:01Z", created_objects=created)))
             args = SimpleNamespace(phase="db", profile="ml-prod", submission=submission, db_repair=repair)
-            with (patch.object(helper, "observe", return_value=live), patch.object(helper, "disk_quota", return_value={}),
+            with (patch.object(helper, "observe", return_value=live), patch.object(helper, "disk_quota", return_value={}) as disk_quota,
                   patch.object(helper, "datetime", wraps=datetime) as clock):
                 clock.now.return_value = datetime.fromisoformat("2026-10-01T20:24:30Z")
                 result = helper.capture(args, approval, approval_hash)
+                disk_quota.assert_called_once_with(unittest.mock.ANY, approval["tenant_id"], 1, 16)
                 self.assertEqual(result["db_repair"], repair)
                 self.assertEqual(result["bindings"][0]["pvc_uid"], "db-uid")
                 for invalid in (None, repair | {"pvc_uid": "foreign"}, repair | {"extra": "foreign"},
@@ -233,7 +264,8 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                 }
                 training_disk = deepcopy(disk)
                 training_disk["metadata"].update(id="computedisk-training", created_at="2026-10-01T20:28:01Z")
-                training_disk["spec"]["size_gibibytes"] = "128"
+                training_disk["spec"]["size_bytes"] = "137438953472"
+                training_disk["status"]["size_bytes"] = "137438953472"
                 training_pv["spec"]["csi"]["volumeHandle"] = training_disk["metadata"]["id"]
                 live["claims"].append(training)
                 live["volumes"].append(training_pv)
