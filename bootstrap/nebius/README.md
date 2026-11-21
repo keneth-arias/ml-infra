@@ -8,12 +8,12 @@ A new managed cluster starts with a private API. For public access, set the appr
 
 The standalone [CPU overlay](../../platform/overlays/prod/sky-cpu) targets Kubernetes 1.36. It supplies the Restricted `sky-cpu` namespace, workload and backend identities, quotas, image and Service admission policies, and DNS egress. The local development cluster keeps its own Flux configuration.
 
-Before reconciling this overlay in production, verify the signed release manifest for the rootless CPU worker, trainer and preflight against the independently approved signer. Match the rootless role and index to `skyImage` in the rendered policy. The policy annotation pins the commit containing its qualification receipt. CI checks that receipt against the rendered image literal and verifies its registry signature, including when a newer candidate is staged. Use the bootstrap identity to confirm the package-scoped, pull-only `sky-cpu-pull` exists in `sky-cpu`. Keep its credentials outside Git. The hosted image check verifies registry bytes with the CI identity. The first authorized worker must also cold-pull with its namespace credential.
+Use the [production release signing and activation procedure](releases/production-images.md) on the management host. Before reconciling this overlay in production, verify the signed release manifest for the rootless CPU worker, trainer and preflight against the independently approved signer. Match the rootless role and index to `skyImage` in the rendered policy. The policy annotation pins the commit containing its qualification receipt. CI checks that receipt against the rendered image literal and verifies its registry signature, including when a newer candidate is staged. Use the bootstrap identity to confirm the package-scoped, pull-only `sky-cpu-pull` exists in `sky-cpu`. Keep its credentials outside Git. The hosted image check verifies registry bytes with the CI identity. The first authorized worker must also cold-pull with its namespace credential.
 
-The existing objects are owned by the `nebius-pilot-bootstrap` field manager. Compare all rendered objects with its server-side dry run before handing them to Flux. Resolve field ownership during the reviewed handoff. After reconciliation and before allocating workers, use the scoped backend kubeconfig and the operator-pinned target environment. Pass the full rootless reference from the verified release.
+The existing objects are owned by the `nebius-pilot-bootstrap` field manager. Compare all rendered objects with its server-side dry run before handing them to Flux. Resolve field ownership during the reviewed handoff. After reconciliation and before allocating workers, use the scoped backend kubeconfig and the operator-pinned target environment. The admission probe reads the rootless image from the signed production release.
 
 ```sh
-uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"
+uv run workloads/smoke/check-cpu-admission.py
 ```
 
 The probe verifies the endpoint, CA, namespace and backend identity. It requires an image-policy denial for a changed digest and admission for the approved digest, both by server-side dry run. Repeat after policy bindings have propagated. Keep allocation closed on a mismatch. After a previous successful release, restore its reviewed policy and matching image reference to roll back, then rerun the probe. On a first deployment, keep submissions closed until the probe passes.
@@ -120,18 +120,22 @@ For offline verification, use `terraform init -backend=false`, `terraform fmt -c
 
 ### Stage fit and inner-validation data on the CPU
 
-For the direct PM2.5 comparison, take the two role manifest digests from the approved AirAware cohort receipt. Render the staging Job with the immutable preflight image, fit digest, inner-validation digest, base weights digest and the name of a training-only inventory Secret.
+For the direct PM2.5 comparison, take the two role manifest digests from the approved AirAware cohort receipt. Submit staging under the separately approved staging operator. Set `NEBIUS_SUBMIT_KUBECONFIG` to its private kubeconfig with context `prod-nebius` and namespace `training`. Set `NEBIUS_STAGING_OPERATOR_IDENTITY` to the Kubernetes username independently approved for writing the training claim. Use the same managed cluster and CA pins as the other production entry points. The submitter verifies the signed preflight role and effective API identity before creating the Job.
 
 ```bash
-python3 workloads/sky/stage-episode.py --phase fit --head direct \
+set -eu
+preflight_image=$(python3 workloads/sky/production_release.py reference preflight)
+python3 workloads/sky/submit-stage-episode.py --phase fit --head direct \
   --image "$preflight_image" --weights-sha256 "$weights_sha256" \
   --bundle-sha256 "$fit_sha256" --validation-sha256 "$validation_sha256" \
-  --source-prefix "$approved_https_prefix" --inventory-secret "$training_inventory" > "$stage_job"
+  --source-prefix "$approved_https_prefix" --inventory-secret "$training_inventory"
 ```
+
+On success the command prints the Job name. If the create result is uncertain, the command identifies the exact Job to inspect before retrying. To inspect the Job locally, `workloads/sky/stage-episode.py` accepts the same arguments and prints the manifest. Keep its output private.
 
 Under that prefix the paired inventory’s `base`, `bundle` and `inner_validation` lists refer to exact versioned keys in `base/`, `trainer/fit/` and `trainer/inner_validation/`. Each list item supplies its relative `name`, byte `size`, `version_id` and a matching version-specific HTTPS `url`. Keep scorer objects and credentials in separately authorized storage. The stager checks the role manifest before fetching its data. It verifies both roles share the protocol, historical source, base and fit-derived threshold table before returning success. Collect the staging receipt from the Job logs within 24 hours of completion, before Kubernetes removes the Job. The receipt records cold copies or verified cache hits for each digest. A retry can reuse individually verified entries after a partial failure.
 
-For a local qualification, supply `--base`, `--bundle` and `--validation-bundle` to `runtime/stage_episode_inputs.py` along with the digest and cache arguments. The managed Job requires the prepared training claim and the immutable digest of the slim `input-staging` target or a preflight image derived from it. Its command runs `/usr/local/bin/python /opt/ml-infra/stage_episode_inputs.py`.
+For a local qualification, supply `--base`, `--bundle` and `--validation-bundle` to `runtime/stage_episode_inputs.py` along with the digest and cache arguments. The managed Job requires the prepared training claim and the preflight image from the signed release. The slim `input-staging` target can be qualified locally. Its command runs `/usr/local/bin/python /opt/ml-infra/stage_episode_inputs.py`.
 
 After an interrupted copy, retry the same digest. Under its exclusive lock, the stager reclaims that digest’s partial directory before checking available disk space. Leave lock files in place. To reclaim an abandoned revision or an older randomly named `.staging-*` directory, first stop all writers on the claim and verify the directory is an unpublished partial. If verification fails on a published digest, stop its consumers and writers, quarantine that exact directory outside the cache, and restage from the approved source.
 
@@ -151,7 +155,17 @@ This target qualifies input staging. The production three-image release still ne
 
 Build the trainer and slim CPU preflight with the paired OpenTSLM revision and the same infra sources. Supply both immutable image references and the three staged digests to `workloads/sky/launch-episode.sh --nebius job fit direct RUN_ID`. Select `--direct-objective normalized-mse` or `--direct-objective physical-mae`. Supply `--bundle-sha256` for fit, `--validation-sha256` for inner validation, `--cached-weights-sha256`, and both `--step` and `--schedule` set to the full epoch ceiling. Use distinct run IDs for the two arms and reuse the same ID, seed, image and digests when resuming an interrupted arm. The CPU preflight mounts the two cohorts and base read-only, verifies their identities and rejects a swapped role before GPU submission. Set `--gpu-limit-bytes` only to apply a measured cloud allocator budget.
 
-For the support-only qualification, render and submit the preflight Job on its own for the initial and retry attempts. Each uses `airaware.training/pool=training-cpu` and a Job deadline capped at 600 seconds, or the shorter supplied deadline. The GPU Job keeps the requested fit deadline. Wait for each preflight to complete and collect its `verified` log record, Job UID and Pod UID. Using the operator context, read the scheduled Pod’s `spec.nodeName`, verify the node’s CPU pool label and match its `spec.providerID` to the funded support instance. Attach both placement and input receipts before authorizing the GPU group. A preflight waiting for a matching CPU worker leaves the GPU window closed. The released-mode access probe checks placement, deadlines and swapped image roles when signed native training submission is enabled.
+For the support-only qualification, render and submit the preflight Job on its own for the initial and retry attempts. Each uses `airaware.training/pool=training-cpu` and a Job deadline capped at 600 seconds, or the shorter supplied deadline. The GPU Job keeps the requested fit deadline. Wait for each preflight to complete and collect its `verified` log record, Job UID and Pod UID. Using the operator context, read the scheduled Pod’s `spec.nodeName`, verify the node’s CPU pool label and match its `spec.providerID` to the funded support instance. Attach both placement and input receipts before authorizing the GPU group. A preflight waiting for a matching CPU worker leaves the GPU window closed. When native training submission has been enabled, run the released-mode admission probe with the scoped `training:episode-submit` identity. It verifies both image roles before contacting the API and checks placement, deadlines and swapped images by server-side dry run.
+
+```bash
+set -eu
+trainer_image=$(python3 workloads/sky/production_release.py reference trainer)
+preflight_image=$(python3 workloads/sky/production_release.py reference preflight)
+python3 workloads/smoke/verify-training-access.py \
+  --trainer-image "$trainer_image" --preflight-image "$preflight_image"
+```
+
+During the CPU pilot, omit both image options to check the native submission hold.
 
 The selected checkpoint and actual stopping step are recorded separately in `direct-result.json`. A retry uses `--resume --attempt N` and reuses the logical MLflow run. From the management host, set the authenticated tracking URI and run `uv run workloads/sky/direct-learning-curves.py --run CONTROL_MLFLOW_ID --run CANDIDATE_MLFLOW_ID --output NEW_DIRECTORY`. Supply both arms for each seed. The report checks the terminal receipt and checkpoint manifest before exporting the evaluation CSV and PNG. The cutoff and budget gate apply before launching either arm.
 

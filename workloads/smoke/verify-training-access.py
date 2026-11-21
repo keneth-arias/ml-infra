@@ -9,6 +9,7 @@ import sys
 
 SKY = Path(__file__).resolve().parents[1] / "sky"
 sys.path.insert(0, str(SKY))
+from production_release import release_images, require_image
 from production_target import kubectl_client
 
 
@@ -32,6 +33,10 @@ def main():
     if released and not all(ref and re.fullmatch(r"ghcr\.io/[^@\s]+@sha256:[0-9a-f]{64}", ref)
                             for ref in (args.trainer_image, args.preflight_image)):
         parser.error("Supply both signed registry digests to verify an activated release")
+    if released:
+        images = release_images()
+        require_image(images, "trainer", args.trainer_image)
+        require_image(images, "preflight", args.preflight_image)
     kube = kubectl_client("training", "episode-submit", direct=True)
     for namespace, verb, resource, allowed in (
         ("training", "create", "jobs.batch", released),

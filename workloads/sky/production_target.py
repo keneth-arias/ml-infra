@@ -11,6 +11,10 @@ from private_api import pinned_kubeconfig_ca
 
 
 def kubectl_client(namespace, account, *, direct=False):
+    return kubectl_client_for_identity(namespace, f"system:serviceaccount:{namespace}:{account}", direct=direct)
+
+
+def kubectl_client_for_identity(namespace, expected_identity, *, direct=False):
     file = Path(os.environ["NEBIUS_SUBMIT_KUBECONFIG"])
     if file.stat().st_mode & 0o077:
         raise ValueError("Submit kubeconfig must be private")
@@ -46,7 +50,7 @@ def kubectl_client(namespace, account, *, direct=False):
         ],
         text=True,
     )
-    if identity != f"system:serviceaccount:{namespace}:{account}":
+    if not expected_identity or identity != expected_identity:
         raise ValueError("Unexpected Kubernetes submitter")
     return [*cmd, "-n", namespace]
 

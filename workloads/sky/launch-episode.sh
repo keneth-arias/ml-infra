@@ -6,6 +6,7 @@ kube=(kubectl)
 base=$(dirname "$0")
 if [[ ${1:-} == --nebius ]]; then
   shift
+  umask 077
   target=prod-nebius
   export NEBIUS_SUBMIT_KUBECONFIG=${NEBIUS_SUBMIT_KUBECONFIG:-${NEBIUS_TRAINING_KUBECONFIG:?Set the scoped training submitter kubeconfig}}
   export KUBECONFIG="$NEBIUS_SUBMIT_KUBECONFIG"
@@ -28,13 +29,27 @@ if [[ "$target" == prod-nebius && "$mode" == sky ]]; then
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+render_task() {
+  python3 "$base/episode-profile.py" "$mode" "$@" --target "$target" > "$tmp/task.yaml"
+}
+check_release() {
+  python3 "$base/production_release.py" check-episode "$tmp/pre.json" "$tmp/task.yaml"
+}
 python3 "$base/episode-profile.py" preflight "$@" --target "$target" > "$tmp/pre.json"
+if [[ "$target" == prod-nebius ]]; then
+  render_task "$@"
+  approved_receipt=$(check_release)
+  if [[ ! "$approved_receipt" =~ ^[0-9a-f]{64}$ ]]; then
+    echo 'Production release verification returned an invalid receipt digest.' >&2
+    exit 1
+  fi
+fi
 receipt=$("${kube[@]}" create -f "$tmp/pre.json" -o name)
 "${kube[@]}" -n training wait --for=condition=complete --timeout=10m "$receipt" || {
   "${kube[@]}" -n training logs "$receipt"
   exit 1
 }
-python3 "$base/episode-profile.py" "$mode" "$@" --target "$target" > "$tmp/task.yaml"
+if [[ "$target" == dev-bm ]]; then render_task "$@"; fi
 if [[ "$mode" == sky ]]; then
   cluster_name=$3
   if [[ $target == prod-nebius ]]; then cluster_name="nebius-$3"; fi
@@ -48,6 +63,11 @@ if [[ "$mode" == sky ]]; then
   fi
 fi
 if [[ "$target" == prod-nebius ]]; then
+  current_receipt=$(check_release)
+  if [[ "$current_receipt" != "$approved_receipt" ]]; then
+    echo 'The approved production release changed during preflight. Run preflight again.' >&2
+    exit 1
+  fi
   python3 "$base/../../bootstrap/nebius/fit_attempt.py" reserve "$tmp/pre.json" "$tmp/task.yaml"
 fi
 if [[ "$mode" == job ]]; then

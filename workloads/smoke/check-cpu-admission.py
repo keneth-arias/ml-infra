@@ -10,13 +10,15 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import uuid
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "workloads/sky"))
-from production_target import kubectl_client
+from production_release import release_images, require_image
+from production_target import kubectl_client, require_sky
 
 
 def check(client, namespace, image, template):
@@ -46,10 +48,31 @@ def check(client, namespace, image, template):
     print(f"Backend admission verified for {image}")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("image", help="Rootless CPU reference from the independently verified release")
-    args = parser.parse_args()
+    parser.add_argument("image", nargs="?", help="Expected rootless CPU reference from the signed release")
+    parser.add_argument("--launch", action="store_true",
+                        help="Launch the verified rootless task on the funded CPU worker after probing admission")
+    args = parser.parse_args(argv)
+    images = release_images()
+    image = images["rootless-cpu"]
+    if args.image is not None:
+        require_image(images, "rootless-cpu", args.image)
     client = kubectl_client("sky-cpu", "sky-backend", direct=True)
-    task = ROOT / "bootstrap/nebius/management/rootless/qualification-task.yaml"
-    check(client, "sky-cpu", args.image, task.read_text())
+    template = (ROOT / "bootstrap/nebius/management/rootless/qualification-task.yaml").read_text()
+    check(client, "sky-cpu", image, template)
+    if args.launch:
+        require_sky("sky-cpu")
+        task = yaml.safe_load(template)
+        task["resources"]["image_id"] = "docker:" + image
+        cluster = "cpu-rootless-" + uuid.uuid4().hex[:12]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "task.yaml"
+            path.write_text(yaml.safe_dump(task))
+            require_image(release_images(), "rootless-cpu", image)
+            print(f"Launching the rootless pilot on {cluster}", flush=True)
+            subprocess.run(["sky", "launch", "-y", "-c", cluster, str(path)], check=True)
+
+
+if __name__ == "__main__":
+    main()

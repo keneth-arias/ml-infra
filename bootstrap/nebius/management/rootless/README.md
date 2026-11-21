@@ -32,14 +32,12 @@ kubernetes:
       ports: podip
 ```
 
-SkyPilot 0.14.3 reaches SSH through Kubernetes port-forward. The task declares no application ports. On the existing local worker use its isolated test namespace, selector and imported image. On the managed cluster the `sky-cpu-pull` Secret supplies pull-only registry credentials. Supply the qualified image by digest when rendering the task.
+SkyPilot 0.14.3 reaches SSH through Kubernetes port-forward. The task declares no application ports. On the existing local worker use its isolated test namespace, selector and imported image. On the managed cluster the `sky-cpu-pull` Secret supplies pull-only registry credentials. Promote the qualified index with its original digest.
 
 ```bash
 index=$(jq -er '."containerimage.digest"' "$output/build.json")
 build_commit=$(jq -er '."image.name" | capture(":git-(?<sha>[0-9a-f]{40})$").sha' "$output/build.json")
 repository=ghcr.io/keneth-arias/ml-infra-sky-cpu
-sed "s|REPLACE_WITH_QUALIFIED_DIGEST_REFERENCE|$repository@$index|" \
-  bootstrap/nebius/management/rootless/qualification-task.yaml > "$output/task.yaml"
 skopeo copy --all --preserve-digests --authfile "$private_authfile" \
   "oci-archive:$output/worker.tar" "docker://$repository:candidate-$build_commit"
 skopeo inspect --authfile "$private_authfile" --raw "docker://$repository@$index" | sha256sum
@@ -48,6 +46,17 @@ skopeo inspect --authfile "$private_authfile" --raw "docker://$repository@$index
 CI resolves the build commit through the remote tag `rootless-build-$build_commit`. Publish it from the source checkout with `git push origin "$build_commit:refs/tags/rootless-build-$build_commit"`. An existing tag must resolve to the same commit.
 
 Compare the registry index against the build receipt. Use separate pull-only credentials to fetch the index, platform manifest and blobs before pinning the approved digest in the production admission policy.
+
+### Launch the managed CPU qualification task
+
+During the funded window, use the authenticated management client, the verified backend session kubeconfig, the pinned managed target and the signed three-role production release. Put the qualified SkyPilot client on `PATH`. Run from the repository root.
+
+```bash
+export NEBIUS_SUBMIT_KUBECONFIG="$sessions/backend-a/kubeconfig"
+uv run workloads/smoke/check-cpu-admission.py --launch
+```
+
+The command resolves the signed `rootless-cpu` reference, checks the scoped backend identity, and exercises both server-side admission dry runs. It checks the authenticated SkyPilot endpoint and launches the checked-in task using the same image on `k8s/prod-nebius`. Use the printed cluster name for `sky logs`, the cancellation check and `sky down` within the qualification deadline. For a worker-free admission check, omit `--launch`.
 
 ### Refresh the worker lock
 
