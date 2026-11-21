@@ -1,38 +1,31 @@
 # ML training infrastructure
 
-Flux reconciles the bare-metal development cluster from `clusters/dev-bm`. Platform services run in `ml-platform`, and GPU workloads run in `training`. The host owns its GPU driver. The MicroK8s NVIDIA add-on configures the container runtime and advertises the two RTX 5070 Ti cards. Flux uses a read-only Git deploy key.
+Flux reconciles the bare-metal development cluster from `clusters/dev-bm`. Platform services run in `ml-platform`, and GPU workloads run in `training`. The host owns its GPU driver. The MicroK8s NVIDIA add-on configures the container runtime and advertises the available GPUs. Flux uses a read-only Git deploy key.
 
-## Run a local fine-tune
+## SkyPilot LoRA fixture
 
-Run these commands from the repo on `bm`. The checked-in SkyPilot task runs an offline LoRA fixture with two GPUs, logs its metrics and adapter in MLflow, and stores training state on the checkpoints PVC. Choose a distinct SkyPilot cluster name for a new experiment.
+The checked-in SkyPilot task runs an offline LoRA fixture with two GPUs, logs its metrics and adapter in MLflow, and stores training state on the checkpoints PVC. This example documents the development profile. Use the [Nebius setup](bootstrap/nebius/README.md) for new GPU workloads.
 
 ```bash
-export KUBECONFIG="$HOME/.config/ml-infra/kubeconfig"
+export KUBECONFIG=/path/to/training-kubeconfig
 sky launch -y -c my-lora workloads/sky/lora.yaml
 sky down -y my-lora
 ```
 
-The dedicated kubeconfig targets `dev-bm` and scopes submission to `training`. The task uses a pod without a Kubernetes API identity. Tear down the SkyPilot cluster after the run to release its GPU reservation. Use your usual MicroK8s admin context in a separate shell for platform operations.
+The dedicated kubeconfig targets the selected development cluster and scopes submission to `training`. The task uses a pod without a Kubernetes API identity. Tear down the SkyPilot cluster after the run to release its GPU reservation. Use your usual MicroK8s admin context in a separate shell for platform operations.
 
 ## Workstation access
 
-| Network | MLflow | SkyPilot dashboard |
-|---|---|---|
-| LAN (192.168.50.0/24) | http://192.168.50.172:5000/ | https://192.168.50.172:46580/dashboard/ |
-| Tailnet | http://bm.degu-fir.ts.net:5000/ | https://bm.degu-fir.ts.net:46580/dashboard/ |
+Use the MLflow and SkyPilot URLs configured for your deployment. Sign in to the SkyPilot dashboard with credentials issued by your cluster administrator. Keep credentials and workstation trust settings in your local configuration.
 
-MLflow permits tracking reads and writes from reachable LAN clients and permitted tailnet peers without a password. Tailnet traffic travels through Tailscale. SkyPilot requires HTTPS Basic authentication on both network routes. Use the shared operator login `skyadmin` only for people allowed to launch or cancel jobs. The owner can retrieve its password over SSH with `ssh kymai@bm.degu-fir.ts.net 'cat ~/.config/ml-infra/sky-lan-password'`. Cristopher can use the login `cristopher` on either route and retrieve its password with `ssh cristopher@bm.degu-fir.ts.net 'cat ~/.config/ml-infra/skypilot-password'`. These proxy logins share the same SkyPilot backend and job permissions. For direct LAN HTTPS, import the [public SkyPilot LAN CA certificate](bootstrap/microk8s/sky-lan-ca.crt) into the workstation trust store. The tailnet URL uses a publicly trusted certificate.
-
-The `ml-access.service` user unit runs Caddy with the checked-in `bootstrap/microk8s/Caddyfile` installed in `~/.config/ml-infra/`. Its private environment file `sky-proxy.env` supplies the bcrypt hashes as `SKY_PASSWORD_HASH` and `SKY_CRISTOPHER_PASSWORD_HASH`. Keep the server's DHCP reservation at 192.168.50.172 for these URLs. Tailscale Serve forwards TCP port 5000 to loopback port 5000 and terminates HTTPS on port 46580 at the authenticated loopback proxy on port 46680. Tailnet grants control which peers can connect.
-
-PostgreSQL stores run metadata and VersityGW stores proxied artifacts. The three PVCs are local to this node. The local checkpoints and encrypted tracking credentials need off-host backups for disaster recovery.
+PostgreSQL stores run metadata and VersityGW stores proxied artifacts. Back up the node-local volumes and keep a secure off-host copy of the credentials needed for recovery.
 
 ## Operate and recover
 
-- Check reconciliation with `flux get sources git` and `flux get kustomizations`. Check the GPU count with `kubectl get node bm -o json | jq '.status.allocatable["nvidia.com/gpu"]'`.
+- Check reconciliation with `flux get sources git` and `flux get kustomizations`. Check the GPU count with `kubectl get node "$NODE_NAME" -o json | jq '.status.allocatable["nvidia.com/gpu"]'`.
 - The manifests under `workloads/smoke/` are one-shot Jobs, outside Flux reconciliation. Submit the FSDP example with `kubectl create -f workloads/smoke/fsdp.yaml`. To resume on a fresh pod, give the Job a new name and append `--resume` to the trainer arguments while retaining its checkpoint path. Use a fresh path for each independent training run.
 - The dev images live in the node's MicroK8s containerd cache. After rebuilding a node, run `bootstrap/microk8s/import-images.sh`. Bump the local image tag whenever its contents change and use the updated tag in Jobs, SkyPilot and Flux manifests.
-- To restore GitOps on a replacement node, enable the MicroK8s RBAC and hostpath-storage add-ons and enable NVIDIA with `--gpu-operator-driver=host --gpu-operator-version=v25.10.0`. Apply the Flux bootstrap at `clusters/dev-bm/flux-system` with a new read-only Git deploy key. Restore the SOPS age identity from secure backup into the `sops-age` Secret in namespace `flux-system`, key `age.agekey`. The runner's protected copy is in `~/.config/ml-infra/dev.agekey`. Restore the PostgreSQL, object store and checkpoint volumes before starting their consumers.
+- To restore GitOps on a replacement node, enable the MicroK8s RBAC and hostpath-storage add-ons and enable NVIDIA with `--gpu-operator-driver=host --gpu-operator-version=v25.10.0`. Apply the Flux bootstrap at `clusters/dev-bm/flux-system` with a new read-only Git deploy key. Restore the SOPS age identity from secure backup into the `sops-age` Secret in namespace `flux-system`, key `age.agekey`. Restore the PostgreSQL, object store and checkpoint volumes before starting their consumers.
 - Local user services `mlflow-ui.service` and `skypilot-local.service` bind the two loopback endpoints. Their unit files are in `bootstrap/microk8s/`.
 
 ## Nebius
@@ -41,7 +34,7 @@ The [Terraform setup](bootstrap/nebius/README.md) uses the registered service-ac
 
 ## AirAware Qwen training
 
-The SkyPilot task selects the AirAware runtime by its private GHCR manifest digest. It contains the OpenTSLM trainer and the AirAware TimeF reader. Weights, datasets and checkpoints are mounted at run time. On a new cluster, configure registry access for the training namespace with a package-read credential and use the image reference in `workloads/sky/airaware.yaml`. On bm, MicroK8s also caches this digest locally.
+The SkyPilot task selects the AirAware runtime by its private GHCR manifest digest. It contains the OpenTSLM trainer and the AirAware TimeF reader. Weights, datasets and checkpoints are mounted at run time. On a new cluster, configure registry access for the training namespace with a package-read credential and use the image reference in `workloads/sky/airaware.yaml`. MicroK8s can also use a locally cached copy of this digest.
 
 To develop a new image, check out the desired OpenTSLM and AirAware commits, install CPython 3.13.13 with uv and run:
 
@@ -61,7 +54,7 @@ in `inputs`. Create the sibling `runs` directory before launching. The pod
 verifies the manifest and dataset using the pinned SDK before starting training.
 
 ```bash
-export KUBECONFIG="$HOME/.config/ml-infra/kubeconfig"
+export KUBECONFIG=/path/to/training-kubeconfig
 sky launch -y -c airaware-part workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env STOP_STEP=2
 sky down -y airaware-part
 sky launch -y -c airaware-resume workloads/sky/airaware.yaml --env RUN_ID=recovery-01 --env RESUME=1
@@ -101,7 +94,7 @@ export PYTHONPATH=/opt/forecast/src
   --output /checkpoints/heads-01-direct/validation-predictions.npz
 ```
 
-For the full model comparison, set `AIRAWARE_MODEL_STATE=1` when calling `workloads/sky/launch-airaware.sh`. The launcher renders the pinned task with the retained `training/airaware-model-state` claim at `/checkpoints`. Its 64 GiB budget is dedicated to new model states. Frozen inputs still come from the read-only mount on `airaware-checkpoints`. Use the same setting to resume or restore these runs. The default profile continues to find existing qualification checkpoints at their original paths. Both claims use local storage on bm.
+For the full model comparison, set `AIRAWARE_MODEL_STATE=1` when calling `workloads/sky/launch-airaware.sh`. The launcher renders the pinned task with the retained `training/airaware-model-state` claim at `/checkpoints`. Its 64 GiB budget is dedicated to new model states. Frozen inputs still come from the read-only mount on `airaware-checkpoints`. Use the same setting to resume or restore these runs. The default profile continues to find existing qualification checkpoints at their original paths. The development overlay uses local storage for both claims.
 
 To use the model volume with a separate `sky exec` task, render the same profile with `uv run --script workloads/sky/model-state.py workloads/sky/airaware.yaml`. The claim binds on first use. At global batch 16 each full state occupies about 6.52 GiB. Keeping two completed generations plus one in progress per head needs about 39.1 GiB for two heads. Monitor actual usage and free bytes before starting other writers.
 
@@ -135,7 +128,7 @@ The `first` process sees the first history channel and `both` sees both. It moun
 verified scaler in `windows/lima-pm25-pm10-v1/`, and a top-level `SHA256SUMS`
 covering the TimeF and input bundle manifests. Keep external releases outside these mounts.
 
-On bm the profile uses the locally imported digest recorded in `model-state.py`.
+The development profile uses the locally imported digest recorded in `model-state.py`.
 `runtime/Dockerfile.joint` extends the existing evaluation image. Its `forecast` build
 context is a Git archive of the trainer commit containing `src/opentslm` and
 `scripts/train_qwen_forecast.py`; pass that same SHA as `FORECAST_SOURCE_REVISION`.
@@ -153,7 +146,7 @@ input view, scaler, channels, forecast hours and window IDs.
 
 ### Lima candidate heads
 
-Build the image on bm with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of ml-infra, OpenTSLM and AirAware. For uncapped GPU allocation, use a fresh pod and an episode image built from ml-infra commit `7d9818c` or a descendant. Images that launch training through `gpu_worker.py` retain their 16 GB allocator cap. Import the image to MicroK8s with the same digest referenced in the profile. For new paired point controls, use the OpenTSLM revision recorded in [local qualification](tasks/lima-qualification.md). The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
+Build the image with `bootstrap/microk8s/build-episodes.sh "$forecast_checkout" "$airaware_checkout" IMAGE_TAG`. The qualified source revisions are OpenTSLM `9b5d61767b6b7db53a17980f111528ab3742fc77` and AirAware `82cf16edde8dbdeb7333256f6c1811be2db071dd`. The build takes committed revisions of ml-infra, OpenTSLM and AirAware. For uncapped GPU allocation, use a fresh pod and an episode image built from ml-infra commit `7d9818c` or a descendant. Images that launch training through `gpu_worker.py` retain their 16 GB allocator cap. Import the image to MicroK8s with the same digest referenced in the profile. For new paired point controls, use the OpenTSLM revision recorded in [local qualification](tasks/lima-qualification.md). The fit and inference roles each mount their own read-only bundle. Create a new run directory under `airaware/episodes/RUN` on the inputs claim and `episodes/RUN/{state,output}` on the model-state claim.
 
 Use `workloads/sky/prepare-episode-smoke.py` with the synthetic AirAware fixture, the phase directory and the base weights manifest to generate each qualification bundle. The inference phase also takes the chosen checkpoint manifest. Each call prints the immutable bundle digest. Both entry points use the same command and one GPU.
 
@@ -175,7 +168,7 @@ The [local qualification](tasks/lima-qualification.md) records the reference out
 
 ### Evaluate a retained concentration release
 
-AirAware's Campo de Marte test prepares a receipt for all scheduled origins, a history-only inference bundle and separate scoring observations. After the registered observation cutoff, run the staging command on bm with the published cohort and release digests. The two roots are the mounted roots of the `airaware-checkpoints` and `airaware-model-state` claims. Step 14838 and seed 27 belong to the frozen Lima comparison. Use the historical export batch size of 32 for the reserved concentration test.
+AirAware's Campo de Marte test prepares a receipt for all scheduled origins, a history-only inference bundle and separate scoring observations. After the registered observation cutoff, run the staging command with the published cohort and release digests. The two roots are the mounted roots of the `airaware-checkpoints` and `airaware-model-state` claims. Step 14838 and seed 27 belong to the frozen Lima comparison. Use the historical export batch size of 32 for the reserved concentration test.
 
 ```bash
 set -euo pipefail
