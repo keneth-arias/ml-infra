@@ -13,6 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1] / "bootstrap/nebius/management/checkpoint-reader"
 READER = runpy.run_path(str(ROOT / "read-checkpoint.py"))
 ARCHIVE = runpy.run_path(str(ROOT / "verify-checkpoint-archive.py"))
+POD_LABELS = runpy.run_path(str(ROOT / "verify-pod-labels.py"))
 
 IDENTITY = {
     "logical_run": "synthetic-control", "seed": 27, "head": "direct", "direct_objective": "normalized-mse",
@@ -58,6 +59,23 @@ def make_generation(root, step, *, terminal=False):
 
 
 class FencedReaderTest(unittest.TestCase):
+    def test_only_exact_managed_region_label_can_be_injected(self):
+        approved = {"app": "airaware-checkpoint-reader", "airaware.training/phase": "checkpoint-reader"}
+        region = {"topology.kubernetes.io/region": "eu-south1"}
+        verify = POD_LABELS["verify_labels"]
+        verify(approved, approved)
+        verify(approved, approved | region)
+        for observed in (
+            approved | {"topology.kubernetes.io/region": "eu-north1"},
+            approved | region | {"airaware.training/phase": "fit"},
+            approved | region | {"unexpected": "true"},
+            {"airaware.training/phase": "checkpoint-reader"} | region,
+        ):
+            with self.subTest(observed=observed), self.assertRaises(ValueError):
+                verify(approved, observed)
+        with self.assertRaises(ValueError):
+            verify(approved | region, approved | region)
+
     def test_exact_terminal_stream_and_host_digest(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
