@@ -21,10 +21,8 @@ AirAware supplies immutable split manifests, threshold versions, label eligibili
 
 ## Review before merging each PR
 
-At the end of every PR in this plan, review the full diff against the acceptance criteria. Give each of the following reviewers the same base and head commit IDs, the diff, and the test results. Ask each independently for concrete findings, their impact, and a way to verify a fix.
+Request one review from `model:codex/gpt-6.2-sol` for each PR. Provide the base and head commit IDs, the integrated diff, the acceptance criteria and the test results. Ask for concrete findings, their impact and how to verify each fix.
 
-- `model:opencode/zai-coding-plan/glm-5.3-flash`
-- `model:acpRegistry_qwen_code/qwen4-max-preview(openai)`
-- `model:codex/gpt-6.2-sol`
+Resolve applicable findings in the PR and record the rationale for any declined suggestion. Rerun the affected checks and record the final commit and results before merging.
 
-Collect all three responses before merging. Check each finding against the code, implement applicable fixes in the PR, and record how each finding was resolved. Give a brief reason for any suggestion declined. Review the resulting diff, rerun the affected checks, and record the final commit and results in the PR. If a requested review is unavailable, keep it pending and identify the missing reviewer.
+**Large PRs.** For changes spanning components or affecting production access, spending, recovery or model selection, review the integrated merge candidate. If a later change alters behavior, ask the same reviewer to check that change in context. Link the feedback, its resolution and the passing checks for the final head.
