@@ -280,7 +280,8 @@ class FitAttemptTests(unittest.TestCase):
     def test_bounded_recovery_uses_a_closed_control_and_a_different_vm(self):
         _, control, _ = inputs("job", "--step", "500", "--schedule", "500")
         _, first, _ = inputs("job", "--step", "500", "--schedule", "500", run_id="recovery-drill")
-        sc, funds, timing = fixture(first)
+        first_at = NOW - timedelta(minutes=10)
+        sc, funds, timing = fixture(first, first_at)
         baseline = {
             "attempt_id": "paired-qualification-27-control-1", "purpose": "qualification",
             "request": control, "max_attempts": 1, "vm": "worker",
@@ -292,9 +293,21 @@ class FitAttemptTests(unittest.TestCase):
         reference = {key: baseline[key] for key in ("attempt_id", "closeout_sha256")}
         reference["checkpoint"] = baseline["qualification_checkpoint"]
         funds["fit_approval"].update(purpose="qualification-recovery", recovery_reference=reference)
+        for attempt_patch, message in (
+            ({"request": {**control, "attempt": 7}}, "attempt ID"),
+            ({"request": {**control, "resume": True}}, "fresh"),
+            ({"request": {**control, "checkpoint": "200:" + "a" * 64}}, "fresh"),
+            ({"selected_fit_credit": False}, "zero selected"),
+            ({"selected_fit_credit": 0.0}, "zero selected"),
+        ):
+            with self.subTest(attempt_patch=attempt_patch):
+                modified = {**funds, "fit_attempts": [{**baseline, **attempt_patch}]}
+                store = Storage(modified)
+                with self.assertRaisesRegex(ValueError, message):
+                    reserve_fit(store, {**sc, "ledger_sha256": digest(store.raw)}, first, timing, "c", first_at)
         s3 = Storage(funds)
         sc["ledger_sha256"] = digest(s3.raw)
-        first_receipt = reserve_fit(s3, sc, first, timing, "c", NOW)
+        first_receipt = reserve_fit(s3, sc, first, timing, "c", first_at)
         self.assertEqual(first_receipt["attempt_id"], "paired-qualification-recovery-27-control-1")
         closed = json.loads(s3.raw)
         self.assertEqual(closed["fit_attempts"][0], baseline)
@@ -334,8 +347,20 @@ class FitAttemptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "close the interrupted GPU allocation"):
             consume(bad)
         bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["end"] = utc(first_at - timedelta(seconds=1))
+        with self.assertRaisesRegex(ValueError, "interval must cover"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["gpu_intervals"][0]["start"] = utc(first_at + timedelta(seconds=1))
+        with self.assertRaisesRegex(ValueError, "interval must cover"):
+            consume(bad)
+        bad = deepcopy(closed)
         bad["gpu_intervals"][0]["end"] = None
         with self.assertRaisesRegex(ValueError, "one approved live GPU"):
+            consume(bad)
+        bad = deepcopy(closed)
+        bad["fit_attempts"][-1]["request"]["attempt"] = 7
+        with self.assertRaisesRegex(ValueError, "attempt ID"):
             consume(bad)
         self.assertEqual(consume(closed)["attempt_id"], "paired-qualification-recovery-27-control-2")
 
