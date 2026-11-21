@@ -13,7 +13,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from matplotlib.figure import Figure
-from mlflow import MlflowClient
 
 
 def read_run(client, run_id, folder):
@@ -168,6 +167,8 @@ def main():
     args = p.parse_args()
     if args.output.exists():
         p.error("Choose a new report directory")
+    from mlflow import MlflowClient
+
     client = MlflowClient()
     with TemporaryDirectory(dir=args.output.parent) as scratch:
         work = Path(scratch)

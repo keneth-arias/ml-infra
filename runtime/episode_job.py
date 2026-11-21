@@ -244,6 +244,52 @@ def training_metrics(event):
     return metrics
 
 
+def verify_fit_result(artifact, args, spec, *, generation=None):
+    from opentslm.forecast_checkpoint import files, read_manifest
+
+    result = None
+    directory = generation or artifact.parent
+    if args.direct_objective and generation is None:
+        result = json.loads(artifact.read_bytes())
+        if (type(result["step"]) is not int or not 0 < result["step"] <= args.step or
+                type(result["best_step"]) is not int or not 0 < result["best_step"] <= result["step"] or
+                result["outcome"] != ("completed" if result["step"] == args.step else "early-stopped")):
+            raise ValueError("Unexpected terminal direct fit result")
+        directory = artifact.parent / f"step-{result['step']:08d}"
+        selected = artifact.parent / f"step-{result['best_step']:08d}"
+        best = read_manifest(selected)
+        if (not best or best["identity"] != result["identity"] or best["files"] != files(selected) or
+                sha256(selected / "manifest.json") != result["selected_manifest_sha256"] or
+                sha256(directory / "manifest.json") != result["latest_manifest_sha256"] or
+                (artifact.parent / "best").read_text().strip() != selected.name):
+            raise ValueError("Terminal direct checkpoint failed verification")
+        last = json.loads((directory / "training.pt.json").read_bytes())["evaluations"][-1]
+        if any(result.get(k) != v for k, v in last.items()):
+            raise ValueError("Terminal result differs from durable evaluation")
+
+    m = read_manifest(directory)
+    if (not m or not 0 < m["step"] <= args.step or m["files"] != files(directory)
+            or generation is None and result is None and m["step"] != args.step):
+        raise ValueError("Incomplete checkpoint")
+    identity = m["identity"]
+    expected = {
+        "data": spec["files"]["data.npz"],
+        "head": args.head,
+        "seed": args.seed,
+        "schedule": args.schedule,
+        "weights": spec["weights_manifest_sha256"],
+    }
+    if args.direct_objective:
+        expected.update(logical_run=args.run_id, direct_objective=args.direct_objective,
+                        input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
+        if result is not None and result["identity"] != identity:
+            raise ValueError("Terminal result carries another run identity")
+    if "point_control_of" in spec:
+        expected.update(matched_point="complete_epoch_v1", input_manifest_sha256=args.bundle_sha256)
+    if any(identity.get(k) != v for k, v in expected.items()):
+        raise ValueError("Published checkpoint does not match this fit")
+
+
 def main():
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -435,49 +481,7 @@ def main():
 
     def verify_result(generation=None):
         if args.phase == "fit":
-            from opentslm.forecast_checkpoint import files, read_manifest
-
-            result = None
-            directory = generation or artifact.parent
-            if args.direct_objective and generation is None:
-                result = json.loads(artifact.read_bytes())
-                if (type(result["step"]) is not int or not 0 < result["step"] <= args.step or
-                        type(result["best_step"]) is not int or not 0 < result["best_step"] <= result["step"] or
-                        result["outcome"] != ("completed" if result["step"] == args.step else "early-stopped")):
-                    raise ValueError("Unexpected terminal direct fit result")
-                directory = work / f"step-{result['step']:08d}"
-                selected = work / f"step-{result['best_step']:08d}"
-                best = read_manifest(selected)
-                if (not best or best["identity"] != result["identity"] or best["files"] != files(selected) or
-                        sha256(selected / "manifest.json") != result["selected_manifest_sha256"] or
-                        sha256(directory / "manifest.json") != result["latest_manifest_sha256"] or
-                        (work / "best").read_text().strip() != selected.name):
-                    raise ValueError("Terminal direct checkpoint failed verification")
-                last = json.loads((directory / "training.pt.json").read_bytes())["evaluations"][-1]
-                if any(result.get(k) != v for k, v in last.items()):
-                    raise ValueError("Terminal result differs from durable evaluation")
-
-            m = read_manifest(directory)
-            if (not m or not 0 < m["step"] <= args.step or m["files"] != files(directory)
-                    or generation is None and result is None and m["step"] != args.step):
-                raise ValueError("Incomplete checkpoint")
-            identity = m["identity"]
-            expected = {
-                "data": spec["files"]["data.npz"],
-                "head": args.head,
-                "seed": args.seed,
-                "schedule": args.schedule,
-                "weights": spec["weights_manifest_sha256"],
-            }
-            if args.direct_objective:
-                expected.update(logical_run=args.run_id, direct_objective=args.direct_objective,
-                                input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
-                if result is not None and result["identity"] != identity:
-                    raise ValueError("Terminal result carries another run identity")
-            if matched:
-                expected.update(matched_point="complete_epoch_v1", input_manifest_sha256=args.bundle_sha256)
-            if any(identity.get(k) != v for k, v in expected.items()):
-                raise ValueError("Published checkpoint does not match this fit")
+            verify_fit_result(artifact, args, spec, generation=generation)
         else:
             with (
                 np.load(data, allow_pickle=False) as inputs,
