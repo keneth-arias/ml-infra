@@ -18,6 +18,26 @@ uv run workloads/smoke/check-cpu-admission.py "$ROOTLESS_CPU_IMAGE"
 
 The probe verifies the endpoint, CA, namespace and backend identity. It requires an image-policy denial for a changed digest and admission for the approved digest, both by server-side dry run. Repeat after policy bindings have propagated. Keep allocation closed on a mismatch. After a previous successful release, restore its reviewed policy and matching image reference to roll back, then rerun the probe. On a first deployment, keep submissions closed until the probe passes.
 
+### Check the managed DNS selector
+
+Use the production operator kubeconfig to compare the CPU policy with the CoreDNS Service and its pod template after reconciliation. This check also works before any DNS pods are Ready.
+
+```bash
+set -euo pipefail
+k=(kubectl --kubeconfig "$HOME/.kube/nebius-prod" --context prod-nebius)
+selector=$("${k[@]}" -n kube-system get service coredns -o jsonpath='{.spec.selector}')
+"${k[@]}" -n kube-system get deployment coredns -o jsonpath='{.spec.template.metadata.labels}' |
+  jq -e --argjson dns "$selector" '. as $labels | ($dns|length) > 0
+    and all($dns | to_entries[]; $labels[.key] == .value)'
+"${k[@]}" -n sky-cpu get networkpolicy dns-only -o json |
+  jq -e --argjson dns "$selector" '.spec.egress | length == 1 and .[0].to == [{
+    namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "kube-system"}},
+    podSelector: {matchLabels: $dns}
+  }] and (.[0].ports | sort_by(.protocol)) == [{port:53,protocol:"TCP"},{port:53,protocol:"UDP"}]'
+```
+
+The policy permits UDP and TCP port 53. During CPU qualification, resolve `kubernetes.default.svc.cluster.local` from the actual pilot pod and verify a connection to the Kubernetes API remains denied. Capture the Ready CoreDNS endpoints and both results before starting training.
+
 ## Reconcile the production platform
 
 The [production root](../../clusters/prod-nebius/kustomization.yaml) includes CPU admission, the native training and scoring boundaries, and two 64 GiB RWO claims. Their storage class waits for the first consumer and retains its disks. Namespace, storage class and claim annotations protect them from Flux pruning. Deleting the Flux Kustomization leaves its managed objects in place. Price retained disk capacity until explicit cleanup.
