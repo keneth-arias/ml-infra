@@ -64,6 +64,26 @@ class BundleTest(unittest.TestCase):
             ):
                 self.fail("damaged artifact")
 
+    def test_verified_receipt_precedes_success_publication(self):
+        from unittest.mock import Mock
+        from episode_job import stage_attempt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / "direct-result.json"
+            success = Mock()
+            with self.assertRaisesRegex(ValueError, "damaged"):
+                with stage_attempt(root, "fit", {}, artifact, Mock(side_effect=ValueError("damaged")),
+                                   with_publisher=True) as (_, publish_verified):
+                    artifact.write_bytes(b"unverified")
+                    publish_verified()
+                    success()
+            success.assert_not_called()
+            self.assertFalse((root / ".fit.receipt.json").exists())
+            with stage_attempt(root, "fit", {}, artifact, lambda: None, with_publisher=True) as (_, publish_verified):
+                publish_verified()
+                self.assertTrue((root / ".fit.receipt.json").exists())
+
     def test_unlisted_weight_file_is_rejected(self):
         from episode_job import verify_base
 

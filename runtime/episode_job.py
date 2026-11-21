@@ -168,7 +168,7 @@ def bind_file(path, value):
 
 
 @contextmanager
-def stage_attempt(root, key, identity, artifact, verify):
+def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False):
     with (root / ".episode-worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         intent = root / f".{key}.intent.json"
@@ -181,12 +181,19 @@ def stage_attempt(root, key, identity, artifact, verify):
         reuse = artifact.exists()
         if receipt.exists() and not reuse:
             raise ValueError("Published artifact missing")
+        published = False
+
+        def publish_verified():
+            nonlocal published
+            if not published:
+                verify()
+                bind_file(receipt, sha256(artifact))
+                published = True
+
         if reuse:
-            verify()
-            bind_file(receipt, sha256(artifact))
-        yield reuse
-        verify()
-        bind_file(receipt, sha256(artifact))
+            publish_verified()
+        yield (reuse, publish_verified) if with_publisher else reuse
+        publish_verified()
 
 
 def verify_base(weights, expected):
@@ -506,7 +513,9 @@ def main():
     identity["image"] = os.environ["EPISODE_IMAGE"]
     experiment = mlflow.set_experiment("airaware-pm25")
     with ExitStack() as stack:
-        reused = stack.enter_context(stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result))
+        reused, publish_verified = stack.enter_context(
+            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
+        )
         tracking_id = None
         tags = {}
         existing = []
@@ -610,6 +619,7 @@ def main():
                 verify_result(generation)
                 acknowledge(control, "interrupted", generation)
                 raise SystemExit(75)
+        publish_verified()
         selected_dir = artifact.parent
         if args.direct_objective:
             terminal = json.loads(artifact.read_bytes())
@@ -622,8 +632,6 @@ def main():
                 mlflow.log_artifact(str(terminal_dir / name), "evaluations")
             mlflow.log_artifact(str(validation_root / "manifest.json"), "inputs/inner_validation")
             mlflow.log_param("recipe_sha256", terminal["identity"]["recipe_sha256"])
-        if control:
-            acknowledge(control, "complete", selected_dir)
         mlflow.log_metrics(
             {
                 "duration_seconds": time.monotonic() - started,
@@ -645,6 +653,8 @@ def main():
         )
         mlflow.log_artifact(str(artifact))
         mlflow.set_tag("artifact_sha256", sha256(artifact))
+    if control:
+        acknowledge(control, "complete", selected_dir)
 
 
 if __name__ == "__main__":
