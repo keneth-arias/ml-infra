@@ -298,6 +298,24 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
         raise ValueError("Published checkpoint does not match this fit")
 
 
+def verify_resume_checkpoint(work, artifact, args, spec):
+    from opentslm.forecast_checkpoint import read_manifest, recover
+
+    step_text, digest = args.resume_checkpoint.split(":")
+    step = int(step_text)
+    generation = work / f"step-{step:08d}"
+    manifest = read_manifest(generation)
+    if not manifest or sha256(generation / "manifest.json") != digest:
+        raise ValueError("Funded checkpoint manifest differs from the retained generation")
+    verify_fit_result(artifact, args, spec, generation=generation)
+    for path in work.glob("step-????????"):
+        other = read_manifest(path)
+        if other and other["identity"] != manifest["identity"]:
+            raise ValueError("Checkpoint directory contains multiple trainer identities")
+    if recover(work, manifest["identity"]) != (step, generation):
+        raise ValueError("The trainer would recover a different generation")
+
+
 def main():
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -311,6 +329,7 @@ def main():
     parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
     parser.add_argument("--validation-sha256")
     parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--attempt", type=int, default=1)
@@ -318,6 +337,9 @@ def main():
     parser.add_argument("--graceful-stop", action="store_true")
     parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
+    if args.resume_checkpoint is not None and (not args.direct_objective or not args.resume or
+            not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", args.resume_checkpoint)):
+        parser.error("Checkpoint pin requires a paired resume and STEP:SHA256")
     if args.stop_after_seconds is not None and (not args.graceful_stop or args.stop_after_seconds < 1):
         parser.error("A soft deadline requires cooperative fit shutdown")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", args.run_id) or args.step < 1:
@@ -520,7 +542,7 @@ def main():
         k: v
         for k, v in vars(args).items()
         if (v is not None or k not in ("direct_objective", "validation_sha256"))
-        and k not in ("attempt", "resume", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
+        and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]
     experiment = mlflow.set_experiment("airaware-pm25")
@@ -528,6 +550,8 @@ def main():
         reused, publish_verified = stack.enter_context(
             stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
         )
+        if args.resume_checkpoint and not reused:
+            verify_resume_checkpoint(work, artifact, args, spec)
         tracking_id = None
         tags = {}
         existing = []

@@ -141,6 +141,7 @@ def main():
     p.add_argument("--attempt", type=int, default=1)
     p.add_argument("--save-seconds", type=int, default=900)
     p.add_argument("--deadline-seconds", type=int, default=14400)
+    p.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     p.add_argument("--resume", action="store_true")
     p.add_argument(
         "--retained-release",
@@ -150,6 +151,9 @@ def main():
         "--staged-launch", type=Path, help="JSON emitted by stage_holdout.py"
     )
     a = p.parse_args()
+    if a.resume_checkpoint is not None and (not a.direct_objective or not a.resume or
+            not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", a.resume_checkpoint)):
+        p.error("Checkpoint pin requires a paired resume and STEP:SHA256")
     if bool(a.retained_release) != bool(a.staged_launch):
         p.error(
             "Retained inference requires the release digest and staged launch record"
@@ -220,6 +224,8 @@ def main():
         cmd.extend(["--schedule", str(a.schedule)])
     if a.resume:
         cmd.append("--resume")
+    if a.resume_checkpoint:
+        cmd.extend(["--resume-checkpoint", a.resume_checkpoint])
     env = {
         "MLFLOW_TRACKING_URI": "http://mlflow.ml-platform.svc:5000",
         "EPISODE_IMAGE": a.image,

@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 import re
 
 from worker_plan import (
@@ -295,7 +295,7 @@ def whole(value, low, high):
     return value
 
 
-def fit_projection(measurements, ledger):
+def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
     """Price two ceiling-length arms; only the operator's verified ledger can credit work."""
     seed = measurements["seed"]
     if seed not in (27, 28) or not re.fullmatch(
@@ -303,6 +303,7 @@ def fit_projection(measurements, ledger):
     ):
         raise ValueError("Expected a selected seed and measured benchmark digest")
     every = whole(measurements["checkpoint_every"], 1, EPOCH)
+    interval = whole(measurements.get("save_interval_seconds", 900), 0, 2**31 - 1)
     timing = {}
     for key in (
         "update_seconds",
@@ -346,17 +347,26 @@ def fit_projection(measurements, ledger):
         updates += remaining
         evaluations += checks
         # Price each periodic and best checkpoint and the final publication.
-        saves += (EPOCH // every - step // every) + checks + 1
+        saves += checks + 1
         starts += 1
         exports += 1
         if remaining:
             # One additional interruption up to the next durable save per arm.
             # Include setup, any evaluation in that stretch and the interrupted write.
-            replay = min(every, remaining)
+            # The direct trainer always checkpoints at the 500-update evaluation grid.
+            replay = min(1 if interval == 0 else max(500, every), remaining)
             replay_updates += replay
             replay_evals += sum(evaluated < e <= step + replay for e in EVALUATIONS)
             saves += 1
             starts += 1
+    # A wall-clock checkpoint resets the trainer timer after the save. Across
+    # sequential workers their total running time cannot exceed the window.
+    # At interval zero every completed update, including a replay, can save.
+    updates_with_replay = updates + replay_updates
+    timed_saves = updates_with_replay if not interval else min(
+        updates_with_replay, int((amount(window_seconds) / interval).to_integral_value(rounding=ROUND_CEILING))
+    )
+    saves += timed_saves
     eval_seconds = timing["fit_sample_pass_seconds"] + timing["validation_pass_seconds"]
     components = {
         "training": updates * timing["update_seconds"],
@@ -389,6 +399,8 @@ def fit_projection(measurements, ledger):
     return {
         "seed": seed,
         "updates": updates,
+        "timed_checkpoint_upper_bound": timed_saves,
+        "save_interval_seconds": interval,
         "evaluations": evaluations,
         "evaluation_window_visits": evaluations * 13328,
         "confirmation_window_visits": POST_WORK["confirmation_5163"] * 5163,

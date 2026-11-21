@@ -15,6 +15,35 @@ from worker_plan import amount, timestamp
 LEDGER_KEY = "prod/mk8s/release-control/ledger.json"
 
 
+def read_ledger(s3, scope):
+    current = s3.get_object(Bucket=scope["state_bucket"], Key=LEDGER_KEY)
+    if not isinstance(current.get("VersionId"), str) or current["VersionId"] in ("", "null"):
+        raise ValueError("Funding ledger requires a versioned object")
+    raw = current["Body"].read()
+    if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
+        raise ValueError("Live ledger changed since approval")
+    ledger = json.loads(raw)
+    return current, ledger
+
+
+def write_reservation(s3, bucket, current, ledger, reservation):
+    ledger.update(active_reservation=reservation, revision=uuid.uuid4().hex)
+    ledger.setdefault("attempt_ids", []).append(reservation["attempt_id"])
+    # Competing clients reading the same revision race on one S3 object. Only
+    # the successful writer may execute. On an ambiguous response leave the hold.
+    result = s3.put_object(
+        Bucket=bucket,
+        Key=LEDGER_KEY,
+        IfMatch=current["ETag"],
+        ContentType="application/json",
+        Body=json.dumps(ledger, sort_keys=True).encode(),
+    )
+    version = result.get("VersionId")
+    if not isinstance(version, str) or version in ("", "null"):
+        raise ValueError("Unversioned reservation write; inspect the off-host ledger before retry")
+    return ledger["revision"], version
+
+
 def reserve(s3, scope, plan_digest, state_serial, now):
     bucket = scope["state_bucket"]
     run, attempt, stage = (scope[k] for k in ("run_id", "attempt_id", "stage"))
@@ -25,13 +54,7 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         "[0-9a-f]{64}", scope["baseline_sha256"]
     ):
         raise ValueError("Invalid stage or inventory digest")
-    current = s3.get_object(Bucket=bucket, Key=LEDGER_KEY)
-    if not isinstance(current.get("VersionId"), str) or current["VersionId"] in ("", "null"):
-        raise ValueError("Funding ledger requires a versioned object")
-    raw = current["Body"].read()
-    if hashlib.sha256(raw).hexdigest() != scope["ledger_sha256"]:
-        raise ValueError("Live ledger changed since approval")
-    ledger = json.loads(raw)
+    current, ledger = read_ledger(s3, scope)
     gpu_hours = 0
     if stage == "pilot":
         pilot_bounds(scope, ledger, now)
@@ -172,24 +195,10 @@ def reserve(s3, scope, plan_digest, state_serial, now):
         ),
         "reserved_at": now.astimezone(timezone.utc).isoformat(),
     }
-    ledger.update(active_reservation=reservation, revision=uuid.uuid4().hex)
-    ledger.setdefault("attempt_ids", []).append(attempt)
-    # Competing clients reading the same revision race on one S3 object. Only
-    # the successful writer may execute. On an ambiguous response leave the hold.
-    result = s3.put_object(
-        Bucket=bucket,
-        Key=LEDGER_KEY,
-        IfMatch=current["ETag"],
-        ContentType="application/json",
-        Body=json.dumps(ledger, sort_keys=True).encode(),
-    )
-    version = result.get("VersionId")
-    if not isinstance(version, str) or version in ("", "null"):
-        raise ValueError("Unversioned reservation write; inspect the off-host ledger before retry")
-    return ledger["revision"], version
+    return write_reservation(s3, bucket, current, ledger, reservation)
 
 
-def reserve_remote(scope, plan_digest, state_serial):
+def with_ledger_client(action, *args):
     import boto3
     from botocore.config import Config
     from botocore.exceptions import BotoCoreError, ClientError
@@ -203,14 +212,12 @@ def reserve_remote(scope, plan_digest, state_serial):
         ),
     )
     try:
-        return reserve(
-            client,
-            scope,
-            plan_digest,
-            state_serial,
-            datetime.now(timezone.utc),
-        )
+        return action(client, *args, datetime.now(timezone.utc))
     except (BotoCoreError, ClientError) as exc:
         raise ValueError(
             "Reservation unsuccessful or ambiguous; inspect the off-host ledger before retry"
         ) from exc
+
+
+def reserve_remote(scope, plan_digest, state_serial):
+    return with_ledger_client(reserve, scope, plan_digest, state_serial)
