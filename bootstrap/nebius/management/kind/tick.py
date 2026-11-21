@@ -24,6 +24,8 @@ from worker_cleanup import cleanup_digest, plan_release, scope_digest, verify_in
 
 ENDPOINT = "https://storage.eu-south1.nebius.cloud"
 STATE_KEY = "prod/mk8s/terraform.tfstate"
+ALERT_CA = "/identity/otlp-ca.pem"
+ALERT_URL = "https://192.168.50.155:8443/insert/opentelemetry/v1/logs"
 
 
 def utc():
@@ -161,6 +163,9 @@ def run_tick(run, stage, rehearsal, *, scope_dir=Path("/scope")):
         bearer = Path("/identity/otlp-bearer").read_text().strip()
         if not bearer or any(c.isspace() for c in bearer):
             raise ValueError("Missing or invalid fw13 alert credential")
+        # An empty protobuf ExportLogsServiceRequest verifies ingestion and emits no log.
+        notifier = runpy.run_path(str(ROOT / "management/notify-cleanup.py"))
+        notifier["send"](ALERT_URL, bearer, b"", cafile=ALERT_CA)
         verify_inventory("ml-prod", scope["project_id"], scope["cluster_id"], baseline, before_stage=scope)
         groups, _ = plan_release(Path(scratch) / "rehearsal.tfplan", profile="ml-prod", cluster_id=scope["cluster_id"],
                                  run_id=run, cutoff_label=cutoff.strftime("%Y%m%d%H%M%S"))
@@ -271,8 +276,6 @@ if __name__ == "__main__":
         if not args.rehearsal:
             notify = runpy.run_path(str(ROOT / "management/notify-cleanup.py"))
             os.environ.update(MONITOR_INVOCATION_ID=os.environ["POD_UID"], CREDENTIALS_DIRECTORY="/identity",
-                              CLEANUP_OTLP_LOGS_URL="https://fw13pro.degu-fir.ts.net:8443/insert/opentelemetry/v1/logs")
-            if Path("/identity/otlp-ca.pem").exists():
-                os.environ["SSL_CERT_FILE"] = "/identity/otlp-ca.pem"
-            notify["main"](args.run, host="fw13")
+                              CLEANUP_OTLP_LOGS_URL=ALERT_URL)
+            notify["main"](args.run, host="fw13", cafile=ALERT_CA)
         sys.exit(1)
