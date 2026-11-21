@@ -11,6 +11,10 @@ from pathlib import Path
 import check as storage
 
 
+LEGACY_SPLIT_CLAIMS = {("tracking", "postgres"): 16, ("training", "airaware-checkpoints"): 64,
+                       ("training", "airaware-model-state"): 64}
+
+
 def load_pinned(path, expected_sha256):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
@@ -27,12 +31,19 @@ def verify_closeout(approval, original, baseline, live):
     if len(live["storage_classes"]) != 1 or any(row["status"].get("managed_by") for row in live["disks"]):
         raise ValueError("Expected the retained StorageClass and independently owned disks")
 
+    archived_layout = {
+        (binding["namespace"], binding["claim"]): binding["size_gib"] for binding in original["bindings"]
+    }
+    if (len(archived_layout) != len(original["bindings"])
+            or archived_layout not in (storage.CLAIMS, LEGACY_SPLIT_CLAIMS)):
+        raise ValueError("The archived acquisition has an unrecognized retained storage layout")
     # The final acquisition receipt already pins the first database binding.
     first = {key: original[key] for key in ("project_id", "cluster_id", "reservation_id")}
     first["phase"] = "db"
     first["bindings"] = [b for b in original["bindings"] if (b["namespace"], b["claim"]) == storage.DB]
     verified = storage.reconcile("all", approval, live["storage_classes"][0], live["claims"], live["volumes"],
-                                 live["disks"], live["attachments"], first)
+                                 live["disks"], live["attachments"], first,
+                                 layout=storage.CLAIMS if archived_layout == storage.CLAIMS else LEGACY_SPLIT_CLAIMS)
     if verified["baseline"] != baseline or verified["bindings"] != original["bindings"]:
         raise ValueError("Live retained volumes differ from the original binding identities")
     return verified | dict(phase="worker-release", namespace_uids=live["namespace_uids"])
@@ -62,7 +73,7 @@ def main():
         digest = storage.write(args.output, proof)
     except (KeyError, ValueError) as error:
         parser.exit(1, f"Retained storage closeout failed: {error}\n")
-    print(f"Verified the three original detached disks. Release receipt SHA-256 {digest}")
+    print(f"Verified {len(proof['bindings'])} original detached disks. Release receipt SHA-256 {digest}")
 
 
 if __name__ == "__main__":

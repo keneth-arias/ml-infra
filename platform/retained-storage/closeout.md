@@ -10,6 +10,6 @@ python3 platform/retained-storage/closeout.py \
   --ca-sha256 "$ca_sha256" --profile "$profile"
 ```
 
-The receipt ties all three disk IDs, PVC and PV identities, sizes and CSI handles back to the original acquisition. The check requires zero workers, zero attachments and exactly the three healthy detached disks in the workload project. Run it again with a fresh output path if provider detach is still reconciling. A missing or replaced disk requires investigation before closing the worker window.
+The receipt ties every disk ID, PVC and PV identity, size and CSI handle back to the original acquisition. The check requires zero workers, zero attachments and exactly the healthy detached disks in the workload project recorded in the approved receipt. The current layout retains two disks. An archived split-training acquisition retains its three original disks under its original approval. Run it again with a fresh output path if provider detach is still reconciling. A missing or replaced disk requires investigation before closing the worker window.
 
 Preserve the receipt alongside the independent backend-lock, billing and retention records. The retention owner tracks disk charges through the recorded disposal date. This check can run after the acquisition deadline.

@@ -23,8 +23,10 @@ from worker_plan import amount
 CLASS = "airaware-network-retain-immediate"
 DRIVER = "compute.csi.nebius.com"
 OWNER = "airaware.storage/reservation"
-CLAIMS = {("tracking", "postgres"): 16, ("training", "airaware-checkpoints"): 64,
-          ("training", "airaware-model-state"): 64}
+CLAIMS = {("tracking", "postgres"): 16, ("training", "airaware-checkpoints"): 128}
+GIB = 1024**3
+WORKER_BOOT_DISKS = 2
+WORKER_BOOT_GIB = 128
 DB = ("tracking", "postgres")
 
 
@@ -68,9 +70,9 @@ def require_class(storage_class):
         raise ValueError("The retained StorageClass differs from the reviewed manifest")
 
 
-def reconcile(phase, approval, storage_class, claims, volumes, disks, attachments, db_receipt=None):
+def reconcile(phase, approval, storage_class, claims, volumes, disks, attachments, db_receipt=None, *, layout=CLAIMS):
     require_class(storage_class)
-    expected = {DB: CLAIMS[DB]} if phase == "db" else CLAIMS
+    expected = {DB: layout[DB]} if phase == "db" else layout
     claims = indexed(claims, lambda row: (row["metadata"]["namespace"], row["metadata"]["name"]))
     volumes = indexed(volumes, lambda row: row["metadata"]["name"])
     disks = indexed(disks, lambda row: row["metadata"]["id"])
@@ -194,30 +196,45 @@ def submitted_uids(submission, objects, expected):
         raise ValueError("Live claim identities differ from the create-only submission receipt")
 
 
-def disk_quota(n, tenant, owned_disks):
+def quota_headroom(n, tenant, name, needed, owned, *, unit=None):
     quota = query([*n, "quotas", "quota-allowance", "get-by-name", "--parent-id", tenant,
-                   "--name", "compute.disk.count", "--region", "eu-south1", "--format", "json"])
-    limit = int(quota["spec"]["limit"])
-    status = quota["status"]
+                   "--name", name, "--region", "eu-south1", "--format", "json"])
+    spec, status = quota["spec"], quota["status"]
+    if unit is not None and status.get("unit") != unit:
+        raise ValueError(f"Unexpected unit for quota {name}")
+    limit = int(spec["limit"])
     if status.get("usage") is None and status.get("usage_state") != "USAGE_STATE_NOT_USED":
-        raise ValueError("Nebius did not report disk quota usage")
+        raise ValueError(f"Nebius did not report usage for quota {name}")
     usage = int(status.get("usage") or 0)
-    if limit < 5 or usage > limit - 5 + owned_disks:
-        raise ValueError("The combined topology requires five available tenant disks")
+    if usage < 0 or limit < needed or usage > limit - needed + owned:
+        raise ValueError(f"Insufficient eu-south1 quota for the combined topology: {name}")
     return limit
+
+
+def disk_quota(n, tenant, owned_disks, owned_gib):
+    count = len(CLAIMS) + WORKER_BOOT_DISKS
+    capacity = (sum(CLAIMS.values()) + WORKER_BOOT_DISKS * WORKER_BOOT_GIB) * GIB
+    return {
+        "disk_quota_limit": quota_headroom(n, tenant, "compute.disk.count", count, owned_disks),
+        "disk_quota_bytes_limit": quota_headroom(
+            n, tenant, "compute.disk.size.network-ssd", capacity, owned_gib * GIB, unit="byte",
+        ),
+    }
 
 
 def capture(args, approval, approval_hash):
     phase = {"submit-db": "preflight", "submit-training": "db-live"}.get(args.phase, args.phase)
     state = observe(args, approval)
     n = ["nebius", "-p", args.profile, "--no-browser"]
-    limit = disk_quota(n, approval["tenant_id"], len(state["disks"]))
+    disks = state["disks"]
+    owned_gib = sum(int(disk["spec"]["size_gibibytes"]) for disk in disks)
+    quota = disk_quota(n, approval["tenant_id"], len(disks), owned_gib)
     if state["namespace_uids"] != approval["namespace_uids"]:
         raise ValueError("The namespace identities differ from the approved scope")
     now = datetime.now(timezone.utc)
     receipt = {key: state[key] for key in ("namespace_uids", "project_id", "cluster_id")}
     receipt.update(observed_at=now.isoformat(), approval_sha256=approval_hash, phase=phase,
-                   disk_quota_limit=limit, priced_storage_bound_usd=str(funding(approval, now)))
+                   priced_storage_bound_usd=str(funding(approval, now)), **quota)
     classes, claims, volumes, disks, attachments = (state[key] for key in
         ("storage_classes", "claims", "volumes", "disks", "attachments"))
     if phase == "preflight":
@@ -317,8 +334,9 @@ def submit(args, approval, approval_hash):
             namespace = query([*k, "get", "namespace", key[1], "-o", "json"])["metadata"]
             if namespace["uid"] != approval["namespace_uids"][key[1]] or namespace.get("deletionTimestamp"):
                 raise ValueError("The approved claim namespace changed before submission")
-        owned = int(phase == "training") + sum(row["key"][0] == "PersistentVolumeClaim" for row in created)
-        disk_quota(["nebius", "-p", args.profile, "--no-browser"], approval["tenant_id"], owned)
+        # Only the training stage has an already-verified disk, the database.
+        owned = int(phase == "training")
+        disk_quota(["nebius", "-p", args.profile, "--no-browser"], approval["tenant_id"], owned, owned * CLAIMS[DB])
         now = datetime.now(timezone.utc)
         funding(approval, now)
         created.append(create_object(args, item, submission_seconds(approval, checked_at, now)))

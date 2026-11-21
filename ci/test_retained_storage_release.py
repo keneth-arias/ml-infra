@@ -1,6 +1,7 @@
 """Exercise operator-only retained storage renders and funded binding checks."""
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
@@ -38,14 +39,47 @@ class RetainedStorageReleaseTest(unittest.TestCase):
         self.assertEqual(storage_class["reclaimPolicy"], "Retain")
         self.assertEqual(storage_class["parameters"], {"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"})
         for objects, expected in ((database, {("tracking", "postgres", "16Gi")}),
-                                   (training, {("training", "airaware-checkpoints", "64Gi"),
-                                               ("training", "airaware-model-state", "64Gi")})):
+                                   (training, {("training", "airaware-checkpoints", "128Gi")})):
             claims = [o for o in objects if o["kind"] == "PersistentVolumeClaim"]
             self.assertEqual({(o["metadata"]["namespace"], o["metadata"]["name"],
                                o["spec"]["resources"]["requests"]["storage"]) for o in claims}, expected)
             self.assertTrue(all(o["spec"]["storageClassName"] == storage_class["metadata"]["name"]
                                 and o["metadata"]["annotations"]["kustomize.toolkit.fluxcd.io/prune"] == "disabled"
                                 for o in claims))
+
+    def test_quota_counts_two_retained_disks_and_two_worker_boots(self):
+        spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        gib = 1024**3
+        cases = [(4, 400, 0, 0, True), (3, 400, 0, 0, False), (4, 399, 0, 0, False),
+                 (4, 400, 1, 16, True), (4, 400, 2, 144, True)]
+        for count, size, owned, owned_gib, allowed in cases:
+            for extra_count, extra_gib in ((0, 0), (1, 0), (0, 1)):
+                with self.subTest(count=count, capacity=size, owned=owned, extra_count=extra_count, extra_gib=extra_gib):
+                    count_quota = {"spec": {"limit": count}, "status": {"usage": owned + extra_count}}
+                    size_quota = {"spec": {"limit": size * gib},
+                                  "status": {"usage": (owned_gib + extra_gib) * gib, "unit": "byte"}}
+                    with patch.object(helper, "query", side_effect=(count_quota, size_quota)) as query:
+                        if allowed and not (extra_count or extra_gib):
+                            evidence = helper.disk_quota([], "tenant-example", owned, owned_gib)
+                            self.assertIn("compute.disk.count", query.call_args_list[0].args[0])
+                            self.assertIn("compute.disk.size.network-ssd", query.call_args_list[1].args[0])
+                            self.assertEqual(evidence, {"disk_quota_limit": count, "disk_quota_bytes_limit": size * gib})
+                        else:
+                            with self.assertRaises(ValueError):
+                                helper.disk_quota([], "tenant-example", owned, owned_gib)
+
+        quota = {"spec": {"limit": 400 * gib}, "status": {"unit": "byte", "usage_state": "USAGE_STATE_NOT_USED"}}
+        with patch.object(helper, "query", return_value=quota):
+            self.assertEqual(helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 0, unit="byte"),
+                             400 * gib)
+            quota["status"]["usage_state"] = "UNKNOWN"
+            with self.assertRaisesRegex(ValueError, "did not report usage"):
+                helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 0, unit="byte")
+            quota["status"]["unit"] = "gib"
+            with self.assertRaisesRegex(ValueError, "Unexpected unit"):
+                helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 0, unit="byte")
 
     def test_submission_fails_closed_before_create(self):
         spec = importlib.util.spec_from_file_location("volumes", STORAGE / "check.py")
@@ -111,7 +145,7 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                         retain_until="2026-10-31T21:00:00Z", allocated_non_gpu_usd="20",
                         ssd_gib_hourly_usd="0.0001", tax_reserve_rate="0.22", retention_owner="test")
         now = datetime(2026, 10, 1, 20, 20, tzinfo=timezone.utc)
-        self.assertGreater(helper.funding(approval, now), 10)
+        self.assertEqual(helper.funding(approval, now), Decimal("12.666528"))
         with self.assertRaises(ValueError):
             helper.funding(approval | {"allocated_non_gpu_usd": "9"}, now)
         sc, = [o for o in render(STORAGE / "db") if o["kind"] == "StorageClass"]
@@ -134,6 +168,7 @@ class RetainedStorageReleaseTest(unittest.TestCase):
                               spec=dict(type="NETWORK_SSD", size_gibibytes=size.removesuffix("Gi")), status={"state": "READY"}))
         first = helper.reconcile("db", approval, sc, claims[:1], volumes[:1], disks[:1], [])
         all_claims = helper.reconcile("all", approval, sc, claims, volumes, disks, [], first)
+        self.assertEqual(len(all_claims["bindings"]), 2)
         self.assertEqual(all_claims["baseline"]["disk_ids"], [item["metadata"]["id"] for item in disks])
         self.assertNotIn("baseline", first)
         with self.assertRaises(ValueError):
