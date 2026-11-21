@@ -9,7 +9,7 @@ import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("commit", help="Reviewed, published 40-hex infrastructure Git commit")
-p.add_argument("--suspend", action="store_true", help="Stage both objects without fetching or reconciling")
+p.add_argument("--fetch", action="store_true", help="Fetch the commit while reconciliation stays suspended")
 a = p.parse_args()
 if not re.fullmatch("[0-9a-f]{40}", a.commit):
     p.error("Supply the full immutable infrastructure revision")
@@ -23,13 +23,13 @@ meta = {"name": "nebius-platform", "namespace": "flux-system"}
 source = {
     "apiVersion": "source.toolkit.fluxcd.io/v1",
     "kind": "GitRepository",
-    "metadata": meta,
+    "metadata": {**meta, "name": "platform-" + a.commit},
     "spec": {
         "url": "ssh://git@github.com/keneth-arias/ml-infra.git",
         "interval": "10m",
         "ref": {"commit": a.commit},
         "secretRef": {"name": "nebius-git-read"},
-        "suspend": a.suspend,
+        "suspend": not a.fetch,
     },
 }
 reconcile = {
@@ -37,13 +37,14 @@ reconcile = {
     "kind": "Kustomization",
     "metadata": meta,
     "spec": {
-        "sourceRef": {"kind": "GitRepository", "name": meta["name"]},
+        "sourceRef": {"kind": "GitRepository", "name": source["metadata"]["name"]},
         "path": "./" + path,
         "interval": "5m",
         "timeout": "5m",
-        "prune": True,
+        "serviceAccountName": "nebius-platform",
+        "prune": False,
         "deletionPolicy": "Orphan",
-        "suspend": a.suspend,
+        "suspend": True,
         "wait": False,
         "decryption": {"provider": "sops", "secretRef": {"name": "nebius-sops-age"}},
     },

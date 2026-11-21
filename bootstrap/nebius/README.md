@@ -40,22 +40,47 @@ The policy permits UDP and TCP port 53. During CPU qualification, resolve `kuber
 
 ## Reconcile the production platform
 
-The [production root](../../clusters/prod-nebius/kustomization.yaml) includes CPU admission, the native training and scoring boundaries, and two 64 GiB RWO claims. Their storage class waits for the first consumer and retains its disks. Namespace, storage class and claim annotations protect them from Flux pruning. Deleting the Flux Kustomization leaves its managed objects in place. Price retained disk capacity until explicit cleanup.
+The [production root](../../clusters/prod-nebius/kustomization.yaml) manages the existing `sky-cpu` LimitRange `cpu`, ResourceQuota `pilot` and NetworkPolicy `dns-only`. The [operator overlay](../../platform/overlays/prod) owns namespaces, admission, RBAC and retained storage. The pilot grants no training submit or drain role. Its admission policy also holds native training submissions closed until a separately reviewed release binds approved images and entry points to their roles. Check for pre-existing bindings to either account, revoke any submit or exec grant after verifying its owner, and confirm the effective denials before issuing credentials. Applying a bundle does not remove an older out-of-band binding. Run `workloads/smoke/verify-training-access.py` with the scoped native identity to check the CPU-phase hold. Keep training inventory and tracking credentials outside the pilot.
 
-Install the seven source and kustomize CRDs from the reviewed Flux 2.10.0 component manifest and wait for `Established`. Use the separate `flux-system/nebius-git-read` SSH deploy key with pinned GitHub host keys and `flux-system/nebius-sops-age` decryption identity. Once the first worker is Ready, install the source and kustomize controllers on the CPU pool using reviewed image digests.
+Install the seven CRDs from the checked-in Flux 2.10.0 component manifest, then wait for `Established`. Stage the Restricted `flux-system` namespace, the read-only repository key `nebius-git-read` with pinned GitHub host keys, and the separate SOPS identity `nebius-sops-age`. The [production controller renderer](management/flux/render-controllers.py) selects two digest-pinned controllers from that exact manifest. They watch `flux-system` and run on the CPU pool. The kustomize controller impersonates `flux-system/nebius-platform`. Its [target Role](management/flux/access.yaml) permits get and patch on the three named objects. Bootstrap each object first. The controller installer runs separately from the Git source.
 
-From a trusted clone, verify the intended deployment commit was merged, then stage the reconciliation objects with the production operator kubeconfig. The renderer checks that the commit contains the production root.
+Before handoff, save the intended specs of those three existing objects from the verified bootstrap revision and record their UIDs. Review the bootstrap manager’s server-side diff. Verify the signed three-role image release, package pull credentials, scoped backend admission and DNS selector. Review ownership conflicts individually. The operator overlay also contains two 64 GiB delayed-binding claims with a Retain storage class. Stage them only in their funded window. They and their namespaces stay under operator ownership.
+
+From a trusted clone on the target-pinned operator host, verify that the desired commit is merged. Stage both source objects suspended. After the CPU worker is Ready, apply the reviewed controller render, wait for both Deployments to become Available, then enable fetching alone. The source name includes the complete commit, so a previous fetch cannot serve as the new revision.
 
 ```bash
 set -euo pipefail
 git fetch origin main
 git merge-base --is-ancestor "$DEPLOYMENT_COMMIT" origin/main
 k=(kubectl --kubeconfig "$HOME/.kube/nebius-prod" --context prod-nebius)
-python3 bootstrap/nebius/management/render-flux-source.py --suspend "$DEPLOYMENT_COMMIT" |
-  "${k[@]}" apply --server-side --dry-run=server --field-manager=nebius-flux-bootstrap -f -
+set -a
+. /etc/sky-cpu/target.env
+set +a
+python3 workloads/sky/private_api.py "${k[@]}"
+render=bootstrap/nebius/management/render-flux-source.py
+python3 "$render" "$DEPLOYMENT_COMMIT" | "${k[@]}" apply --server-side --field-manager=nebius-flux-bootstrap -f -
+# In the funded CPU window, after reviewing the controller dry run and the bootstrap/Flux handoff:
+uv run bootstrap/nebius/management/flux/render-controllers.py | "${k[@]}" apply --server-side --field-manager=nebius-flux-bootstrap -f -
+for controller in source-controller kustomize-controller; do
+  "${k[@]}" rollout status -n flux-system "deployment/$controller" --timeout=3m
+done
+python3 "$render" --fetch "$DEPLOYMENT_COMMIT" | "${k[@]}" apply --server-side --field-manager=nebius-flux-bootstrap -f -
+src=gitrepository.source.toolkit.fluxcd.io/platform-$DEPLOYMENT_COMMIT
+ks=kustomization.kustomize.toolkit.fluxcd.io/nebius-platform
+"${k[@]}" -n flux-system wait --for=condition=Ready "$src" --timeout=3m
+revision=$("${k[@]}" -n flux-system get "$src" -o json |
+  jq -er --arg sha "$DEPLOYMENT_COMMIT" 'select(.spec.ref.commit == $sha and .status.observedGeneration == .metadata.generation and ((.status.artifact.revision | split("@") | last) == ("sha1:" + $sha))) | .status.artifact.revision')
+rv=$("${k[@]}" -n flux-system get "$ks" -o json |
+  jq -er --arg src "platform-$DEPLOYMENT_COMMIT" 'select(.spec.suspend and .spec.sourceRef.name == $src) | .metadata.resourceVersion')
+python3 "$render" --fetch "$DEPLOYMENT_COMMIT" |
+  jq --arg rv "$rv" '.items[1] | .metadata.resourceVersion=$rv | .spec.suspend=false' |
+  "${k[@]}" apply --server-side --field-manager=nebius-flux-bootstrap -f -
+"${k[@]}" -n flux-system wait --for=jsonpath='{.status.lastAppliedRevision}'="$revision" "$ks" --timeout=3m
 ```
 
-Use the same suspended render to stage the objects. Before activation, verify the signed image release, approved image-to-role mapping, DNS policy, pull credentials and the deployment diff against the target. Check retained namespaces and claims explicitly. After the worker is Ready, remove `--suspend` and apply the same commit. Confirm both Flux resources become Ready and `status.lastAppliedRevision` matches the source artifact revision and intended SHA. Verify workload health separately because the initial storage claims wait for a consumer. For rollback, render the prior verified deployment and review its prune diff before changing the Git pin.
+Wait for the Kustomization’s current generation to be Ready and `status.lastAppliedRevision` to equal the verified source artifact revision. Repeat the DNS policy readback and scoped backend admission probe. Verify CoreDNS Ready endpoints and in-pod behavior separately.
+
+**First-deployment recovery.** Apply the same suspended Kustomization with the same server-side field manager and verify the controller has finished any in-flight reconciliation. Suspend its Git source. Using the bootstrap manager, review the server-side diff of the three saved specs against their recorded names and UIDs, restore them and verify effective quotas and DNS egress. To restore a changed spec, test the saved UID and current resourceVersion in a JSON Patch before replacing that object’s spec. Review any additional labels or annotations owned by the release separately. Any ownership transfer must cover only the reviewed field changes. Both Flux objects can stay suspended for diagnosis. The Kustomization uses `prune: false` and `deletionPolicy: Orphan`. Earlier foundation commits can lack a production root. For a subsequent rollback, stage the previous verified root commit, repeat the source-revision check, then resume reconciliation.
 
 ## Credentials and plan
 

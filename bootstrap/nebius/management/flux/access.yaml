@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: nebius-platform, namespace: flux-system}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: nebius-platform, namespace: sky-cpu}
+rules:
+  - apiGroups: [""]
+    resources: [limitranges]
+    resourceNames: [cpu]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    resourceNames: [pilot]
+    verbs: [get, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    resourceNames: [dns-only]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: nebius-platform, namespace: sky-cpu}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nebius-platform}
+subjects: [{kind: ServiceAccount, namespace: flux-system, name: nebius-platform}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: flux-runtime, namespace: flux-system}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: flux-runtime, namespace: flux-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: flux-runtime}
+subjects:
+  - {kind: ServiceAccount, namespace: flux-system, name: source-controller}
+  - {kind: ServiceAccount, namespace: flux-system, name: kustomize-controller}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: source-controller, namespace: flux-system}
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, buckets, helmcharts, helmrepositories, ocirepositories]
+    verbs: [get, list, watch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, gitrepositories/status, gitrepositories/finalizers]
+    verbs: [patch, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [nebius-git-read]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: source-controller, namespace: flux-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: source-controller}
+subjects: [{kind: ServiceAccount, namespace: flux-system, name: source-controller}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kustomize-controller, namespace: flux-system}
+rules:
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations, kustomizations/status, kustomizations/finalizers]
+    resourceNames: [nebius-platform]
+    verbs: [patch, update]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, buckets, ocirepositories]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [nebius-sops-age]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    resourceNames: [nebius-platform]
+    verbs: [get, impersonate]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kustomize-controller, namespace: flux-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kustomize-controller}
+subjects: [{kind: ServiceAccount, namespace: flux-system, name: kustomize-controller}]

@@ -1,6 +1,8 @@
 """Exercise managed API admission as the short-lived native training submitter."""
 
+import argparse
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -11,9 +13,17 @@ from production_target import kubectl_client
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--trainer-image", help="Verified image from the signed release")
+    parser.add_argument("--preflight-image", help="Verified image from the same signed release")
+    args = parser.parse_args()
+    released = bool(args.trainer_image or args.preflight_image)
+    if released and not all(ref and re.fullmatch(r"ghcr\.io/[^@\s]+@sha256:[0-9a-f]{64}", ref)
+                            for ref in (args.trainer_image, args.preflight_image)):
+        parser.error("Supply both signed registry digests to verify an activated release")
     kube = kubectl_client("training", "episode-submit", direct=True)
     for namespace, verb, resource, allowed in (
-        ("training", "create", "jobs.batch", True),
+        ("training", "create", "jobs.batch", released),
         ("training", "create", "pods", False),
         ("training", "get", "secrets", False),
         ("training", "create", "persistentvolumeclaims", False),
@@ -31,10 +41,10 @@ def main():
             raise SystemExit(f"Unexpected permission for {verb} {resource}/{subresource} in {namespace}")
         print(namespace, verb, resource, subresource, result.stdout.strip())
 
-    def render(mode, *, paired=False):
+    def render(mode, *, paired=False, image=None):
         return json.loads(subprocess.check_output([
             sys.executable, SKY / "episode-profile.py", mode, "fit", "direct", "access-check",
-            "--target", "prod-nebius", "--image", "example.invalid/probe@sha256:" + "a" * 64,
+            "--target", "prod-nebius", "--image", image or (args.preflight_image if mode == "preflight" else args.trainer_image),
             "--bundle-sha256", "b" * 64, "--schedule", "14084", "--step", "14084",
             *(["--cached-weights-sha256", "c" * 64, "--validation-sha256", "d" * 64,
                "--direct-objective", "physical-mae"] if paired else []),
@@ -53,7 +63,18 @@ def main():
             raise SystemExit(f"{label}: unexpected admission response: {result.stderr.strip()}")
         print(label, "admitted" if denial is None else "denied")
 
+    invalid = "example.invalid/probe@sha256:" + "a" * 64
+    if not released:
+        # Authorization is the outer boundary during the CPU pilot.
+        result = subprocess.run([*kube, "create", "--dry-run=server", "-f", "-"],
+                                input=json.dumps(render("job", image=invalid)),
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode == 0 or "cannot create resource" not in result.stderr or "jobs" not in result.stderr:
+            raise SystemExit("Expected the held submitter to be refused Job creation by RBAC")
+        print("native training submission held")
+        return
     for mode in ("preflight", "job"):
+        check(render(mode, image=invalid), "unapproved-" + mode, "approved image")
         check(render(mode), mode)
         check(render(mode, paired=True), "paired-" + mode)
     for label, field, value, message in (

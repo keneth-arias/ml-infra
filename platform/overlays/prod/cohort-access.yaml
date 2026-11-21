@@ -39,6 +39,9 @@ spec:
     - name: pod
       expression: object.spec.template.spec
   validations:
+    # The signed trainer and preflight release will replace this hold.
+    - expression: "false"
+      message: Native training submission is closed during CPU qualification.
     - expression: >-
         has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'episode-worker'
         && has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
