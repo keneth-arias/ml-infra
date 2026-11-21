@@ -45,9 +45,9 @@ spec:
            (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
     # Compare both literals with the signed release before activating this policy.
     - name: trainerImage
-      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b'"
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:ff36f412de87505e9ef1eebcf0b221e8d71e148b0b0d9bf49380640bd0318f37'"
     - name: preflightImage
-      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:50e25655174b3a2ceb7d16a31cf9bfffbc009cd44c11648e18eba31312d2ba6c'"
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:abe047cc25ae52a2338b42acaba72745e0b44a2ea6f31331291a78ae3c393288'"
     - name: container
       expression: variables.pod.containers[0]
     - name: argv
