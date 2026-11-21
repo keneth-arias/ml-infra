@@ -2,9 +2,12 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: postgres
+  namespace: tracking
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: airaware-network-retain
+  storageClassName: airaware-network-retain-immediate
   resources:
     requests:
       storage: 16Gi

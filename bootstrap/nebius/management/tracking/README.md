@@ -48,7 +48,7 @@ On an interrupted installation, compare existing named objects against the origi
 
 ### Start and qualify
 
-Confirm the eu-south1 disk count covers both boot disks and all three retained claims. Record the retained disks and their ownership in the reviewed funding and cleanup inventory. Follow the guarded support allocation and record the provider ID of the Ready CPU node. Apply `client-network.yaml` and the held `episode-submit-inputs` policy with their reviewed managers. Inspect the existing additive policies, the live managed CoreDNS selector, Cilium DNS enforcement, and workload namespace bindings. Verify the resulting TLS and storage routes from the actual Pods.
+Complete the separately funded [worker-free retained storage release](../../../../platform/retained-storage/README.md) before starting the support worker. The tracking stack mounts the existing `tracking/postgres` claim. Use the recorded disk IDs and ownership in the reviewed funding and cleanup inventory. Follow the guarded support allocation and record the provider ID of the Ready CPU node. Apply `client-network.yaml` and the held `episode-submit-inputs` policy with their reviewed managers. Inspect the existing additive policies, the live managed CoreDNS selector, Cilium DNS enforcement, and workload namespace bindings. Verify the resulting TLS and storage routes from the actual Pods.
 
 ```bash
 "${k[@]}" apply --server-side --field-manager=nebius-tracking-operator -f "$stack/client-network.yaml"

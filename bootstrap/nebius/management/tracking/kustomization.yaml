@@ -3,7 +3,6 @@ kind: Kustomization
 namespace: tracking
 resources:
   - namespace.yaml
-  - storage.yaml
   - network.yaml
   - workloads.yaml
 configMapGenerator:
