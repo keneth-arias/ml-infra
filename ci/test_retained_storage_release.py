@@ -74,6 +74,12 @@ class RetainedStorageReleaseTest(unittest.TestCase):
         with patch.object(helper, "query", return_value=quota):
             self.assertEqual(helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 0, unit="byte"),
                              400 * gib)
+            with self.assertRaisesRegex(ValueError, "below the verified"):
+                helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 16 * gib, unit="byte")
+            quota["status"]["usage"] = 8 * gib
+            with self.assertRaisesRegex(ValueError, "below the verified"):
+                helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 16 * gib, unit="byte")
+            del quota["status"]["usage"]
             quota["status"]["usage_state"] = "UNKNOWN"
             with self.assertRaisesRegex(ValueError, "did not report usage"):
                 helper.quota_headroom([], "tenant-example", "disk-size", 400 * gib, 0, unit="byte")

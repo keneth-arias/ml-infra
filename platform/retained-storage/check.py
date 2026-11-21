@@ -206,7 +206,9 @@ def quota_headroom(n, tenant, name, needed, owned, *, unit=None):
     if status.get("usage") is None and status.get("usage_state") != "USAGE_STATE_NOT_USED":
         raise ValueError(f"Nebius did not report usage for quota {name}")
     usage = int(status.get("usage") or 0)
-    if usage < 0 or limit < needed or usage > limit - needed + owned:
+    if usage < owned:
+        raise ValueError(f"Reported quota usage for {name} is below the verified disk inventory")
+    if limit < needed or usage > limit - needed + owned:
         raise ValueError(f"Insufficient eu-south1 quota for the combined topology: {name}")
     return limit
 
