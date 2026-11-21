@@ -1,0 +1,258 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+spec:
+  type: ClusterIP
+  selector: {app: mlflow}
+  ports:
+    - {name: https, port: 443, targetPort: https}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  clusterIP: None
+  selector: {app: postgres}
+  ports:
+    - {name: pgsql, port: 5432, targetPort: pgsql}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: mlflow}
+  template:
+    metadata:
+      labels: {app: mlflow}
+    spec:
+      serviceAccountName: mlflow
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        airaware.training/pool: training-cpu
+        kubernetes.io/arch: amd64
+      dnsConfig:
+        options:
+          - {name: ndots, value: "1"}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow@sha256:7e5aada07a9eedbd9c4d088c815820ef0d78fb44a043f2ecafb90e414344bfb2
+          command: [python, -I, /etc/tracking/start-mlflow.py]
+          workingDir: /tmp
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: OPENBLAS_NUM_THREADS, value: "1"}
+            - {name: OMP_NUM_THREADS, value: "1"}
+            - {name: MLFLOW_DISABLE_TELEMETRY, value: "true"}
+            - {name: MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD, value: "false"}
+            - {name: MLFLOW_S3_ENDPOINT_URL, value: "https://storage.eu-south1.nebius.cloud"}
+            - {name: AWS_CONFIG_FILE, value: /etc/tracking/aws-config}
+            - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+            - {name: PGCONNECT_TIMEOUT, value: "5"}
+            - {name: PGSSLMODE, value: verify-full}
+            - {name: PGSSLROOTCERT, value: /run/tracking/db-ca/ca.crt}
+            - name: MLFLOW_ARTIFACTS_DESTINATION
+              valueFrom:
+                configMapKeyRef: {name: mlflow-artifact-target, key: destination}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: mlflow-artifacts, key: access-key-id}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: mlflow-artifacts, key: secret-access-key}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 128Mi}
+            limits: {cpu: 1250m, memory: 3Gi, ephemeral-storage: 1Gi}
+          startupProbe:
+            exec:
+              command: [python, -I, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=2).close()"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [python, -I, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=2).close()"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - {name: mlflow-runtime, mountPath: /etc/tracking, readOnly: true}
+            - {name: db-password, mountPath: /run/tracking/db, readOnly: true}
+            - {name: db-ca, mountPath: /run/tracking/db-ca, readOnly: true}
+            - {name: mlflow-tmp, mountPath: /tmp}
+        - name: caddy
+          image: docker.io/library/caddy@sha256:040e9f7480b80b6d4a7e5013a21159b950a63dcbdb956e38abe2387fb28d9ec0
+          command: [sh, /etc/tracking/start-proxy.sh]
+          env:
+            - {name: XDG_DATA_HOME, value: /tmp/caddy-data}
+            - {name: XDG_CONFIG_HOME, value: /tmp/caddy-config}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: https, containerPort: 8443}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: 250m, memory: 256Mi, ephemeral-storage: 128Mi}
+          readinessProbe:
+            tcpSocket: {port: https}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: proxy-runtime, mountPath: /etc/tracking, readOnly: true}
+            - {name: proxy-secret, mountPath: /run/tracking/proxy, readOnly: true}
+            - {name: caddy-tmp, mountPath: /tmp}
+      volumes:
+        - name: mlflow-runtime
+          configMap:
+            name: mlflow-runtime
+            items:
+              - {key: aws-config, path: aws-config}
+              - {key: start-mlflow.py, path: start-mlflow.py}
+        - name: proxy-runtime
+          configMap:
+            name: mlflow-runtime
+            items:
+              - {key: Caddyfile, path: Caddyfile}
+              - {key: start-proxy.sh, path: start-proxy.sh}
+        - name: proxy-secret
+          secret:
+            secretName: mlflow-proxy
+            defaultMode: 0440
+            items:
+              - {key: bearer, path: bearer}
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: db-password
+          secret:
+            secretName: mlflow-postgres
+            defaultMode: 0440
+            items:
+              - {key: password, path: password}
+        - name: db-ca
+          secret:
+            secretName: mlflow-postgres-tls
+            defaultMode: 0440
+            items:
+              - {key: ca.crt, path: ca.crt}
+        - {name: mlflow-tmp, emptyDir: {sizeLimit: 768Mi}}
+        - {name: caddy-tmp, emptyDir: {sizeLimit: 64Mi}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      serviceAccountName: postgres
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+      nodeSelector:
+        airaware.training/pool: training-cpu
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres@sha256:86e0b703649d7a792bd9243ee28afc9d8f7c6b2b5638077c9d6882d4d472bbfd
+          args:
+            - postgres
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/run/tracking/tls/tls.crt
+            - -c
+            - ssl_key_file=/run/tracking/tls/tls.key
+            - -c
+            - hba_file=/etc/tracking/pg_hba.conf
+            - -c
+            - password_encryption=scram-sha-256
+          env:
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - {name: POSTGRES_USER, value: postgres}
+            - {name: POSTGRES_DB, value: postgres}
+            - {name: POSTGRES_PASSWORD_FILE, value: /run/tracking/db/admin-password}
+            - {name: POSTGRES_INITDB_ARGS, value: "--auth-local=peer --auth-host=scram-sha-256"}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: pgsql, containerPort: 5432}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 64Mi}
+            limits: {cpu: 750m, memory: 2Gi, ephemeral-storage: 256Mi}
+          startupProbe:
+            tcpSocket: {port: pgsql}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, /var/run/postgresql, -U, postgres, -d, postgres]
+            periodSeconds: 5
+          volumeMounts:
+            - {name: pg-data, mountPath: /var/lib/postgresql/data}
+            - {name: pg-socket, mountPath: /var/run/postgresql}
+            - {name: pg-tmp, mountPath: /tmp}
+            - {name: db-passwords, mountPath: /run/tracking/db, readOnly: true}
+            - {name: db-tls, mountPath: /run/tracking/tls, readOnly: true}
+            - {name: db-config, mountPath: /etc/tracking, readOnly: true}
+            - {name: db-bootstrap, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+      volumes:
+        - name: pg-data
+          persistentVolumeClaim: {claimName: postgres}
+        - {name: pg-socket, emptyDir: {sizeLimit: 16Mi}}
+        - {name: pg-tmp, emptyDir: {sizeLimit: 64Mi}}
+        - name: db-passwords
+          secret:
+            secretName: mlflow-postgres
+            defaultMode: 0440
+            items:
+              - {key: password, path: password}
+              - {key: admin-password, path: admin-password}
+        - name: db-tls
+          secret:
+            secretName: mlflow-postgres-tls
+            defaultMode: 0440
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: db-config
+          configMap:
+            name: mlflow-runtime
+            items:
+              - {key: pg_hba.conf, path: pg_hba.conf}
+        - name: db-bootstrap
+          configMap:
+            name: mlflow-runtime
+            defaultMode: 0555
+            items:
+              - {key: init-db.sh, path: 10-init-db.sh}

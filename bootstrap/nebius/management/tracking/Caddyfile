@@ -1,0 +1,24 @@
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+https://mlflow.tracking.svc.cluster.local:8443 {
+	tls /run/tracking/proxy/tls.crt /run/tracking/proxy/tls.key
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+	}
+	@authorized header Authorization "Bearer {$TRACKING_BEARER}"
+	handle @authorized {
+		reverse_proxy 127.0.0.1:5000 {
+			header_up Host mlflow.tracking.svc.cluster.local
+			header_up -Authorization
+		}
+	}
+	handle {
+		header WWW-Authenticate "Bearer"
+		respond 401
+	}
+}
