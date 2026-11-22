@@ -35,8 +35,8 @@ def render(image, run, node, deadline, gpu_bytes):
             "nodeSelectorTerms": [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": [node]}]}]}}},
         "tolerations": [{"key": "nvidia.com/gpu", "operator": "Equal", "value": "true", "effect": "NoSchedule"}],
         "imagePullSecrets": [{"name": "ghcr-pull"}],
-        "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
-                            "fsGroupChangePolicy": "OnRootMismatch", "seccompProfile": {"type": "RuntimeDefault"}},
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
+                            "seccompProfile": {"type": "RuntimeDefault"}},
         "volumes": [{"name": "inputs", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}},
                     {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}}],
         "containers": [{

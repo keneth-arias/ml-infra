@@ -28,6 +28,8 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual([spec[k] for k in ("parallelism", "completions", "backoffLimit", "activeDeadlineSeconds")],
                          [1, 1, 0, 600])
         pod = spec["template"]["spec"]
+        self.assertEqual(pod["securityContext"], {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
+                                                 "seccompProfile": {"type": "RuntimeDefault"}})
         self.assertFalse(pod["automountServiceAccountToken"])
         self.assertEqual(pod["nodeSelector"], {"airaware.training/pool": "training-gpu"})
         fields = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
