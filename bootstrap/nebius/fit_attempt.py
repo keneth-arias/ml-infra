@@ -18,6 +18,9 @@ from gpu_window import (
 from worker_plan import amount, timestamp
 
 
+TERMINATION_GRACE_SECONDS = 90
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -42,7 +45,7 @@ def describe(preflight, task):
         pod_spec = spec["config"]["kubernetes"]["pod_config"]["spec"]
         deadline = pod_spec.get("activeDeadlineSeconds")
     grace = pod_spec.get("terminationGracePeriodSeconds")
-    if grace != 90 or type(deadline) is not int or deadline <= 0:
+    if grace != TERMINATION_GRACE_SECONDS or type(deadline) is not int or deadline <= 0:
         raise ValueError("Use cooperative shutdown and a bounded deadline for paid paired fits")
     arm = {"normalized-mse": "control", "physical-mae": "candidate"}[arg("direct-objective")]
     mounts = {v["mountPath"]: v["subPath"] for v in validator["volumeMounts"]}
@@ -240,6 +243,7 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         raise ValueError("Recovery requires two separately approved native control qualification attempts")
     group, attempt_id = previous_attempts(ledger, request, purpose, max_attempts)
     projection = Decimal(request["deadline_seconds"]) / 3600
+    dispatch_seconds = None
     checkpoint = None
     if purpose == "selected":
         timing = json.loads(measurements)
@@ -258,10 +262,14 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
                 raise ValueError("Selected arm already terminal or checkpoint has no completed update")
             checkpoint = f"{progress['step']}:{progress['checkpoint_sha256']}"
         seconds = (timestamp(scope["cutoff"]) - now).total_seconds()
-        fit = fit_projection(timing, ledger, window_seconds=seconds, after_preflight=True)
+        active_seconds = request["deadline_seconds"] - TERMINATION_GRACE_SECONDS
+        fit = fit_projection(timing, ledger, window_seconds=seconds, after_preflight=True,
+                             job_deadline_seconds=active_seconds)
         if request["save_interval_seconds"] != fit["save_interval_seconds"]:
             raise ValueError("Rendered save interval differs from the measured checkpoint policy")
         projection = fit["projected_hours"]
+        if backbone == "flamingo":
+            dispatch_seconds = fit["job_seconds_by_arm"][arm]
     elif purpose == "qualification-recovery":
         checkpoint = recovery_checkpoint(ledger, approval, request, group)
     elif group:
@@ -274,6 +282,9 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         raise ValueError("Fresh replay requires fenced, verified empty run storage")
     check_projection(limits, projection)
     check_projection(limits, Decimal(request["deadline_seconds"]) / 3600)
+    if dispatch_seconds is not None and dispatch_seconds > active_seconds:
+        raise ValueError(f"Measured {arm} Job needs {dispatch_seconds} seconds before its "
+                         f"{active_seconds}-second active deadline")
     hold = dict(
         stage="fit",
         run_id=scope["run_id"],
@@ -290,6 +301,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     )
     if purpose == "qualification-recovery":
         hold["recovery_reference"] = approval["recovery_reference"]
+    if dispatch_seconds is not None:
+        hold["job_seconds"] = str(dispatch_seconds)
     ledger.setdefault("fit_attempts", []).append(hold)
     revision, version = write_reservation(s3, scope, current, ledger, hold)
     return {

@@ -280,6 +280,55 @@ class FitAttemptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MLflow digest"):
             consume()
 
+    def test_dispatched_arm_must_fit_inside_its_own_active_deadline(self):
+        flags = ("--flamingo-binding-sha256", "1"*64, "--flamingo-baselines",
+                 "2"*64, "3"*64, "--flamingo-parity-sha256", "4"*64)
+        _, request, _ = inputs("job", *flags)
+        sc, funds, _ = fixture(request)
+        measurements = timings("flamingo")
+
+        def submit(req, reason=None):
+            timing = json.dumps(measurements).encode()
+            funds["fit_approval"].update(request=req, measurements_sha256=digest(timing))
+            store = Storage(funds)
+            sc["ledger_sha256"] = digest(store.raw)
+            if reason:
+                with self.assertRaisesRegex(ValueError, reason):
+                    reserve_fit(store, sc, req, timing, "c", NOW)
+                self.assertEqual(digest(store.raw), sc["ledger_sha256"])
+            else:
+                reserve_fit(store, sc, req, timing, "c", NOW)
+                return json.loads(store.raw)
+
+        # A short deadline also fails on a fresh arm with inexpensive probes.
+        _, short, _ = inputs("job", *flags, "--deadline-seconds", "600")
+        submit(short, "control Job needs")
+        funds = submit(request)
+        entry = funds["fit_attempts"][0]
+        entry.update(writer_fenced=True, closeout_sha256="a"*64)
+        funds["active_reservation"] = None
+        pin = "b"*64
+        funds["flamingo"] = {"fit_progress": {"27": {"control": dict(
+            terminal=True, checkpoint_sha256=pin, export_sha256="d"*64, step=14084,
+            evaluated_through=14084, attempt_id=entry["attempt_id"])}}}
+        measurements["samples"]["selected_restore_probe_seconds"] = [1700, 1800]
+        measurements["samples"]["job_startup_restore_seconds"] = [3]
+        measurements["samples"]["export_seconds"] = [8]
+        # Only this arm's 3 + 2*1800 + 8 seconds are due inside this Job.
+        # Its shutdown grace, replacement and the still-untrained other arm
+        # belong to the total funded exposure and cannot extend that deadline.
+        for deadline in (600, 3610, 3611):
+            _, retry, _ = inputs("job", *flags, "--attempt", "2", "--resume",
+                                 "--resume-checkpoint", "14084:" + pin,
+                                 "--deadline-seconds", str(deadline))
+            with self.subTest(deadline=deadline):
+                if deadline < 3611:
+                    submit(retry, "needs 3611 seconds")
+                else:
+                    hold = submit(retry)["active_reservation"]
+                    self.assertEqual(hold["job_seconds"], "3611")
+                    self.assertGreater(float(hold["projected_hours"]), 3611 / 3600)
+
     def test_rendered_save_cadence_is_funded_for_the_full_pair(self):
         _, req, _ = inputs("job", "--save-seconds", "0")
         sc, funds, timing = fixture(req)

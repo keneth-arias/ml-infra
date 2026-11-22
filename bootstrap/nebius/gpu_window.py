@@ -371,7 +371,14 @@ def check_progress_sources(ledger, backbone, *, allow_legacy=False):
                     raise ValueError("Selection comparison differs from the funded baselines")
 
 
-def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_preflight=False):
+def timed_checkpoint_limit(updates, interval, seconds):
+    if not interval:
+        return updates
+    return min(updates, int((amount(seconds) / interval).to_integral_value(rounding=ROUND_CEILING)))
+
+
+def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_preflight=False,
+                   job_deadline_seconds=None):
     """Price two ceiling-length arms; only the operator's verified ledger can credit work."""
     seed = measurements["seed"]
     if seed not in (27, 28) or not re.fullmatch(
@@ -384,6 +391,7 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
     progress = fit_records(ledger, backbone).get("fit_progress", {}).get(str(seed), {})
     flamingo = backbone == "flamingo"
     timing = {}
+    dispatch_seconds = {}
     save_key = "checkpoint_publish_seconds" if flamingo else "save_seconds"
     startup_key = "job_startup_restore_seconds" if flamingo else "startup_restore_seconds"
     for key in (
@@ -429,7 +437,19 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
         updates += remaining
         evaluations += checks
         # Price each periodic and best checkpoint and the final publication.
-        saves += sum(e > step for e in EVALUATIONS) if flamingo else checks + 1
+        scheduled_saves = sum(e > step for e in EVALUATIONS) if flamingo else checks + 1
+        saves += scheduled_saves
+        if flamingo:
+            # A single, uninterrupted Job must fit its own deadline. Replacement
+            # Jobs, future CPU preflights and the other arm have separate deadlines.
+            budget = window_seconds if job_deadline_seconds is None else job_deadline_seconds
+            timed = timed_checkpoint_limit(remaining, interval, budget)
+            job_saves = min(remaining, scheduled_saves + timed)
+            dispatch_seconds[arm] = (
+                timing[startup_key] + remaining * timing["update_seconds"] + checks * eval_seconds
+                + job_saves * timing[save_key] + 2 * timing["selected_restore_probe_seconds"]
+                + timing["export_seconds"]
+            )
         starts += 1
         exports += 1
         training_replay = Decimal(0)
@@ -462,9 +482,7 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
     # sequential workers their total running time cannot exceed the window.
     # At interval zero every completed update, including a replay, can save.
     updates_with_replay = updates + replay_updates
-    timed_saves = updates_with_replay if not interval else min(
-        updates_with_replay, int((amount(window_seconds) / interval).to_integral_value(rounding=ROUND_CEILING))
-    )
+    timed_saves = timed_checkpoint_limit(updates_with_replay, interval, window_seconds)
     if flamingo:
         # At most one checkpoint per completed update. Replay ends at its
         # first (possibly interrupted) publication, already priced separately.
@@ -524,5 +542,6 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
         "replay_updates": replay_updates,
         "post_release_usd": post_release,
         "component_seconds": components,
+        **({"job_seconds_by_arm": dispatch_seconds} if flamingo else {}),
         "projected_hours": sum(components.values()) / 3600,
     }
