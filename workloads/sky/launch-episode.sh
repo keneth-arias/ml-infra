@@ -2,7 +2,8 @@
 # Verify the exact bundle on a CPU pod before reserving a GPU.
 set -euo pipefail
 target=dev-bm
-kube=(kubectl --context "${EPISODE_LOCAL_CONTEXT:-microk8s}")
+local_context=${EPISODE_LOCAL_CONTEXT:-microk8s}
+kube=(kubectl --context "$local_context")
 base=$(dirname "$0")
 if [[ ${1:-} == --nebius ]]; then
   shift
@@ -91,5 +92,9 @@ fi
 if [[ "$mode" == job ]]; then
   "${kube[@]}" create -f "$tmp/task.yaml"
 else
-  sky launch -y -c "$cluster_name" "$tmp/task.yaml"
+  sky_args=(launch -y -c "$cluster_name")
+  if [[ "$target" == dev-bm ]]; then
+    sky_args+=(--infra "k8s/$local_context")
+  fi
+  sky "${sky_args[@]}" "$tmp/task.yaml"
 fi
