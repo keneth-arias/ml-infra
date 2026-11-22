@@ -25,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 RENDER = runpy.run_path(str(HERE / "render-public-flamingo-stage.py"))["build_packet"]
 SCOPE_SHA = "a82b7ef7bd96295b9ce33fa10d629be2e19b1c9f8dd0b55f0c513921804be7f6"
 CA_SHA = "122a800e233ecae05a71701c057a0f77d786b5c7e357e9cb93b6dfff0b5b301e"
+MODEL_OWNER = "serviceaccount-e07ahpx591vnjdv77y"
 KUBECTL = "/usr/local/bin/kubectl"
 NO_PIN = object()
 
@@ -52,8 +53,7 @@ def check_operators(approval, owner):
     operators = [approval[name] for name in ("source_operator", "storage_operator", "staging_operator")]
     if (not all(isinstance(name, str) and name and name == name.strip() for name in [owner, *operators])
             or len(set([owner, *operators])) != 4
-            or owner in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
-            or approval["source_operator"] in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
+            or approval["source_operator"] in {"system:anonymous", MODEL_OWNER}
             or approval["source_operator"] in {f"system:serviceaccount:training:{name}" for name in
                                                ("episode-input-stager", "episode-submit", "episode-worker", "default")}):
         raise ValueError("Expected independent model reader or owner, inventory issuer, storage and staging identities")
@@ -76,6 +76,7 @@ def check_grant(grant, credential, packet, approval):
                        "permissions", "exact_versions_only", "expires_at"}
             or grant["schema"] != "public-flamingo-version-reader-grant-v1"
             or not re.fullmatch(r"serviceaccount-[a-z0-9]+", grant["principal"])
+            or grant["principal"] == MODEL_OWNER
             or grant["access_key_id_sha256"] != sha256(credential["access_key_id"].encode()).hexdigest()
             or grant["project_id"] != packet["project_id"] or grant["objects_sha256"] != packet["objects_sha256"]
             or grant["permissions"] != ["s3:GetObjectVersion"] or grant["exact_versions_only"] is not True):
@@ -87,6 +88,7 @@ def check_capability_attestation(attestation, packet, approval):
     if (set(attestation) != {"schema", "model_owner", "project_id", "objects_sha256",
                             "inventory_sha256", "expires_at"}
             or attestation["schema"] != "public-flamingo-scoped-get-attestation-v1"
+            or attestation["model_owner"] != MODEL_OWNER
             or attestation["project_id"] != packet["project_id"]
             or attestation["objects_sha256"] != packet["objects_sha256"]
             or not isinstance(attestation["inventory_sha256"], str)
@@ -106,8 +108,10 @@ def check_url_term(parsed, version, lifetime, latest):
     validate_query(query, version)
     seconds = int(query["X-Amz-Expires"])
     signed_at = datetime.strptime(query["X-Amz-Date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-    if seconds > lifetime or signed_at + timedelta(seconds=seconds) >= latest:
+    expires_at = signed_at + timedelta(seconds=seconds)
+    if seconds > lifetime or expires_at >= latest:
         raise ValueError("Source URL exceeds the approved term")
+    return expires_at
 
 
 def check_capability_inventory(document, objects, lifetime, latest):
@@ -153,11 +157,15 @@ def presign(objects, credential, lifetime, latest):
     return inventory
 
 
-def probe_versions(inventory):
+def source_https_client():
     # An explicit client context avoids SSLKEYLOGFILE while preserving certificate and hostname checks.
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     tls.load_default_certs()
-    client = build_opener(ProxyHandler({}), HTTPSHandler(context=tls), NoRedirect())
+    return build_opener(ProxyHandler({}), HTTPSHandler(context=tls), NoRedirect())
+
+
+def probe_versions(inventory):
+    client = source_https_client()
     for row in inventory:
         request = Request(row["url"], headers={"Range": "bytes=0-0"}, method="GET")
         with client.open(request, timeout=10) as response:
@@ -273,8 +281,10 @@ def main():
         inventory = presign(objects, credentials, lifetime, ends)
     probe_versions(inventory)
     check_consumer_fence()
-    for row in inventory:
-        check_url_term(urlsplit(row["url"]), row["version_id"], lifetime, ends)
+    earliest_expiry = min(check_url_term(urlsplit(row["url"]), row["version_id"], lifetime, ends)
+                          for row in inventory)
+    if datetime.now(timezone.utc) >= earliest_expiry:
+        raise ValueError("Source authority expired before Secret creation")
     print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory), sort_keys=True))
 
 

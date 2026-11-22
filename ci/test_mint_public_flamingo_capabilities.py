@@ -77,6 +77,17 @@ class MintTests(unittest.TestCase):
                 signature = hmac.digest(key, to_sign.encode(), "sha256").hex()
                 self.assertEqual(signature == query["X-Amz-Signature"][0], method == "GET")
 
+    def test_issuer_accepts_the_enrolled_custodians_exact_attestation_and_inventory(self):
+        raw, attestation, _ = self.mint()
+        issuer = tool["ISSUER"]
+        approval = {"source_operator": "source", "storage_operator": "storage", "staging_operator": "staging"}
+        issuer["check_capability_attestation"](attestation, self.packet, approval)
+        inventory = json.loads(raw)
+        objects = json.loads(self.packet["configmap"]["data"]["objects.json"])
+        self.assertEqual(issuer["check_capability_inventory"](
+            inventory, objects, self.auth["ttl_seconds"], issuer["timestamp"](self.auth["expires_at"])),
+            inventory["base"])
+
     def test_wrong_key_and_long_term_fail_before_mint(self):
         self.enroll["access_key_id_sha256"]="0"*64
         with self.assertRaises(ValueError): self.mint()

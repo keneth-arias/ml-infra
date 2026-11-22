@@ -11,13 +11,13 @@ import runpy
 import sys
 from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import build_opener, ProxyHandler, Request
+from urllib.request import Request
 
-from public_flamingo_stage_worker import NoRedirect, unique_pairs
+from public_flamingo_stage_worker import unique_pairs
 
 HERE = Path(__file__).resolve().parent
 ISSUER = runpy.run_path(str(HERE / "issue-public-flamingo-inventory.py"))
-MODEL_OWNER = "serviceaccount-e07ahpx591vnjdv77y"
+MODEL_OWNER = ISSUER["MODEL_OWNER"]
 PROJECT = "project-e07z8wzama002x047kpx72"
 
 
@@ -40,7 +40,7 @@ def require_denial(client, method, url):
 def negative_probes(entries):
     # Change only signed elements. Each probe is non-mutating, and no exception
     # or body from the remote API is emitted to a log.
-    client = build_opener(ProxyHandler({}), NoRedirect())
+    client = ISSUER["source_https_client"]()
     parsed = urlsplit(entries[0]["url"])
     signed = unique_pairs(parse_qsl(parsed.query, strict_parsing=True))
     changed = {**signed, "versionId": signed["versionId"] + "-unapproved"}

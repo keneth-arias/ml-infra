@@ -55,7 +55,8 @@ class PublicInventoryTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             check(self.grant, self.key, self.packet, self.approval)
             for change in ({"permissions": ["s3:GetObject"]}, {"exact_versions_only": 1},
-                           {"objects_sha256": "b"*64}, {"access_key_id_sha256": "c"*64}):
+                           {"objects_sha256": "b"*64}, {"access_key_id_sha256": "c"*64},
+                           {"principal": issuer["MODEL_OWNER"]}):
                 with self.assertRaises(ValueError):
                     check(dict(self.grant, **change), self.key, self.packet, self.approval)
             os.environ["AWS_PROFILE"] = "admin"
@@ -124,7 +125,7 @@ class PublicInventoryTests(unittest.TestCase):
             check({"base": inventory}, rows, 150, datetime.now(timezone.utc) + timedelta(seconds=10))
 
     def test_scoped_attestation_pins_inventory_without_a_reader_grant(self):
-        claim = {"schema": "public-flamingo-scoped-get-attestation-v1", "model_owner": "model-owner",
+        claim = {"schema": "public-flamingo-scoped-get-attestation-v1", "model_owner": issuer["MODEL_OWNER"],
                  "project_id": self.packet["project_id"], "objects_sha256": digest,
                  "inventory_sha256": digest, "expires_at": self.end.isoformat()}
         check = issuer["check_capability_attestation"]
@@ -136,6 +137,8 @@ class PublicInventoryTests(unittest.TestCase):
                     check(dict(claim, **change), self.packet, self.approval)
             with self.assertRaises(ValueError):
                 check(claim, self.packet, dict(self.approval, storage_operator="source"))
+            with self.assertRaises(ValueError):
+                check(claim, self.packet, dict(self.approval, source_operator=issuer["MODEL_OWNER"]))
 
     def test_range_probe_checks_nine_gets_with_exact_headers_and_body(self):
         inventory = issuer["presign"](promoted_objects(), self.key, 150, self.end)
@@ -196,7 +199,7 @@ class PublicInventoryTests(unittest.TestCase):
 
             inventory_pin = private("capability-inventory", {"base": inventory})
             attestation_pin = private("capability-attestation", {
-                "schema": "public-flamingo-scoped-get-attestation-v1", "model_owner": "model-owner",
+                "schema": "public-flamingo-scoped-get-attestation-v1", "model_owner": issuer["MODEL_OWNER"],
                 "project_id": packet["project_id"], "objects_sha256": packet["objects_sha256"],
                 "inventory_sha256": inventory_pin, "expires_at": self.end.isoformat(),
             })
