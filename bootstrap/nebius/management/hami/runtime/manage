@@ -42,8 +42,8 @@ jq -e '
     any(.status.conditions[]; .type == "Ready" and .status == "True") and
     (.status.nodeInfo.osImage | startswith("Ubuntu 24.04")) and
     (.status.nodeInfo.containerRuntimeVersion | test("^containerd://(1\\.7|2\\.[0-3])\\.")) and
-    ((.status.capacity["nvidia.com/gpu"] // "0") == "0") and
-    ((.status.allocatable["nvidia.com/gpu"] // "0") == "0")' <<<"$node" >/dev/null ||
+    (.status as $status | all(["nvidia.com/gpu", "hami.io/gpu"][];
+      ($status.capacity[.] // "0") == "0" and ($status.allocatable[.] // "0") == "0"))' <<<"$node" >/dev/null ||
     fail "Exclusive node taint, health, OS, containerd or GPU allocator inventory is ineligible."
 node_name=$(jq -er '.metadata.name' <<<"$node")
 jq -e 'all(.items[]; .metadata.labels["airaware.training/pool"] != "training-gpu") and

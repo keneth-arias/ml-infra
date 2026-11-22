@@ -163,6 +163,9 @@ class HamiRuntimeTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "args = ' '.join(sys.argv[1:])\n"
                 f"responses = {responses!r}\n"
+                "if 'MOCK_REGISTERED' in os.environ:\n"
+                "    field,resource = os.environ['MOCK_REGISTERED'].split(',')\n"
+                "    responses['get nodes']['items'][0]['status'][field] = {resource: '1'}\n"
                 "if 'auth whoami' in args:\n"
                 "    print('approved-operator')\n"
                 "elif ' exec ' in args:\n"
@@ -186,6 +189,13 @@ class HamiRuntimeTests(unittest.TestCase):
             receipt = json.loads(verified.stdout)
             self.assertEqual(receipt["validator"], {"pod": validator_name, "marker": marker})
             self.assertEqual(receipt["node"]["providerID"], f"nebius://{node}")
+            for field in ("capacity", "allocatable"):
+                for resource in ("nvidia.com/gpu", "hami.io/gpu"):
+                    with self.subTest(field=field, resource=resource):
+                        stale = subprocess.run(cmd, capture_output=True, text=True,
+                                               env=dict(environment, MOCK_REGISTERED=f"{field},{resource}"))
+                        self.assertNotEqual(stale.returncode, 0)
+                        self.assertIn("allocator inventory is ineligible", stale.stderr)
             environment["MOCK_MARKER_STATUS"] = "1"
             missing = subprocess.run(cmd, capture_output=True, text=True, env=environment)
             self.assertNotEqual(missing.returncode, 0)
