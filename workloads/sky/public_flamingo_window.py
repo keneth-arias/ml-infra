@@ -60,6 +60,10 @@ def private_scope(path):
         return raw
 
 
+def eligibility_label(run):
+    return "airaware.training.node-restriction.kubernetes.io/" + run
+
+
 @dataclass(frozen=True)
 class Window:
     sha256: str
@@ -100,11 +104,12 @@ class Window:
         labels = meta["labels"]
         if (meta["name"] != self.cpu_node or meta["uid"] != self.cpu_node_uid or meta.get("deletionTimestamp")
                 or spec.get("providerID") != self.cpu_provider_id or spec.get("unschedulable")
+                or labels.get(eligibility_label(self.run)) != self.cpu_node_uid
                 or labels.get("airaware.training/pool") != "training-cpu"
                 or labels.get("kubernetes.io/arch") != "amd64" or labels.get("kubernetes.io/os") != "linux"
                 or status.get("allocatable", {}).get("nvidia.com/gpu", "0") != "0"
                 or not any(c["type"] == "Ready" and c["status"] == "True" for c in status["conditions"])):
-            raise ValueError("Expected the signed Ready Linux amd64 CPU worker name, UID and provider")
+            raise ValueError("Expected the signed Ready Linux amd64 CPU worker identity and window eligibility label")
 
 
 def add_window_args(parser):

@@ -85,7 +85,8 @@ class WindowFixture:
     def node(self):
         return {"metadata": {"name": self.record["cpu_node"], "uid": self.record["cpu_node_uid"],
                              "labels": {"airaware.training/pool": "training-cpu", "kubernetes.io/arch": "amd64",
-                                        "kubernetes.io/os": "linux"}},
+                                        "kubernetes.io/os": "linux", windows.eligibility_label(self.run):
+                                            self.record["cpu_node_uid"]}},
                 "spec": {"providerID": self.record["cpu_provider_id"]},
                 "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "2"}}}
 
@@ -147,6 +148,15 @@ class WindowTests(unittest.TestCase):
         node["metadata"]["uid"] = "7858d0bf-ed59-44d2-bdaf-9c2e99be9f16"
         with self.assertRaises(ValueError):
             w.validate_placement(node)
+        key = windows.eligibility_label(w.run)
+        for mark in (None, "wrong-uid"):
+            with self.subTest(eligibility=mark):
+                node = self.f.node()
+                node["metadata"]["labels"].pop(key)
+                if mark is not None:
+                    node["metadata"]["labels"][key] = mark
+                with self.assertRaisesRegex(ValueError, "eligibility"):
+                    w.validate_placement(node)
         with patch.dict(os.environ, NEBIUS_TRAINING_CLUSTER_ID=windows.CLUSTER, NEBIUS_CA_BUNDLE_SHA256=windows.CA):
             for now in (self.f.now + timedelta(hours=2), self.f.now - timedelta(hours=2)):
                 with patch.object(windows, "utcnow", return_value=now), self.assertRaises(ValueError):

@@ -69,7 +69,7 @@ class PublicStageRenderTests(unittest.TestCase):
         self.assertEqual(spec["tolerations"], [
             {"key": "node.kubernetes.io/" + state, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
             for state in ("not-ready", "unreachable")])
-        self.assertEqual(spec["nodeSelector"]["airaware.training/pool"], "training-cpu")
+        self.assertEqual(spec["nodeSelector"], {"airaware.training/pool": "training-cpu"})
         mounts = {m["mountPath"]: m for m in stage["volumeMounts"]}
         self.assertEqual(set(mounts), {"/base", "/output", "/source", "/program"})
         self.assertEqual(mounts["/base"]["subPath"], "airaware/cache/weights/" + render["WEIGHTS"])
@@ -102,6 +102,9 @@ class PublicStageRenderTests(unittest.TestCase):
         self.assertEqual(result["preflight_linux_amd64"], window.preflight_platform_image)
         self.assertEqual(result["placement"]["provider_id"], window.cpu_provider_id)
         self.assertIn(window.cpu_node, json.dumps(result["job"]["spec"]["template"]["spec"]["affinity"]))
+        self.assertEqual(result["job"]["spec"]["template"]["spec"]["nodeSelector"],
+                         {"airaware.training/pool": "training-cpu",
+                          "airaware.training.node-restriction.kubernetes.io/" + run: window.cpu_node_uid})
         self.assertEqual(result["job"]["metadata"]["annotations"], result["configmap"]["metadata"]["annotations"])
         self.assertIn(digest, result["job"]["metadata"]["annotations"].values())
         with self.assertRaises(ValueError):

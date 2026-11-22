@@ -6,6 +6,7 @@ import sys
 import unittest
 from types import SimpleNamespace
 import uuid
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "workloads" / "sky"))
 import public_flamingo_stage_guard as guard
@@ -43,22 +44,51 @@ class GuardTests(unittest.TestCase):
         sha = "7" * 64
         run = "fsw-" + sha[:32]
         w = SimpleNamespace(run=run, sha256=sha, cpu_node="computeinstance-successor",
+                            cpu_node_uid=str(uuid.uuid4()), cpu_provider_id="nebius://computeinstance-successor",
                             preflight_image="repo@sha256:" + "b" * 64, objects_sha256="c" * 64,
                             start="2028-01-01T00:00:00Z", cutoff="2028-01-01T04:00:00Z")
         pins = {"window_sha256": sha, "expires_at": "2028-01-01T05:00:00Z", "job_uid": str(uuid.uuid4())}
         closed, _ = guard.render_guard(run, "closed", {"window_sha256": sha}, window=w)
         self.assertEqual(closed["metadata"]["name"], guard.NAME)
         self.assertIn(sha, str(closed["spec"]["auditAnnotations"]))
+        key = "airaware.training.node-restriction.kubernetes.io/" + run
+        def require_eligibility_guard(policy):
+            spec = policy["spec"]
+            pod_rule, node_rule = spec["matchConstraints"]["resourceRules"]
+            self.assertIn("pods/resize", pod_rule["resources"])
+            self.assertEqual(node_rule, {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+                                         "resources": ["nodes", "nodes/status"], "scope": "Cluster",
+                                         "resourceNames": [w.cpu_node]})
+            match, = spec["matchConditions"]
+            self.assertIn("request.resource.resource == 'nodes'", match["expression"])
+            self.assertIn(w.cpu_node, match["expression"])
+            self.assertIn(f'{json.dumps(key)} in object.metadata.labels', match["expression"])
+            self.assertIn(f'object.metadata.labels[{json.dumps(key)}] == {json.dumps(w.cpu_node_uid)}',
+                          match["expression"])
+            self.assertIn("request.namespace == 'training'", match["expression"])
+            self.assertIn("dyn(object).spec.volumes", match["expression"])
+            validations = spec["validations"]
+            self.assertIn("request.resource.resource != 'nodes' || (", validations[0]["expression"])
+            self.assertIn(f"dyn(object.metadata).uid == {json.dumps(w.cpu_node_uid)}", validations[0]["expression"])
+            self.assertIn(f"dyn(object).spec.providerID == {json.dumps(w.cpu_provider_id)}", validations[0]["expression"])
+            self.assertTrue(all(v["expression"].startswith("request.resource.resource != 'pods' || (")
+                                for v in validations[1:]))
+
+        require_eligibility_guard(closed)
         for wrong in ({}, {"window_sha256": "d"*64}):
             with self.assertRaises(ValueError):
                 guard.render_guard(run, "closed", wrong, window=w)
         for phase in ("stage", "owner"):
             job = guard.reviewed_window_job(w, run, phase)
             policy, _ = guard.render_guard(run, phase, pins, job, w)
+            require_eligibility_guard(policy)
+            self.assertEqual(job["spec"]["template"]["spec"]["nodeSelector"][key], w.cpu_node_uid)
             self.assertIn(w.start, str(policy["spec"]["validations"]))
             self.assertIn("2028-01-01T03:", str(policy["spec"]["validations"]))
             mutations = [
                 lambda j: j["spec"]["template"]["spec"].update(affinity={}),
+                lambda j: j["spec"]["template"]["spec"]["nodeSelector"].pop(key),
+                lambda j: j["spec"]["template"]["spec"]["nodeSelector"].update({key: "stale-uid"}),
                 lambda j: j["spec"]["template"]["spec"]["containers"][0].update(image="wrong"),
                 lambda j: j["spec"]["template"]["spec"]["containers"][0].update(volumeMounts=[]),
                 lambda j: j["spec"]["template"]["spec"]["containers"][0].update(command=["wrong"]),
@@ -69,6 +99,35 @@ class GuardTests(unittest.TestCase):
                 mutate(changed)
                 with self.assertRaisesRegex(ValueError, "reproduced"):
                     guard.render_guard(run, phase, pins, changed, w)
+
+    def test_verifies_effective_eligibility_guard_before_accepting_worker(self):
+        sha = "7" * 64
+        run = "fsw-" + sha[:32]
+        order = []
+        w = SimpleNamespace(sha256=sha, run=run, cpu_node="computeinstance-enrolled",
+                            cpu_node_uid=str(uuid.uuid4()), cpu_provider_id="nebius://computeinstance-enrolled",
+                            validate_namespace=lambda obj: self.assertEqual(obj["uid"], "training-uid"),
+                            validate_placement=lambda obj: self.assertEqual(obj["uid"], "original-worker"))
+        pins = {"window_sha256": sha}
+        reviewed = guard.render_guard(run, "closed", pins, window=w)
+        live = {"node": {"uid": "original-worker"}, "namespace": {"uid": "training-uid"}}
+        for role, obj in zip(("policy", "binding"), reviewed):
+            uid = str(uuid.uuid4())
+            obj["metadata"].update(uid=uid, generation=1)
+            pins.update({role + "_uid": uid, role + "_generation": 1})
+            live[obj["kind"].lower()] = obj
+        reviewed[0]["status"] = {"observedGeneration": 1, "typeChecking": {}}
+        def read(kind, name):
+            order.append(kind)
+            return live[kind]
+        with patch.object(guard.windows, "verify_live_window"):
+            self.assertEqual(guard.verify_guard(read, run, "closed", pins, window=w), pins)
+            self.assertEqual(order[-3:], ["validatingadmissionpolicy", "validatingadmissionpolicybinding", "node"])
+            reviewed[0]["spec"]["matchConstraints"]["resourceRules"].pop()
+            order.clear()
+            with self.assertRaises(ValueError):
+                guard.verify_guard(read, run, "closed", pins, window=w)
+            self.assertNotIn("node", order)
 
     def test_closed_denies_new_consumers_without_a_job_parameter(self):
         policy, binding = self.observe("closed")

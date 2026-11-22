@@ -96,6 +96,7 @@ def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha, 
     meta = {"namespace": "training", "name": "stage-" + run, "labels": labels}
     if window:
         meta["annotations"] = {"airaware.training/stage-window-sha256": window.sha256}
+        pod["nodeSelector"][windows.eligibility_label(run)] = window.cpu_node_uid
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta,
             "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 1800, "parallelism": 1,
                      "completions": 1, "podReplacementPolicy": "Failed",

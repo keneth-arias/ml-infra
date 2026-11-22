@@ -196,11 +196,33 @@ def render_guard(run, phase, pins=None, job=None, window=None):
         rules.extend("request.operation != 'CREATE' || (" + check + ")" for check in checks)
 
     inventory = f"stage-{run}-inventory"
+    # Nodes do not have Pod volumes or containers. Dynamically type only the Pod branch
+    # for successor policies whose resource rules also cover one cluster-scoped Node.
+    current = "dyn(object)" if window else "object"
+    previous = "dyn(oldObject)" if window else "oldObject"
+    protected = ("(" + protected_inputs(current, inventory) + ") || (oldObject != null && ("
+                 + protected_inputs(previous, inventory) + "))")
+    validations = [validation(rule) for rule in rules]
+    if window:
+        # Node /status updates can write metadata labels as well as status.
+        match["resourceRules"].append({"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+                                       "resources": ["nodes", "nodes/status"], "resourceNames": [window.cpu_node],
+                                       "scope": "Cluster"})
+        key = cel(windows.eligibility_label(run))
+        uid = cel(window.cpu_node_uid)
+        claims_eligibility = (f"object.metadata.name == {cel(window.cpu_node)} && has(object.metadata.labels) && "
+                              f"{key} in object.metadata.labels && object.metadata.labels[{key}] == {uid}")
+        protected = (f"(request.resource.resource == 'nodes' && {claims_eligibility}) || "
+                     f"(request.resource.resource == 'pods' && request.namespace == 'training' && ({protected}))")
+        node_identity = (f"dyn(object.metadata).uid == {uid} && has(dyn(object).spec.providerID) && "
+                         f"dyn(object).spec.providerID == {cel(window.cpu_provider_id)}")
+        validations = [{"expression": f"request.resource.resource != 'nodes' || ({node_identity})",
+                        "message": "The window eligibility label requires its enrolled Node UID and provider ID."},
+                       *(validation("request.resource.resource != 'pods' || (" + rule + ")") for rule in rules)]
     policy = {"apiVersion": API, "kind": "ValidatingAdmissionPolicy", "metadata": {"name": NAME},
               "spec": {"failurePolicy": "Fail", "matchConstraints": match, "matchConditions": [
-                  {"name": "protected-inputs", "expression": "(" + protected_inputs("object", inventory) + ") || "
-                   "(oldObject != null && (" + protected_inputs("oldObject", inventory) + "))"}],
-                       "validations": [validation(rule) for rule in rules]}}
+                  {"name": "protected-inputs", "expression": protected}],
+                       "validations": validations}}
     binding = {"apiVersion": API, "kind": "ValidatingAdmissionPolicyBinding", "metadata": {"name": NAME},
                "spec": {"policyName": NAME, "validationActions": ["Deny"],
                         "matchResources": {"matchPolicy": "Exact", "namespaceSelector": namespace_selector,
@@ -217,7 +239,6 @@ def verify_guard(get, run, phase, pins, job=None, window=None):
     if window:
         windows.verify_live_window(window)
         window.validate_namespace(get("namespace", NAMESPACE))
-        window.validate_placement(get("node", window.cpu_node))
         observed["window_sha256"] = window.sha256
     for role, expected in zip(("policy", "binding"), reviewed):
         kind = expected["kind"]
@@ -248,6 +269,9 @@ def verify_guard(get, run, phase, pins, job=None, window=None):
                     != window.sha256)):
             raise ValueError("Active guard does not identify the enrolled Job")
         observed.update(job_uid=pins["job_uid"], expires_at=pins["expires_at"])
+    if window:
+        # Only trust placement once the live guard protects the window's eligibility label.
+        window.validate_placement(get("node", window.cpu_node))
     return observed
 
 
