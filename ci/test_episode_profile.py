@@ -156,7 +156,17 @@ class ProfileTest(unittest.TestCase):
                 "--cached-weights-sha256", "e"*64, "--bundle-sha256", "c"*64,
                 "--validation-sha256", "d"*64, "--step", "14084", "--schedule", "14084",
                 "--direct-objective", "normalized-mse", "--graceful-stop", "--flamingo-binding-sha256", pin, "--flamingo-baselines", "1"*64, "2"*64]
+        missing = subprocess.run([sys.executable, script, "job", *args], capture_output=True)
+        self.assertNotEqual(missing.returncode, 0, "Language-only baseline approval accepted")
+        args.extend(["--flamingo-parity-sha256", "3"*64])
         pre, job = (subprocess.check_output([sys.executable, script, mode, *args]) for mode in ("preflight", "job"))
+        worker = json.loads(job)
+        command = worker["spec"]["template"]["spec"]["containers"][0]["command"]
+        self.assertEqual(command[command.index("--flamingo-parity-sha256") + 1], "3"*64)
+        command[command.index("--flamingo-parity-sha256") + 1] = "4"*64
+        with self.assertRaisesRegex(ValueError, "same approved"):
+            describe(pre, json.dumps(worker).encode())
+        self.assertEqual(describe(pre, job)["pair"]["flamingo_parity_sha256"], "3"*64)
         self.assertEqual(describe(pre, job)["pair"]["flamingo_binding"], pin)
         self.assertEqual(describe(pre, job)["pair"]["flamingo_baselines"], ["1"*64, "2"*64])
         self.assertNotEqual(subprocess.run([sys.executable, script, "job", *args[:-3]], capture_output=True).returncode, 0)

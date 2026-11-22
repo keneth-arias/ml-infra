@@ -9,7 +9,7 @@ python3 workloads/smoke/render-flamingo-baseline.py \
   --gpu-limit-bytes "$gpu_limit_bytes" > baseline-review.json
 ```
 
-The review record contains the exact proposed Job JSON and its SHA-256. The bounded Job first runs the packaged AWS parity comparator against the same pinned base. Budget the sequential reference and candidate loads, both language reference processes and the freeze comparison in its deadline. The comparator verifies prompt IDs, observation masks, latents, logits and generated IDs and publishes a distinct reference-parity.json receipt. Its SHA-256 is in freeze.json alongside the two independent language receipt hashes. The Job publishes the two original receipt files and freeze.json together under `flamingo-baselines/<run>/baseline` on the training claim. Each process has a distinct receipt identity. Freeze reports their ordered digests and the measured repeat tolerance. Preserve the report, both receipts, Job and Pod UIDs, observed node, provider and image ID in the attended closeout.
+The review record contains the exact proposed Job JSON and its SHA-256. The bounded Job first runs the packaged AWS parity comparator against the same pinned base. Budget the sequential reference and candidate loads, both language reference processes and the freeze comparison in its deadline. The comparator verifies prompt IDs, observation masks, latents, logits and generated IDs and publishes a distinct reference-parity.json receipt. Its SHA-256 is in freeze.json alongside the two independent language receipt hashes. The worker adds the released trainer image digest and the ordered language freeze result to the parity report before hashing it. The Job publishes reference-parity.json, the two original language receipt files and freeze.json together under `flamingo-baselines/<run>/baseline` on the training claim. Each process has a distinct receipt identity. Freeze reports their ordered digests and the measured repeat tolerance. Preserve the report, both receipts, Job and Pod UIDs, observed node, provider and image ID in the attended closeout.
 
 ## Fund and submit the baseline
 
@@ -59,11 +59,12 @@ For an uncertain reservation or enrollment, inspect the versioned ledger and aud
 
 ## Promote the approved pair
 
-After successful freeze and fenced handoff, independently approve and record the two SHA-256 values **before fit**. In the existing attended storage context with the published baseline readable and the selected run state prepared, execute as the fit filesystem UID 1000. The helper publishes both verified files under `flamingo-baselines` inside the run state, preserving their exact bytes. An identical completed promotion can be checked again.
+After successful freeze and fenced handoff, verify the reference-parity.json image, base revision, weight manifest, GPU and comparison cases against the attended closeout. Independently approve and record its exact byte SHA-256 and the two ordered language receipt SHA-256 values **before fit**. In the existing attended storage context with the published baseline readable and the selected run state prepared, execute as the fit filesystem UID 1000. The helper publishes all four verified files under `flamingo-baselines` inside the run state, preserving their exact bytes. An identical completed promotion can be checked again.
 
 ```bash
 python3 workloads/smoke/promote-flamingo-baselines.py "$published_baseline" "$prepared_state" \
-  --approved-baselines "$approved_first_sha256" "$approved_second_sha256"
+  --approved-baselines "$approved_first_sha256" "$approved_second_sha256" \
+  --approved-parity-sha256 "$approved_parity_sha256"
 ```
 
-This filesystem operation requires a separately authorized, writer-fenced storage handoff. The two approved digests also belong in the funded fit request. Selected-generation replay runs in the fit worker under that request.
+This filesystem operation requires a separately authorized, writer-fenced storage handoff. Supply the same three approved digests to the fit launcher with `--flamingo-baselines FIRST_SHA REPEAT_SHA --flamingo-parity-sha256 PARITY_SHA`. The fit worker rechecks the approved report, its freeze, both receipts and its own runtime before starting training. A previously staged language-only pair requires a fresh qualification and promotion. Selected-generation replay runs in the fit worker under that request.

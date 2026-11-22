@@ -103,7 +103,7 @@ spec:
     # Native Jobs pass the full argv in command. Keep the interpreter and script
     # outside the variable CLI grammar so neither Python flags nor shell code run.
     - expression: >-
-        size(variables.argv) >= 18 && size(variables.argv) <= 35 &&
+        size(variables.argv) >= 18 && size(variables.argv) <= 37 &&
         variables.argv[0] == (variables.usesGPU ? '/opt/conda/bin/python' : '/usr/local/bin/python') &&
         variables.argv[1] == '/opt/ml-infra/episode_job.py' &&
         (!has(variables.container.args) || size(variables.container.args) == 0) &&
@@ -112,7 +112,7 @@ spec:
           '^[^ ]+ [^ ]+ (fit|infer) (direct|quantile|episode) --run-id [a-z0-9][a-z0-9-]{0,40}[a-z0-9]' +
           ' --bundle-sha256 [a-f0-9]{64} --step [1-9][0-9]* --seed -?[0-9]+ --batch [1-9][0-9]*' +
           ' --attempt [1-9][0-9]* --save-seconds [0-9]+' +
-          '( --direct-objective (normalized-mse|physical-mae) --validation-sha256 [a-f0-9]{64}( --flamingo-binding-sha256 [a-f0-9]{64} --flamingo-baselines [a-f0-9]{64} [a-f0-9]{64})?)?' +
+          '( --direct-objective (normalized-mse|physical-mae) --validation-sha256 [a-f0-9]{64}( --flamingo-binding-sha256 [a-f0-9]{64} --flamingo-baselines [a-f0-9]{64} [a-f0-9]{64} --flamingo-parity-sha256 [a-f0-9]{64})?)?' +
           '( --schedule [1-9][0-9]*)?( --resume)?( --resume-checkpoint [1-9][0-9]*:[a-f0-9]{64})?' +
           '( --graceful-stop)?( --preflight)?$') &&
         (variables.argv[size(variables.argv)-1] == '--preflight') == !variables.usesGPU &&

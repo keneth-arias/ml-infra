@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -20,6 +21,7 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+FLAMINGO_REVISION = "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983"
 FLAMINGO_WEIGHTS = "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f"
 COHORT_WEIGHTS = "1d76cc3cfd4c15f9c749372611e5ca6e0b6f910b1fcf0551ce9157e9bfef29c1"
 
@@ -31,7 +33,7 @@ def flamingo_binding(digest, fit, validation):
     record = {
         "schema": "airaware-flamingo-binding-v1",
         "model": "opentime/tslm-nov26",
-        "revision": "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983",
+        "revision": FLAMINGO_REVISION,
         "weights_manifest_sha256": FLAMINGO_WEIGHTS,
         "cohort_weights_manifest_sha256": COHORT_WEIGHTS,
         "roles": {"fit": fit, "inner_validation": validation},
@@ -42,19 +44,69 @@ def flamingo_binding(digest, fit, validation):
     return raw
 
 
-def validated_baselines(state, digests, image_digest):
+def approved_flamingo_evidence(folder, digests, parity_digest):
+    if (len(digests) != 2 or len(set(digests)) != 2
+            or not all(re.fullmatch(r"[0-9a-f]{64}", d) for d in (*digests, parity_digest))):
+        raise ValueError("Expected an approved parity digest and two ordered baseline digests")
+    if folder.is_symlink() or not folder.is_dir():
+        raise ValueError("Invalid Flamingo baseline directory")
+    evidence = {}
+    for name, pin in [(d + ".json", d) for d in digests] + [
+        ("reference-parity.json", parity_digest), ("freeze.json", None)
+    ]:
+        path = folder / name
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 2 * 1024**2:
+            raise ValueError(f"Expected a bounded regular Flamingo receipt: {name}")
+        raw = path.read_bytes()
+        if pin is not None and hashlib.sha256(raw).hexdigest() != pin:
+            raise ValueError(f"Flamingo receipt differs from approval: {name}")
+        evidence[name] = raw
+
+    trace = json.loads(evidence["reference-parity.json"])
+    freeze = json.loads(evidence["freeze.json"])
+    if (freeze.pop("reference_parity_sha256", None) != parity_digest or trace.get("language_freeze") != freeze
+            or freeze.get("baseline_receipts_sha256") != list(digests)):
+        raise ValueError("Frozen evidence differs from pre-fit approval")
+
+    if (trace.get("protocol") != "per-series-reference-parity-v1"
+            or trace.get("reference_sha256") != "c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2"
+            or trace.get("revision") != FLAMINGO_REVISION
+            or trace.get("weights_manifest_sha256") != FLAMINGO_WEIGHTS
+            or trace.get("dtype") != "float32" or trace.get("atol") != 1e-5 or trace.get("rtol") != 1e-5
+            or trace.get("transformers") != "4.57.6" or not trace.get("torch") or not trace.get("device")
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", trace.get("image_digest", ""))
+            or len(trace.get("cases", [])) != 2):
+        raise ValueError("Unexpected reference parity protocol, base or runtime")
+    for case in trace["cases"]:
+        ids = case.get("generated_ids")
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 8
+                or any(type(t) is not int or t < 0 for t in ids)
+                or any(type(case.get(k)) not in (int, float) or not math.isfinite(case[k]) or case[k] < 0
+                       for k in ("latents_max_abs_error", "logits_max_abs_error"))):
+            raise ValueError("Incomplete reference parity case")
+    for digest in digests:
+        receipt = json.loads(evidence[digest + ".json"])
+        runtime, protocol = receipt["runtime"], receipt["protocol"]
+        if (protocol["base_manifest_sha256"] != trace["weights_manifest_sha256"]
+                or protocol["base_revision"] != trace["revision"] or protocol["precision"] != trace["dtype"]
+                or runtime["device"] != "cuda:0" or runtime["gpu"] != trace["device"]
+                or any(runtime[k] != trace[k] for k in ("image_digest", "torch", "transformers"))):
+            raise ValueError("Reference parity identity differs from language baseline")
+    return evidence
+
+
+def validated_baselines(state, digests, parity_digest, image_digest):
     import torch
     from importlib.metadata import version
     from opentslm.flamingo_qualification import compare
 
     folder = state / "flamingo-baselines"
-    if folder.is_symlink():
-        raise ValueError("Invalid baseline receipt directory")
+    evidence = approved_flamingo_evidence(folder, digests, parity_digest)
     paths = [folder / (digest + ".json") for digest in digests]
-    if any(path.is_symlink() for path in paths):
-        raise ValueError("Invalid baseline receipt file")
-    compare(paths, list(digests))
-    baseline = json.loads(paths[0].read_bytes())
+    frozen = compare(paths, list(digests))
+    if frozen != json.loads(evidence["reference-parity.json"])["language_freeze"]:
+        raise ValueError("Recomputed language freeze differs from parity approval")
+    baseline = json.loads(evidence[paths[0].name])
     runtime = {"device": "cuda:0", "gpu": torch.cuda.get_device_name(0), "cuda": torch.version.cuda,
                "torch": str(torch.__version__), "transformers": version("transformers"),
                "peft": version("peft"), "image_digest": image_digest}
@@ -402,6 +454,7 @@ def main():
     parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
     parser.add_argument("--validation-sha256")
     parser.add_argument("--flamingo-binding-sha256")
+    parser.add_argument("--flamingo-parity-sha256")
     parser.add_argument("--flamingo-baselines", nargs=2, metavar=("FIRST_SHA", "REPEAT_SHA"))
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
@@ -413,10 +466,11 @@ def main():
     parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
     binding = None
-    if bool(args.flamingo_binding_sha256) != bool(args.flamingo_baselines):
-        parser.error("Bind the Flamingo recipe and both approved language baselines together")
+    qualification = (args.flamingo_binding_sha256, args.flamingo_baselines, args.flamingo_parity_sha256)
+    if any(v is not None for v in qualification) and not all(qualification):
+        parser.error("Bind the Flamingo recipe and approved language baselines and reference parity digest together")
     if args.flamingo_binding_sha256 is not None:
-        if (not all(re.fullmatch("[0-9a-f]{64}", d) for d in args.flamingo_baselines)
+        if (not all(re.fullmatch("[0-9a-f]{64}", d) for d in (*args.flamingo_baselines, args.flamingo_parity_sha256))
                 or len(set(args.flamingo_baselines)) != 2):
             parser.error("Two distinct approved Flamingo baselines are required")
         if not args.direct_objective:
@@ -604,7 +658,7 @@ def main():
     evidence = None
     if binding:
         image_digest = os.environ["EPISODE_IMAGE"].rsplit("@", 1)[-1]
-        baselines = validated_baselines(work, args.flamingo_baselines, image_digest)
+        baselines = validated_baselines(work, args.flamingo_baselines, args.flamingo_parity_sha256, image_digest)
 
     def verify_result(generation=None):
         nonlocal evidence
@@ -641,7 +695,7 @@ def main():
     identity = {
         k: v
         for k, v in vars(args).items()
-        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256", "flamingo_baselines"))
+        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256", "flamingo_baselines", "flamingo_parity_sha256"))
         and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]

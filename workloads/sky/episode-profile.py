@@ -135,6 +135,7 @@ def main():
     p.add_argument("--step", type=int, required=True)
     p.add_argument("--schedule", type=int)
     p.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
+    p.add_argument("--flamingo-parity-sha256")
     p.add_argument("--flamingo-baselines", nargs=2, metavar=("FIRST_SHA", "REPEAT_SHA"))
     p.add_argument("--flamingo-binding-sha256", help="AirAware binding for the per-series Gemma forecast adapter")
     p.add_argument("--validation-sha256", help="Separately pinned direct inner-validation cohort")
@@ -184,10 +185,11 @@ def main():
                 or (a.phase, a.head) != ("fit", "direct") or a.batch != 16 or a.seed not in (27, 28)
                 or a.step != a.schedule or a.schedule < 500):
             p.error("A matched direct fit requires both pinned cohorts, cached weights and a full batch-16 epoch")
-    if bool(a.flamingo_binding_sha256) != bool(a.flamingo_baselines):
-        p.error("Supply the Flamingo binding and both approved baseline receipts together")
+    qualification = (a.flamingo_binding_sha256, a.flamingo_baselines, a.flamingo_parity_sha256)
+    if any(v is not None for v in qualification) and not all(qualification):
+        p.error("Supply the Flamingo binding and both approved baseline receipts and the parity digest together")
     if a.flamingo_binding_sha256 is not None and (
-        not all(re.fullmatch("[0-9a-f]{64}", d) for d in a.flamingo_baselines) or len(set(a.flamingo_baselines)) != 2
+        not all(re.fullmatch("[0-9a-f]{64}", d) for d in (*a.flamingo_baselines, a.flamingo_parity_sha256)) or len(set(a.flamingo_baselines)) != 2
         or not re.fullmatch("[0-9a-f]{64}", a.flamingo_binding_sha256) or not a.direct_objective
         or a.target != "prod-nebius" or a.format == "sky" or not a.preflight_image
     ):
@@ -233,7 +235,8 @@ def main():
     if a.direct_objective:
         cmd.extend(["--direct-objective", a.direct_objective, "--validation-sha256", a.validation_sha256])
     if a.flamingo_binding_sha256:
-        cmd.extend(["--flamingo-binding-sha256", a.flamingo_binding_sha256, "--flamingo-baselines", *a.flamingo_baselines])
+        cmd.extend(["--flamingo-binding-sha256", a.flamingo_binding_sha256,
+                    "--flamingo-baselines", *a.flamingo_baselines, "--flamingo-parity-sha256", a.flamingo_parity_sha256])
     if a.schedule is not None:
         cmd.extend(["--schedule", str(a.schedule)])
     if a.resume:

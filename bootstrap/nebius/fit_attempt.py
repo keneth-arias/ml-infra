@@ -54,10 +54,22 @@ def describe(preflight, task):
         "preflight_image": validator["image"],
         "trainer_image": next(v["value"] for v in validator["env"] if v["name"] == "EPISODE_IMAGE"),
     }
-    if "--flamingo-binding-sha256" in cmd:
+    worker_cmd = pod_spec["containers"][0]["command"] if mode == "job" else []
+    if "--flamingo-binding-sha256" in cmd or "--flamingo-binding-sha256" in worker_cmd:
         pair["flamingo_binding"] = arg("flamingo-binding-sha256")
+        pair["flamingo_parity_sha256"] = arg("flamingo-parity-sha256")
+        if not sha(pair["flamingo_parity_sha256"]):
+            raise ValueError("Require the independently approved parity report digest")
         first = cmd.index("--flamingo-baselines") + 1
         pair["flamingo_baselines"] = cmd[first:first + 2]
+        approved = ["--flamingo-binding-sha256", pair["flamingo_binding"], "--flamingo-baselines",
+                    *pair["flamingo_baselines"], "--flamingo-parity-sha256", pair["flamingo_parity_sha256"]]
+        for command in (cmd, worker_cmd):
+            if any(command.count(flag) != 1 for flag in ("--flamingo-binding-sha256", "--flamingo-baselines", "--flamingo-parity-sha256")):
+                raise ValueError("Require one set of approved Flamingo evidence per Job")
+            start = command.index("--flamingo-binding-sha256")
+            if command[start:start + len(approved)] != approved:
+                raise ValueError("Preflight and fit must carry the same approved Flamingo evidence")
     return {
         "mode": mode,
         "task_sha256": digest(task),

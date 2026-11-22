@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 
 
 def collect(image_digest, output):
+    from episode_job import approved_flamingo_evidence
+
     final = output / "baseline"
     if final.exists() or final.is_symlink():
         raise FileExistsError("Baseline already published")
@@ -34,11 +36,6 @@ def collect(image_digest, output):
             cwd=cwd, check=True, env={**os.environ, "PYTHONPATH": cwd},
         )
         trace = json.loads(parity.read_bytes())
-        if (trace["protocol"] != "per-series-reference-parity-v1"
-                or trace["reference_sha256"] != "c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2"
-                or trace["weights_manifest_sha256"] != "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f"
-                or len(trace["cases"]) != 2):
-            raise ValueError("The parity receipt differs from the pinned reference and model")
         paths = [stage / "base-1.json", stage / "base-2.json"]
         for path in paths:
             subprocess.run([*cli, "base", "--weights", "/base/weights", "--image-digest", image_digest,
@@ -50,13 +47,19 @@ def collect(image_digest, output):
             raise ValueError("Freeze did not identify these two fresh-process receipts")
         for path, pin in zip(paths, pins):
             path.rename(stage / (pin + ".json"))
+        # Bind the comparison to this issued Job image and the exact language
+        # freeze before hashing. The signed release supplies the digest at run time.
+        trace.update(image_digest=image_digest, language_freeze=report)
+        parity.write_text(json.dumps(trace, sort_keys=True, allow_nan=False) + "\n")
         report["reference_parity_sha256"] = hashlib.sha256(parity.read_bytes()).hexdigest()
         (stage / "freeze.json").write_text(json.dumps(report, sort_keys=True) + "\n")
+        approved_flamingo_evidence(stage, pins, report["reference_parity_sha256"])
         os.rename(stage, final)
     print(json.dumps(report, sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, "/opt/ml-infra")
     output = Path("/output")
     if os.geteuid() != 1000 or output.stat().st_uid != 1000 or any(output.iterdir()):
         raise ValueError("Expected the staged, empty baseline output owned by UID 1000")
