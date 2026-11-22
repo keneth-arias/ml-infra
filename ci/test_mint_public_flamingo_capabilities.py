@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import io
 import json
 import runpy
@@ -55,6 +56,26 @@ class MintTests(unittest.TestCase):
             self.assertEqual(query["versionId"],["1"])
             self.assertEqual(query["X-Amz-SignedHeaders"],["host"])
             self.assertEqual(tool["expiration"](row["url"]),expiry)
+
+    def test_signature_matches_get_and_rejects_put_delete_and_head(self):
+        raw, _, _ = self.mint()
+        for entry in json.loads(raw)["base"]:
+            parsed = urlsplit(entry["url"])
+            query = parse_qs(parsed.query)
+            stamp = query["X-Amz-Date"][0]
+            scope = stamp[:8] + "/eu-south1/s3/aws4_request"
+            key = ("AWS4" + self.secret).encode()
+            for piece in scope.split("/"):
+                key = hmac.digest(key, piece.encode(), "sha256")
+            signed_query = "&".join(sorted(pair for pair in parsed.query.split("&")
+                                           if not pair.startswith("X-Amz-Signature=")))
+            for method in ("GET", "PUT", "DELETE", "HEAD"):
+                canonical = "\n".join((method, parsed.path, signed_query,
+                                       "host:" + parsed.netloc + "\n", "host", "UNSIGNED-PAYLOAD"))
+                to_sign = "\n".join(("AWS4-HMAC-SHA256", stamp, scope,
+                                    hashlib.sha256(canonical.encode()).hexdigest()))
+                signature = hmac.digest(key, to_sign.encode(), "sha256").hex()
+                self.assertEqual(signature == query["X-Amz-Signature"][0], method == "GET")
 
     def test_wrong_key_and_long_term_fail_before_mint(self):
         self.enroll["access_key_id_sha256"]="0"*64
