@@ -19,8 +19,10 @@ class NativeActivationTest(unittest.TestCase):
         cls.policy, cls.binding = cls.functions["held_policy_and_binding"]()
         cls.images = {
             role: next(v["expression"][1:-1] for v in cls.policy["spec"]["variables"]
-                       if v["name"] == role + "Image")
-            for role in ("trainer", "preflight")
+                       if v["name"] == variable)
+            for role, variable in (("trainer", "trainerImage"), ("preflight", "preflightImage"),
+                                   ("flamingo-trainer", "flamingoTrainerImage"),
+                                   ("flamingo-preflight", "flamingoPreflightImage"))
         }
 
     def test_held_default_and_only_bounded_policy_changes(self):

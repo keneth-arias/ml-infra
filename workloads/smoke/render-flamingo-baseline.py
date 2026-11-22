@@ -77,7 +77,7 @@ def main():
     images, approval = current_release()
     if approval != a.expected_deployment:
         raise ValueError("Signed deployment differs from approval")
-    job = render(images["trainer"], a.run, a.node, a.deadline_seconds, a.gpu_limit_bytes)
+    job = render(images["flamingo-trainer"], a.run, a.node, a.deadline_seconds, a.gpu_limit_bytes)
     kube = kubectl_client_for_identity("training", identity, direct=True)
     node = json.loads(subprocess.check_output([*kube, "get", "node", a.node, "-o", "json"], timeout=15))
     if (node["metadata"]["name"] != a.node or node["metadata"].get("deletionTimestamp")

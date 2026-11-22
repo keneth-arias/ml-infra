@@ -53,7 +53,7 @@ class BaselineTest(unittest.TestCase):
                 "--run", "example", "--deadline-seconds", "300", "--gpu-limit-bytes", "100"]
         with (patch.dict(os.environ, NEBIUS_STAGING_OPERATOR_IDENTITY="reader", NEBIUS_TRAINING_CLUSTER_ID="target"),
               patch.object(sys, "argv", args),
-              patch.dict(main.__globals__, current_release=lambda: ({"trainer": IMAGE}, PIN)),
+              patch.dict(main.__globals__, current_release=lambda: ({"flamingo-trainer": IMAGE}, PIN)),
               patch.dict(main.__globals__, kubectl_client_for_identity=self.client),
               patch("subprocess.check_output", return_value=json.dumps(node)) as call,
               contextlib.redirect_stdout(io.StringIO()) as out):
@@ -66,7 +66,7 @@ class BaselineTest(unittest.TestCase):
             call.return_value = json.dumps(node)
             with self.assertRaisesRegex(ValueError, "allocation"):
                 main()
-            with patch.dict(main.__globals__, current_release=lambda: ({"trainer": IMAGE}, "b" * 64)):
+            with patch.dict(main.__globals__, current_release=lambda: ({"flamingo-trainer": IMAGE}, "b" * 64)):
                 with self.assertRaisesRegex(ValueError, "deployment"):
                     main()
 

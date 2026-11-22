@@ -80,7 +80,7 @@ class GuardTest(unittest.TestCase):
                 save(key, obj)
             def describe():
                 return B["baseline_request"](args, scope, "c"*64,
-                                             {"trainer": JOB["spec"]["template"]["spec"]["containers"][0]["image"]}, "f"*64)
+                                             {"flamingo-trainer": JOB["spec"]["template"]["spec"]["containers"][0]["image"]}, "f"*64)
             request, job, binding = describe()
             self.assertEqual((job, binding[2], request["node_uid"]), (JOB, "computedisk-1", UID))
             self.assertEqual(request["staging_sha256"], B["sha"](B["canonical"](stage)))

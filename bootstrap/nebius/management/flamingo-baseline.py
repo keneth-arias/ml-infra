@@ -120,7 +120,7 @@ def baseline_request(args, scope, scope_hash, images, receipt):
     run = job["metadata"]["labels"]["airaware.training/run"]
     deadline = job["spec"]["activeDeadlineSeconds"]
     limit = int(pod["containers"][0]["env"][-1]["value"])
-    expected = render(images["trainer"], run, node, deadline, limit)
+    expected = render(images["flamingo-trainer"], run, node, deadline, limit)
     if (review["schema"] != "flamingo-baseline-review-v1" or canonical(expected).decode() != review["job_json"]
             or sha(canonical(expected)) != review["job_sha256"] or type(deadline) != int
             or receipt != args.expected_deployment or review["deployment_sha256"] != receipt
@@ -460,7 +460,7 @@ def main():
     images, deployment = current_release()
     candidate = json.loads((ROOT / "bootstrap/nebius/releases/flamingo-candidate.json").read_bytes())
     roles = {role: item["repository"] + "@" + item["index"] for role, item in candidate["images"].items()}
-    if roles != {role: images[role] for role in ("trainer", "preflight")}:
+    if roles != {role: images["flamingo-" + role] for role in ("trainer", "preflight")}:
         raise ValueError("Signed release differs from the checked-in Flamingo candidate")
     request, job, binding = baseline_request(args, scope, sha(scope_raw), images, deployment)
     result = request if args.action == "describe" else submit(args, scope, request, job, binding, images, deployment)

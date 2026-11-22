@@ -45,13 +45,23 @@ spec:
            (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
     # Compare both literals with the signed release before activating this policy.
     - name: trainerImage
-      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:af2a985e4a4d030082d527b3f0bf6c09944a73013fffed5d5fd2f1f51525ec7b'"
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b'"
     - name: preflightImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:50e25655174b3a2ceb7d16a31cf9bfffbc009cd44c11648e18eba31312d2ba6c'"
+    - name: flamingoTrainerImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:af2a985e4a4d030082d527b3f0bf6c09944a73013fffed5d5fd2f1f51525ec7b'"
+    - name: flamingoPreflightImage
       expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:fbc4b1c96d1d48834ad5615af7436dc1ac27159b1d85f565056761ebb25ade36'"
     - name: container
       expression: variables.pod.containers[0]
     - name: argv
       expression: "has(variables.container.command) ? variables.container.command : []"
+    - name: flamingo
+      expression: "'--flamingo-binding-sha256' in variables.argv"
+    - name: fitImage
+      expression: "variables.flamingo ? variables.flamingoTrainerImage : variables.trainerImage"
+    - name: checkImage
+      expression: "variables.flamingo ? variables.flamingoPreflightImage : variables.preflightImage"
     - name: mounts
       expression: "has(variables.container.volumeMounts) ? variables.container.volumeMounts : []"
     - name: phase
@@ -63,7 +73,7 @@ spec:
     - expression: "false"
       message: Native training submission is closed during CPU qualification.
     - expression: >-
-        variables.container.image == (variables.usesGPU ? variables.trainerImage : variables.preflightImage)
+        variables.container.image == (variables.usesGPU ? variables.fitImage : variables.checkImage)
       message: Require the approved image for this native Job role.
     - expression: >-
         has(object.spec.parallelism) && object.spec.parallelism == 1 &&
@@ -174,7 +184,7 @@ spec:
         variables.container.env.exists_one(e, e.name == 'EPISODE_IMAGE') &&
         variables.container.env.all(e,
           (has(e.value) &&
-           ((e.name == 'EPISODE_IMAGE' && e.value == variables.trainerImage) ||
+           ((e.name == 'EPISODE_IMAGE' && e.value == variables.fitImage) ||
             (e.name == 'OMP_NUM_THREADS' && e.value == '2') ||
             (e.name == 'HF_HUB_OFFLINE' && e.value == '1') ||
             (variables.usesGPU &&

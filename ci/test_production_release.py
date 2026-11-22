@@ -101,6 +101,43 @@ class ProductionReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "approved preflight image"):
             release.check_native_policy(images, policy)
 
+    def test_separate_signed_roles_bind_native_backbone(self):
+        release_doc = copy.deepcopy(self.release)
+        gemma = copy.deepcopy(release_doc["paired"])
+        gemma["images"] = {"trainer": candidate(release.PAIRED, "d"), "preflight": candidate(release.PAIRED, "e")}
+        release_doc.update(schema="nebius-image-release-v2", flamingo=gemma)
+        raw = json.dumps(release_doc).encode()
+        self.sign("release.json", raw)
+        self.sign("deployment.json", json.dumps({**self.approval, "release_sha256": sha256(raw).hexdigest()}).encode())
+        refs, _ = self.verify()
+        self.assertEqual(len(set(refs.values())), 5)
+        variables = [{"name": var, "expression": repr(refs[role])} for role, var in release.ROLE_VARIABLES.items()]
+        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "episode-submit-inputs"},
+                  "spec": {"variables": variables}}
+        release.check_native_policy(refs, policy)
+        with self.assertRaisesRegex(ValueError, "flamingo-trainer"):
+            release.check_native_policy(release.release_refs(self.release), policy)
+
+        def job(role, trainer, flags):
+            container = {"image": refs[role], "env": [{"name": "EPISODE_IMAGE", "value": refs[trainer]}],
+                         "command": ["python", "episode_job.py", *flags]}
+            return {"kind": "Job", "spec": {"template": {"spec": {"containers": [container]}}}}
+
+        for prefix, flags in (("", []), ("flamingo-", ["--flamingo-binding-sha256", "1" * 64])):
+            trainer, preflight = prefix + "trainer", prefix + "preflight"
+            pre, task = job(preflight, trainer, flags), job(trainer, trainer, flags)
+            release.check_episode(refs, pre, task)
+            other = "trainer" if prefix else "flamingo-trainer"
+            for wrong_pre, wrong_task in ((job(other.replace("trainer", "preflight"), trainer, flags), task),
+                                           (job(preflight, other, flags), task),
+                                           (pre, job(other, trainer, flags)),
+                                           (pre, job(trainer, trainer, [] if prefix else ["--flamingo-binding-sha256"]))):
+                with self.assertRaises(ValueError):
+                    release.check_episode(refs, wrong_pre, wrong_task)
+        release_doc["flamingo"] = release_doc["paired"]
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            release.release_refs(release_doc)
+
     def test_invalid_candidate_records(self):
         for field, value in (("index", "latest"), ("repository", "example.invalid/trainer")):
             data = copy.deepcopy(self.release)
