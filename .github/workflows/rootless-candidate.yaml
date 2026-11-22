@@ -1,10 +1,20 @@
-name: Verify private rootless worker
+name: Verify private Nebius candidate images
 on:
   pull_request:
     paths:
       - .github/workflows/rootless-candidate.yaml
+      - bootstrap/microk8s/build-episodes.sh
+      - runtime/episode_job.py
+      - runtime/episode_stop.py
+      - runtime/stage_episode_inputs.py
+      - runtime/versioned_episode_inputs.py
+      - runtime/Dockerfile.episodes
+      - runtime/Dockerfile.preflight
+      - ci/test_paired_image.py
       - bootstrap/nebius/management/rootless/**
       - bootstrap/nebius/releases/**
+      - ci/oci_candidate.py
+      - ci/verify-paired-image.py
       - ci/verify-rootless-image.py
       - ci/cpu_admission_receipt.py
       - platform/overlays/prod/sky-cpu/**
@@ -14,8 +24,18 @@ permissions:
   packages: read
 jobs:
   pull-and-verify:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {role: rootless-cpu, check: pull-and-verify}
+          - {pair: flamingo, role: trainer, check: verify-paired-trainer}
+          - {pair: flamingo, role: preflight, check: verify-paired-preflight}
+          - {pair: qwen, role: trainer, check: verify-qwen-trainer}
+          - {pair: qwen, role: preflight, check: verify-qwen-preflight}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -23,6 +43,7 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - name: Bind the rendered CPU policy to its qualification receipt
+        if: matrix.role == 'rootless-cpu'
         run: |
           set -euo pipefail
           uv run --with PyYAML==6.0.3 python ci/cpu_admission_receipt.py "$RUNNER_TEMP/admitted.json" > "$RUNNER_TEMP/admitted-revision"
@@ -39,6 +60,8 @@ jobs:
           chmod 700 "$RUNNER_TEMP/cosign"
       - name: Cold pull the OCI index and verify the candidate
         env:
+          PAIR: ${{ matrix.pair }}
+          ROLE: ${{ matrix.role }}
           REGISTRY_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -48,6 +71,45 @@ jobs:
           trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
           printf '%s' "$REGISTRY_READ_TOKEN" | skopeo login --authfile "$DOCKER_CONFIG/config.json" -u "$GITHUB_ACTOR" --password-stdin ghcr.io
           unset REGISTRY_READ_TOKEN
+          pull_and_verify() {
+            local commit=$1 image=$2 layout=$3
+            shift 3
+            skopeo copy --all --preserve-digests --authfile "$DOCKER_CONFIG/config.json" \
+              "docker://$image" "oci:$layout:qualified"
+            python3 "$@" "$layout"
+            "$RUNNER_TEMP/cosign" verify --key bootstrap/nebius/releases/qualification.pub \
+              --insecure-ignore-tlog=true -a "role=$ROLE" -a "build_commit=$commit" "$image"
+          }
+          if [[ "$ROLE" != rootless-cpu ]]; then
+            [[ "$ROLE" == preflight || "$ROLE" == trainer ]]
+            [[ "$PAIR" == flamingo || "$PAIR" == qwen ]]
+            receipt="bootstrap/nebius/releases/$PAIR-candidate.json"
+            commit=$(jq -er .build_commit "$receipt")
+            digest=$(jq -er --arg role "$ROLE" '.images[$role].index' "$receipt")
+            [[ "$commit" =~ ^[a-f0-9]{40}$ && "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            git merge-base --is-ancestor "$commit" HEAD
+            if [[ "$PAIR" == qwen ]]; then
+              # Canonical .paired from the signed production release, including all three source commits.
+              signed_pair_sha256=3991dac5ff326c81333d2379543beea99686093abd73a74cfc16f9eaf27c7464
+              jq -cS . "$receipt" | sha256sum --check <(echo "$signed_pair_sha256  -")
+            else
+              git diff --exit-code "$commit" HEAD -- bootstrap/microk8s/build-episodes.sh \
+                runtime/{episode_job.py,episode_stop.py,stage_episode_inputs.py,versioned_episode_inputs.py,Dockerfile.episodes,Dockerfile.preflight}
+            fi
+            image="ghcr.io/keneth-arias/ml-infra-qwen@$digest"
+            pull_and_verify "$commit" "$image" "$RUNNER_TEMP/pulled" ci/verify-paired-image.py "$receipt" "$ROLE"
+            if [[ "$PAIR" == qwen && "$ROLE" == trainer ]]; then
+              # Make space on the hosted runner before Docker expands the trainer.
+              rm -rf -- "$RUNNER_TEMP/pulled"
+              sudo rm -rf -- /usr/local/lib/android/sdk
+              platform="ghcr.io/keneth-arias/ml-infra-qwen@$(jq -er .images.trainer.linux_amd64 "$receipt")"
+              docker pull --platform linux/amd64 "$platform"
+              docker run --rm --pull=never --network=none --runtime=runc \
+                -e CUDA_VISIBLE_DEVICES= -e HF_HUB_OFFLINE=1 --entrypoint /opt/conda/bin/python "$platform" \
+                -c 'from transformers import Qwen3_5ForConditionalGeneration; print(Qwen3_5ForConditionalGeneration.__name__)'
+            fi
+            exit 0
+          fi
           verify_receipt() {
             local receipt=$1 source_revision=$2 layout=$3 commit digest image
             commit=$(jq -er .build_commit "$receipt")
@@ -57,11 +119,7 @@ jobs:
             git diff --exit-code "$commit" "$source_revision" -- bootstrap/nebius/management/rootless \
               ':(exclude)bootstrap/nebius/management/rootless/README.md'
             image="ghcr.io/keneth-arias/ml-infra-sky-cpu@$digest"
-            skopeo copy --all --preserve-digests --authfile "$DOCKER_CONFIG/config.json" \
-              "docker://$image" "oci:$layout:qualified"
-            python3 ci/verify-rootless-image.py "$receipt" "$layout"
-            "$RUNNER_TEMP/cosign" verify --key bootstrap/nebius/releases/qualification.pub \
-              --insecure-ignore-tlog=true -a role=rootless-cpu -a "build_commit=$commit" "$image"
+            pull_and_verify "$commit" "$image" "$layout" ci/verify-rootless-image.py "$receipt"
           }
           current=bootstrap/nebius/releases/rootless-candidate.json
           verify_receipt "$current" HEAD "$RUNNER_TEMP/candidate"

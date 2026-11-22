@@ -43,15 +43,25 @@ spec:
         variables.pod.containers.exists(c, has(c.resources) &&
           ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
            (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
-    # Compare both literals with the signed release before activating this policy.
+    # Check Qwen pins against every signed release and Flamingo pins against v2 releases.
     - name: trainerImage
       expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b'"
     - name: preflightImage
       expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:50e25655174b3a2ceb7d16a31cf9bfffbc009cd44c11648e18eba31312d2ba6c'"
+    - name: flamingoTrainerImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:8c77e60c4ff1af015ea5620364ae13885b64296d8f7b8681ef1d85a7d3674376'"
+    - name: flamingoPreflightImage
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:1118d72d85202744a1d699e09dab5e70c213d24b9b0e653178f03e40dda5e97d'"
     - name: container
       expression: variables.pod.containers[0]
     - name: argv
       expression: "has(variables.container.command) ? variables.container.command : []"
+    - name: flamingo
+      expression: "'--flamingo-binding-sha256' in variables.argv"
+    - name: fitImage
+      expression: "variables.flamingo ? variables.flamingoTrainerImage : variables.trainerImage"
+    - name: checkImage
+      expression: "variables.flamingo ? variables.flamingoPreflightImage : variables.preflightImage"
     - name: mounts
       expression: "has(variables.container.volumeMounts) ? variables.container.volumeMounts : []"
     - name: phase
@@ -63,7 +73,7 @@ spec:
     - expression: "false"
       message: Native training submission is closed during CPU qualification.
     - expression: >-
-        variables.container.image == (variables.usesGPU ? variables.trainerImage : variables.preflightImage)
+        variables.container.image == (variables.usesGPU ? variables.fitImage : variables.checkImage)
       message: Require the approved image for this native Job role.
     - expression: >-
         has(object.spec.parallelism) && object.spec.parallelism == 1 &&
@@ -93,7 +103,7 @@ spec:
     # Native Jobs pass the full argv in command. Keep the interpreter and script
     # outside the variable CLI grammar so neither Python flags nor shell code run.
     - expression: >-
-        size(variables.argv) >= 18 && size(variables.argv) <= 30 &&
+        size(variables.argv) >= 18 && size(variables.argv) <= 37 &&
         variables.argv[0] == (variables.usesGPU ? '/opt/conda/bin/python' : '/usr/local/bin/python') &&
         variables.argv[1] == '/opt/ml-infra/episode_job.py' &&
         (!has(variables.container.args) || size(variables.container.args) == 0) &&
@@ -102,7 +112,7 @@ spec:
           '^[^ ]+ [^ ]+ (fit|infer) (direct|quantile|episode) --run-id [a-z0-9][a-z0-9-]{0,40}[a-z0-9]' +
           ' --bundle-sha256 [a-f0-9]{64} --step [1-9][0-9]* --seed -?[0-9]+ --batch [1-9][0-9]*' +
           ' --attempt [1-9][0-9]* --save-seconds [0-9]+' +
-          '( --direct-objective (normalized-mse|physical-mae) --validation-sha256 [a-f0-9]{64})?' +
+          '( --direct-objective (normalized-mse|physical-mae) --validation-sha256 [a-f0-9]{64}( --flamingo-binding-sha256 [a-f0-9]{64} --flamingo-baselines [a-f0-9]{64} [a-f0-9]{64} --flamingo-parity-sha256 [a-f0-9]{64})?)?' +
           '( --schedule [1-9][0-9]*)?( --resume)?( --resume-checkpoint [1-9][0-9]*:[a-f0-9]{64})?' +
           '( --graceful-stop)?( --preflight)?$') &&
         (variables.argv[size(variables.argv)-1] == '--preflight') == !variables.usesGPU &&
@@ -174,7 +184,7 @@ spec:
         variables.container.env.exists_one(e, e.name == 'EPISODE_IMAGE') &&
         variables.container.env.all(e,
           (has(e.value) &&
-           ((e.name == 'EPISODE_IMAGE' && e.value == variables.trainerImage) ||
+           ((e.name == 'EPISODE_IMAGE' && e.value == variables.fitImage) ||
             (e.name == 'OMP_NUM_THREADS' && e.value == '2') ||
             (e.name == 'HF_HUB_OFFLINE' && e.value == '1') ||
             (variables.usesGPU &&

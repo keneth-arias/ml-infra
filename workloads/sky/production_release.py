@@ -15,29 +15,55 @@ TRUST = Path("/etc/ml-infra/nebius-release")
 ROOTLESS = "ghcr.io/keneth-arias/ml-infra-sky-cpu"
 PAIRED = "ghcr.io/keneth-arias/ml-infra-qwen"
 ROLES = ("rootless-cpu", "trainer", "preflight")
+FLAMINGO_ROLES = ("flamingo-trainer", "flamingo-preflight")
+ROLE_VARIABLES = {"trainer": "trainerImage", "preflight": "preflightImage",
+                  "flamingo-trainer": "flamingoTrainerImage", "flamingo-preflight": "flamingoPreflightImage"}
+QWEN_ONLY = {
+    "expression": "!variables.flamingo",
+    "message": "Flamingo Jobs require a signed dual-backbone release.",
+}
+QWEN_IMAGE_SELECTORS = {"fitImage": "variables.trainerImage", "checkImage": "variables.preflightImage"}
+QWEN_ONLY_VARIABLES = {
+    "argv": "has(variables.container.command) ? variables.container.command : []",
+    "flamingo": "'--flamingo-binding-sha256' in variables.argv",
+    **QWEN_IMAGE_SELECTORS,
+}
+
+
+def model_roles(command):
+    return FLAMINGO_ROLES if "--flamingo-binding-sha256" in command else ("trainer", "preflight")
 
 
 def release_refs(release):
-    if release["schema"] != "nebius-image-release-v1":
-        raise ValueError("Unexpected image release format")
-    cpu, pair = release["rootless"], release["paired"]
-    if cpu["role"] != "rootless-cpu" or pair["schema"] != "paired-forecast-candidate-v1":
-        raise ValueError("Unexpected candidate role or format")
-    if set(pair["images"]) != {"trainer", "preflight"}:
-        raise ValueError("Expected exactly the trainer and preflight roles")
-    for commit in (cpu["build_commit"], pair["build_commit"], pair["forecast_commit"], pair["reader_commit"]):
-        if not re.fullmatch(r"[0-9a-f]{40}", commit) or commit == "0" * 40:
-            raise ValueError("Expected immutable candidate source commits")
+    dual = release["schema"] == "nebius-image-release-v2"
+    if (not dual and release["schema"] != "nebius-image-release-v1") or ("flamingo" in release) != dual:
+        raise ValueError("Unexpected image release format or backbone roles")
+    cpu = release["rootless"]
+    if cpu["role"] != "rootless-cpu":
+        raise ValueError("Unexpected rootless candidate role")
+    records = {"rootless-cpu": cpu}
+    commits = [cpu["build_commit"]]
+    pairs = [("paired", "")]
+    if dual:
+        pairs.append(("flamingo", "flamingo-"))
+    for key, prefix in pairs:
+        pair = release[key]
+        if pair["schema"] != "paired-forecast-candidate-v1" or set(pair["images"]) != {"trainer", "preflight"}:
+            raise ValueError("Expected a paired candidate with exactly the trainer and preflight roles")
+        commits.extend(pair[k] for k in ("build_commit", "forecast_commit", "reader_commit"))
+        records.update({prefix + role: record for role, record in pair["images"].items()})
+    if any(not re.fullmatch(r"[0-9a-f]{40}", commit) or commit == "0" * 40 for commit in commits):
+        raise ValueError("Expected immutable candidate source commits")
     refs = {}
-    for role, record in {"rootless-cpu": cpu, **pair["images"]}.items():
+    for role, record in records.items():
         expected_repo = ROOTLESS if role == "rootless-cpu" else PAIRED
         if record["repository"] != expected_repo or not all(
             re.fullmatch(r"sha256:[0-9a-f]{64}", record[k]) for k in ("index", "linux_amd64", "config")
         ):
             raise ValueError(f"Unexpected repository or OCI digest for {role}")
         refs[role] = f"{expected_repo}@{record['index']}"
-    if refs["trainer"] == refs["preflight"]:
-        raise ValueError("Trainer and preflight must use distinct OCI indexes")
+    if len(set(refs.values())) != len(refs):
+        raise ValueError("All backbone and preflight roles must use distinct OCI indexes")
     return refs
 
 
@@ -85,7 +111,7 @@ def release_images():
 
 
 def require_image(images, role, ref):
-    if ref != images[role]:
+    if role not in images or ref != images[role]:
         raise ValueError(f"Image differs from the approved {role} role")
 
 
@@ -95,30 +121,59 @@ def single_container(pod):
     return pod["containers"][0]
 
 
-def check_native_policy(images, policy):
+def check_native_policy(images, policy, *, allow_held_candidates=False):
     if (policy.get("kind"), policy.get("metadata", {}).get("name")) != (
         "ValidatingAdmissionPolicy", "episode-submit-inputs"
     ):
         raise ValueError("Expected the native training admission policy")
-    variables = policy["spec"]["variables"]
-    for role in ("trainer", "preflight"):
-        expressions = [v["expression"] for v in variables if v["name"] == role + "Image"]
-        if expressions != [repr(images[role])]:
+    spec = policy["spec"]
+    flamingo_roles = images.keys() & set(FLAMINGO_ROLES)
+    if flamingo_roles and flamingo_roles != set(FLAMINGO_ROLES):
+        raise ValueError("Expected both signed Flamingo roles")
+    checks = spec.get("validations", [])
+    held_qwen_release = (allow_held_candidates and not flamingo_roles and checks
+                         and checks[0]["expression"] == "false")
+
+    def expressions(name):
+        return [v["expression"] for v in spec["variables"] if v["name"] == name]
+
+    for role, variable in ROLE_VARIABLES.items():
+        if held_qwen_release and role in FLAMINGO_ROLES:
+            continue
+        expected = [repr(images[role])] if role in images else []
+        if role not in FLAMINGO_ROLES and not expected:
+            raise ValueError(f"Missing signed {role} image")
+        if expressions(variable) != expected:
             raise ValueError(f"Native admission policy differs from the approved {role} image")
+    if not flamingo_roles and not held_qwen_release and (
+        checks.count(QWEN_ONLY) != 1
+        or any(expressions(name) != [expression] for name, expression in QWEN_ONLY_VARIABLES.items())
+    ):
+        raise ValueError("A v1 native admission policy requires the explicit Flamingo denial and Qwen image selectors")
+
+
+def check_trainer_env(container, trainer):
+    bound = [e.get("value") for e in container["env"] if e["name"] == "EPISODE_IMAGE"]
+    if bound != [trainer]:
+        raise ValueError("Job does not identify the released trainer")
 
 
 def check_episode(images, preflight, task):
     if preflight.get("kind") != "Job":
         raise ValueError("Expected the rendered preflight Job")
     validator = single_container(preflight["spec"]["template"]["spec"])
-    require_image(images, "preflight", validator["image"])
-    bound = [e.get("value") for e in validator["env"] if e["name"] == "EPISODE_IMAGE"]
-    if bound != [images["trainer"]]:
-        raise ValueError("Preflight does not identify the released trainer")
+    train_role, pre_role = model_roles(validator["command"])
+    require_image(images, pre_role, validator["image"])
+    check_trainer_env(validator, images[train_role])
     if task.get("kind") == "Job":
         container = single_container(task["spec"]["template"]["spec"])
-        require_image(images, "trainer", container["image"])
+        if model_roles(container["command"]) != (train_role, pre_role):
+            raise ValueError("Preflight and fit must use the same backbone")
+        require_image(images, train_role, container["image"])
+        check_trainer_env(container, images[train_role])
     else:
+        if train_role != "trainer":
+            raise ValueError("Flamingo requires a native managed Job")
         resources = task["resources"]
         if resources["infra"] != "k8s/prod-nebius":
             raise ValueError("Expected the managed SkyPilot target")
@@ -135,8 +190,9 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("manifest", help="Assemble unsigned release bytes from the two candidate receipts")
     build.add_argument("rootless", type=Path)
-    build.add_argument("paired", type=Path)
-    commands.add_parser("reference", help="Print one verified production reference").add_argument("role", choices=ROLES)
+    build.add_argument("paired", type=Path, help="Approved Qwen trainer and preflight candidate")
+    build.add_argument("--flamingo", type=Path, help="Additional approved Flamingo trainer and preflight candidate")
+    commands.add_parser("reference", help="Print one verified production reference").add_argument("role", choices=ROLES + FLAMINGO_ROLES)
     commands.add_parser("check-native-policy", help="Compare policy JSON on stdin with the signed role images")
     episode = commands.add_parser("check-episode")
     episode.add_argument("preflight", type=Path)
@@ -145,6 +201,9 @@ def main():
     if args.command == "manifest":
         release = {"schema": "nebius-image-release-v1", "rootless": json.loads(args.rootless.read_bytes()),
                    "paired": json.loads(args.paired.read_bytes())}
+        if args.flamingo:
+            release["schema"] = "nebius-image-release-v2"
+            release["flamingo"] = json.loads(args.flamingo.read_bytes())
         release_refs(release)
         print(json.dumps(release, sort_keys=True, indent=2))
     else:
@@ -152,7 +211,7 @@ def main():
         if args.command == "reference":
             print(images[args.role])
         elif args.command == "check-native-policy":
-            check_native_policy(images, json.load(sys.stdin))
+            check_native_policy(images, json.load(sys.stdin), allow_held_candidates=True)
             print(fingerprint)
         else:
             check_episode(images, json.loads(args.preflight.read_bytes()), json.loads(args.task.read_bytes()))

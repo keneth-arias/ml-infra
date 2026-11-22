@@ -1,6 +1,7 @@
 """Exercise managed API admission as the short-lived native training submitter."""
 
 import argparse
+from copy import deepcopy
 import json
 import re
 from pathlib import Path
@@ -9,21 +10,24 @@ import sys
 
 SKY = Path(__file__).resolve().parents[1] / "sky"
 sys.path.insert(0, str(SKY))
-from production_release import release_images, require_image
+from production_release import QWEN_ONLY, release_images, require_image
 from production_target import kubectl_client
 
 
-def render_job(mode, trainer, preflight, *, paired=False, attempt=1, restore=False, phase="fit", head="direct"):
+def render_job(mode, trainer, preflight, *, paired=False, flamingo=False, attempt=1, restore=False,
+               phase="fit", head="direct"):
     return json.loads(subprocess.check_output([
         sys.executable, SKY / "episode-profile.py", mode, phase, head, "access-check",
         "--target", "prod-nebius", "--image", trainer,
-        *(["--preflight-image", preflight] if mode == "preflight" else []),
+        *(["--preflight-image", preflight] if mode == "preflight" or flamingo else []),
         "--bundle-sha256", "b" * 64, "--step", "14084", "--attempt", str(attempt),
         *(["--schedule", "14084"] if phase == "fit" else []),
         *(["--resume", "--resume-checkpoint", "500:" + "a" * 64,
            "--graceful-stop", "--gpu-limit-bytes", "16000000000"] if restore else []),
         *(["--cached-weights-sha256", "c" * 64, "--validation-sha256", "d" * 64,
-           "--direct-objective", "physical-mae"] if paired else []),
+           "--direct-objective", "physical-mae"] if paired or flamingo else []),
+        *(["--flamingo-binding-sha256", "1" * 64, "--flamingo-baselines", "2" * 64, "3" * 64,
+           "--flamingo-parity-sha256", "4" * 64] if flamingo else []),
     ]))
 
 
@@ -67,17 +71,20 @@ def check_permissions(kube, released):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trainer-image", help="Verified image from the signed release")
-    parser.add_argument("--preflight-image", help="Verified image from the same signed release")
-    args = parser.parse_args()
-    released = bool(args.trainer_image or args.preflight_image)
-    if released and not all(ref and re.fullmatch(r"ghcr\.io/[^@\s]+@sha256:[0-9a-f]{64}", ref)
-                            for ref in (args.trainer_image, args.preflight_image)):
-        parser.error("Supply both signed registry digests to verify an activated release")
+    roles = ("trainer", "preflight", "flamingo-trainer", "flamingo-preflight")
+    for role in roles:
+        parser.add_argument(f"--{role}-image", dest=role, help=f"Verified {role} image from the signed release")
+    refs = {role: ref for role, ref in vars(parser.parse_args()).items() if ref is not None}
+    released = bool(refs)
     if released:
+        if set(refs) not in (set(roles[:2]), set(roles)) or not all(
+                re.fullmatch(r"ghcr\.io/[^@\s]+@sha256:[0-9a-f]{64}", ref) for ref in refs.values()):
+            parser.error("Supply a pair of signed registry digests for each released backbone")
         images = release_images()
-        require_image(images, "trainer", args.trainer_image)
-        require_image(images, "preflight", args.preflight_image)
+        if set(refs) != set(roles).intersection(images):
+            raise ValueError("Probe images must cover every released training role")
+        for role, ref in refs.items():
+            require_image(images, role, ref)
     kube = kubectl_client("training", "episode-submit", direct=True)
     check_permissions(kube, released)
 
@@ -104,10 +111,11 @@ def main():
             raise SystemExit("Expected the held submitter to be refused Job creation by RBAC")
         print("native training submission held")
         return
-    exercise_release(args.trainer_image, args.preflight_image, check)
+    flamingo = (refs["flamingo-trainer"], refs["flamingo-preflight"]) if "flamingo-trainer" in refs else None
+    exercise_release(refs["trainer"], refs["preflight"], check, flamingo_images=flamingo)
 
 
-def exercise_release(trainer_image, preflight_image, check):
+def exercise_release(trainer_image, preflight_image, check, *, flamingo_images=None):
     invalid = "example.invalid/probe@sha256:" + "a" * 64
     for mode in ("preflight", "job"):
         trainer = invalid if mode == "job" else trainer_image
@@ -115,7 +123,39 @@ def exercise_release(trainer_image, preflight_image, check):
         check(render_job(mode, trainer, preflight), "unapproved-" + mode, "approved image")
         check(render_job(mode, preflight_image, trainer_image), "swapped-" + mode, "approved image")
         check(render_job(mode, trainer_image, preflight_image), mode)
-        check(render_job(mode, trainer_image, preflight_image, paired=True), "paired-" + mode)
+        paired_job = render_job(mode, trainer_image, preflight_image, paired=True)
+        check(paired_job, "paired-" + mode)
+        job = deepcopy(paired_job)
+        del job["spec"]["template"]["spec"]["containers"][0]["command"]
+        check(job, "default-entrypoint-" + mode, "episode entrypoint")
+        if flamingo_images:
+            flamingo_job = render_job(mode, *flamingo_images, flamingo=True)
+            check(flamingo_job, "flamingo-" + mode)
+            job = deepcopy(flamingo_job)
+            del job["spec"]["template"]["spec"]["containers"][0]["command"]
+            check(job, "flamingo-default-entrypoint-" + mode, "approved image")
+            for backbone, valid_job, (other_trainer, other_preflight) in (
+                ("flamingo", flamingo_job, (trainer_image, preflight_image)),
+                ("qwen", paired_job, flamingo_images),
+            ):
+                job = deepcopy(valid_job)
+                container, = job["spec"]["template"]["spec"]["containers"]
+                other_image = other_trainer if mode == "job" else other_preflight
+                container["image"] = other_image
+                check(job, f"{backbone}-wrong-backbone-{mode}", "approved image")
+
+                job = deepcopy(valid_job)
+                container, = job["spec"]["template"]["spec"]["containers"]
+                episode_image, = [e for e in container["env"] if e["name"] == "EPISODE_IMAGE"]
+                episode_image["value"] = other_trainer
+                check(job, f"{backbone}-wrong-episode-image-{mode}", "approved environment")
+
+                swapped = deepcopy(job)
+                swapped["spec"]["template"]["spec"]["containers"][0]["image"] = other_image
+                check(swapped, f"{backbone}-wrong-pair-{mode}", "approved image")
+        else:
+            check(render_job(mode, trainer_image, preflight_image, flamingo=True),
+                  "flamingo-unreleased-" + mode, QWEN_ONLY["message"])
         check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2, restore=True), "retry-" + mode)
         check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2), "fresh-retry-" + mode)
         check(render_job(mode, trainer_image, preflight_image, phase="infer", head="quantile"), "inference-" + mode)

@@ -10,7 +10,7 @@ import stat
 import time
 from pathlib import Path
 
-from episode_job import bundle, bundle_manifest, verify_base
+from episode_job import COHORT_WEIGHTS, FLAMINGO_WEIGHTS, bundle, bundle_manifest, flamingo_binding, verify_base
 from versioned_episode_inputs import ObjectSet, sources
 
 
@@ -108,6 +108,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base", type=Path)
     p.add_argument("--bundle", type=Path)
+    p.add_argument("--flamingo-binding-sha256", type=digest)
     p.add_argument("--validation-bundle", type=Path)
     p.add_argument("--validation-sha256", type=digest)
     p.add_argument(
@@ -132,11 +133,17 @@ def main():
         p.error(
             "Paired staging requires distinct fit and inner-validation digests for the direct head"
         )
+    cohort_weights = a.weights_sha256
+    if a.flamingo_binding_sha256:
+        flamingo_binding(a.flamingo_binding_sha256, a.bundle_sha256, a.validation_sha256)
+        if a.weights_sha256 != FLAMINGO_WEIGHTS:
+            p.error("Flamingo staging requires its pinned weight manifest")
+        cohort_weights = COHORT_WEIGHTS
     specs = {}
 
     def stage_role(role, key, source):
         def check_spec(spec):
-            if spec["weights_manifest_sha256"] != a.weights_sha256:
+            if spec["weights_manifest_sha256"] != cohort_weights:
                 raise ValueError("Phase bundle requires a different weights revision")
             if role == "inner_validation":
                 fit = specs["fit"]
