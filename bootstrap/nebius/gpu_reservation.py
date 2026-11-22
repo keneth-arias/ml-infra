@@ -10,7 +10,7 @@ from pathlib import Path
 from control_storage import LEDGER_KEY, STORAGE_FIELDS, control_bucket, timer_key, timer_prefix
 from gpu_window import BID, RELEASE_HOURS, bounds, hours, pilot_bounds
 from worker_cleanup import cleanup_digest, scope_digest
-from worker_plan import amount, timestamp
+from worker_plan import amount, check_gpu_mode, timestamp
 
 
 def read_ledger(s3, scope):
@@ -54,6 +54,9 @@ def reserve(s3, scope, plan_digest, state_serial, now):
     ):
         raise ValueError("Invalid stage or inventory digest")
     current, ledger = read_ledger(s3, scope)
+    check_gpu_mode(scope, ledger)
+    if any(span["end"] is None for span in ledger["gpu_intervals"]):
+        raise ValueError("Existing GPU allocation is still open")
     gpu_hours = 0
     if stage == "pilot":
         pilot_bounds(scope, ledger, now)
