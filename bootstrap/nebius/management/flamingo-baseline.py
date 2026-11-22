@@ -120,8 +120,10 @@ def baseline_request(args, scope, scope_hash, images, receipt):
     run = job["metadata"]["labels"]["airaware.training/run"]
     deadline = job["spec"]["activeDeadlineSeconds"]
     limit = int(pod["containers"][0]["env"][-1]["value"])
-    expected = render(images["flamingo-trainer"], run, node, deadline, limit)
-    if (review["schema"] != "flamingo-baseline-review-v1" or canonical(expected).decode() != review["job_json"]
+    arfbench = review["schema"] == "arfbench-review-v1"
+    renderer = R["render_arfbench"] if arfbench else render
+    expected = renderer(images["flamingo-trainer"], run, node, deadline, limit)
+    if (review["schema"] not in ("arfbench-review-v1", "flamingo-baseline-review-v1") or canonical(expected).decode() != review["job_json"]
             or sha(canonical(expected)) != review["job_sha256"] or type(deadline) != int
             or receipt != args.expected_deployment or review["deployment_sha256"] != receipt
             or scope["cluster_id"] != cluster or review["cluster_id"] != cluster or scope["stage"] != "gpu"
@@ -136,9 +138,12 @@ def baseline_request(args, scope, scope_hash, images, receipt):
                       "weights_manifest_sha256": R["FLAMINGO_WEIGHTS"],
                       "output_subpath": "flamingo-baselines/" + run, "output_uid": 1000,
                       "output_empty": True, "writer_fenced": True}
+    if arfbench:
+        expected_stage.update(arfbench_inventory_sha256=R["arfbench_inputs"]()[1],
+                              output_subpath="arfbench-runs/" + run)
     if project != scope["project_id"] or any(staged.get(k) != v for k, v in expected_stage.items()):
         raise ValueError("Staging receipt lacks verified weights, fresh output or fenced writer")
-    request = {"purpose": "flamingo-baseline", "attempt_id": "flamingo-base-" + run,
+    request = {"purpose": "arfbench" if arfbench else "flamingo-baseline", "attempt_id": expected["metadata"]["name"],
                "cluster_id": cluster, "start": scope["start"], "cutoff": scope["cutoff"],
                "scope_sha256": scope_hash, "deployment_sha256": receipt,
                "job_sha256": review["job_sha256"], "node": node, "node_uid": str(uuid.UUID(args.node_uid)),
@@ -164,11 +169,12 @@ def funded_limits(scope, ledger, request, now, margin):
 
 def reserve(s3, scope, ledger_sha, version, request, now):
     current, ledger = read_ledger(s3, dict(scope, ledger_sha256=ledger_sha))
+    approval = "arfbench_approval" if request["purpose"] == "arfbench" else "baseline_approval"
     if (current["VersionId"] != version or ledger.get("active_reservation")
-            or ledger.get("baseline_approval") != request or request["attempt_id"] in ledger.get("attempt_ids", [])):
+            or ledger.get(approval) != request or request["attempt_id"] in ledger.get("attempt_ids", [])):
         raise ValueError("Require the exact unconsumed, approved off-host funding version")
     limits = funded_limits(scope, ledger, request, now, 120)
-    hold = {"stage": "flamingo-baseline", "attempt_id": request["attempt_id"], "run_id": scope["run_id"],
+    hold = {"stage": request["purpose"], "attempt_id": request["attempt_id"], "run_id": scope["run_id"],
             "vm": request["vm"], "request": request, "prior_version": version,
             "prior_revision": ledger["revision"], "limits": limits, "reserved_at": now.isoformat()}
     revision, new_version = write_reservation(s3, scope, current, ledger, hold)
@@ -197,10 +203,12 @@ def record_submission(s3, scope, submitted, now):
         raise ValueError("Off-host hold has changed; reconcile its version history")
     record = {k: submitted[k] for k in ("job", "namespace", "uid")}
     record.update(funding_version=funding["version_id"], request=funding["hold"]["request"])
-    if ledger.get("baseline_submission") != record:
+    field = "arfbench_submission" if funding["hold"]["stage"] == "arfbench" else "baseline_submission"
+    if ledger.get(field) != record:
         if version != funding["version_id"] or sha(raw) != funding["ledger_sha256"]:
             raise ValueError("Another funding revision intervened before UID publication")
-        ledger.update(baseline_submission=record, revision=uuid.uuid4().hex)
+        ledger[field] = record
+        ledger["revision"] = uuid.uuid4().hex
         raw = json.dumps(ledger, sort_keys=True).encode()
         version = s3.put_object(Bucket=control_bucket(scope), Key=LEDGER_KEY, IfMatch=obj["ETag"],
                                 Body=raw, ContentType="application/json")["VersionId"]
@@ -278,7 +286,7 @@ def session_intent(target, identity, manager, receipt, images, held, guard, job,
     attempt = uuid.uuid4().hex
     policy = copy.deepcopy(held)
     check_native_policy(images, policy)
-    policy["metadata"]["annotations"] = {N["ATTEMPT"]: attempt, N["RECEIPT"]: receipt, N["STAGE"]: "flamingo-baseline"}
+    policy["metadata"]["annotations"] = {N["ATTEMPT"]: attempt, N["RECEIPT"]: receipt, N["STAGE"]: job["metadata"]["labels"]["airaware.training/phase"]}
     policy["spec"].pop("variables")
     policy["spec"]["validations"] = baseline_checks(job, uid)
     role = baseline_role(receipt, job["metadata"]["name"])

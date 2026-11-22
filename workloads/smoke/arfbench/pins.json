@@ -1,0 +1,45 @@
+{
+  "full_manifest_canonical_sha256": "72fd43b5b9712cba2414b17d4981e6a7f44a78cc42e5f6b6e22859066452bf59",
+  "full_manifest_file_sha256": "2a129ff831c2f5901892ca40ef7617c86683b0cfb120ff26025a97098c1f8945",
+  "gemma": {
+    "added_tokens.json": "13652b4ddd8d27764478b90ba0723d42c003ae2aa6acd89d2be261b7318a934e",
+    "config.json": "4cc0f5236517b6288ecf14ce54270acf9cb931232b399494caa0e1919faf7348",
+    "generation_config.json": "6c5a6e16d8d04f69e7911483a5e6017d39a9e6489db8836d50dcd5a1bcf48199",
+    "model.safetensors": "946c88e4df73d3b7f62b62ea88c377f4910f65da2dd543feb0d05daff313fa62",
+    "special_tokens_map.json": "74e3902ec6ef8c0842f832e04d820ba9541b7ca27d55833a37530033cd4c6de1",
+    "tokenizer.json": "1a109f009ed38da432bcf37ab47d2ba2c39ebe1a5a56cf6525158425499bb104",
+    "tokenizer.model": "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c",
+    "tokenizer_config.json": "d07b26c1d5be0617cc7c100c21261677ef82bea4357c11c96079ae20f1113fcc"
+  },
+  "image": "ghcr.io/keneth-arias/ml-infra-qwen@sha256:8c77e60c4ff1af015ea5620364ae13885b64296d8f7b8681ef1d85a7d3674376",
+  "inputs": {
+    "evaluation/opentslm/arfbench/backends.py": "bf053fbe017d01181e0af89856c0101a97efb54cd4c4aa2c62992b590bfb9cde",
+    "evaluation/opentslm/arfbench/protocol.py": "2415721168d7e6e491b6d7ff3f71bf3615d6b8fa19ec7dc40dc528037883e74a",
+    "evaluation/opentslm/arfbench/replay.py": "1aefd77f8d64a028244fc11f3e867ebf63637956e4cf3e865d46f3f628b48254",
+    "evaluation/opentslm/arfbench/run.py": "5c775efed0d174eb2da0b9f68f181063d7295341e763582602f5a3e9b03fef79",
+    "legacy/model_checkpoint.pt": "d939f4c25ca83bfe389d4f8e41151b922f4a0d7e57a2530577b398254bc23bfb",
+    "llama/config.json": "bfb5d39c327ee5c3a65e3574596ff30b052a445cfc59a25bdf3b4c0c5a44f4d2",
+    "llama/generation_config.json": "da81b0dd4001a8e19fb5840d2b524f6957f44ddde6f5c3fe32b1f36cef5205bf",
+    "llama/model.safetensors": "68a2e4be76fa709455a60272fba8e512c02d81c46e6c671cc9449e374fd6809a",
+    "llama/special_tokens_map.json": "cc2e013b7545f183ef03e079a3c91c6f364fa37e4068c512d7dd843e59024535",
+    "llama/tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+    "llama/tokenizer_config.json": "8004530facf809ac432114de2a4dcc65fcb632da5ec16d666091aeb6a2ee444a",
+    "manifest.json": "a415c16e50a4f34dba97a3aa4d947473a724b79f3e828772acc0509a3c941caf",
+    "wheels/einops-0.8.1-py3-none-any.whl": "919387eb55330f5757c6bea9165c5ff5cfe63a642682ea788a6d472576d81737",
+    "wheels/einops_exts-0.0.4-py3-none-any.whl": "6d310a4c858e459ebff8288580f90255d354cfa3bde22a53b59baae64b48cb95",
+    "wheels/ftfy-6.3.1-py3-none-any.whl": "7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083",
+    "wheels/open_clip_torch-3.2.0-py3-none-any.whl": "e1f5b3ecbadb6d8ea64b1f887db23efee9739e7c0d0075a8a2a3cabae8fed8d1",
+    "wheels/open_flamingo-2.0.1-py3-none-any.whl": "df55893ef74a0691f7ce54592c1ca155a8e246160e2a658086031bf6b5eddbc8",
+    "wheels/timm-1.0.22-py3-none-any.whl": "888981753e65cbaacfc07494370138b1700a27b1f0af587f4f9b47bc024161d0"
+  },
+  "opentslm_commit": "87e0b8167faa0d569993437b004d6c3d85032ce1",
+  "revisions": {
+    "OpenTSLM/llama-3.2-1b-tsqa-flamingo": "923332423e1b892d78d4dc8e5854d424b6fa9a92",
+    "meta-llama/Llama-3.2-1B": "4e20de362430cd3b72f300e6b0f18e50e7166e08",
+    "opentime/tslm-nov26": "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983"
+  },
+  "splits": {
+    "swap": "f2773f0ef246e8b4a9b95e4c82b76f45f2cbb9c92b8ffc4a7dadfe9dcf71d50d",
+    "test": "72e511b13440e28275ae2dfc54c0201c4f2d7bf0e49b3a17cc7a37cfb1396105"
+  }
+}

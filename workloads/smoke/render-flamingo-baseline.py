@@ -62,22 +62,61 @@ def render(image, run, node, deadline, gpu_bytes):
                      "template": {"metadata": {"labels": labels}, "spec": pod}}}
 
 
+def arfbench_inputs():
+    raw = (HERE / "arfbench/pins.json").read_bytes()
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def render_arfbench(image, run, node, deadline, gpu_bytes):
+    pins, inventory = arfbench_inputs()
+    if image != pins["image"]:
+        raise ValueError("ARFBench requires the tested immutable Flamingo trainer")
+    job = render(image, run, node, deadline, gpu_bytes)
+    job["metadata"]["name"] = "arfbench-" + run
+    job["metadata"]["labels"]["airaware.training/phase"] = "arfbench"
+    job["spec"]["suspend"] = True
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    container["name"] = "paired-qa"
+    container["command"] = ["/opt/conda/bin/python", "-I", "-B", "-c",
+                            (HERE / "arfbench/worker.py").read_text(), json.dumps(pins, sort_keys=True)]
+    base, output, scratch = container["volumeMounts"]
+    base["subPath"] += "/weights"
+    output["subPath"] = "arfbench-runs/" + run
+    container["volumeMounts"] = [base, {"name": "inputs", "mountPath": "/bench", "readOnly": True,
+                                       "subPath": "arfbench-inputs/" + inventory}, output, scratch]
+    return job
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--arfbench", action="store_true", help="Review the serial legacy/per-series test and swap Job")
+    p.add_argument("--offline-plan", action="store_true", help="Emit a suspended ARFBench planning record only")
     p.add_argument("--run", required=True)
     p.add_argument("--node", required=True, help="GPU worker from the approved allocation")
-    p.add_argument("--provider-id", required=True, help="Independent provider ID from that allocation")
-    p.add_argument("--expected-deployment", required=True, help="Approved signed deployment SHA-256")
+    p.add_argument("--provider-id", help="Independent provider ID from that allocation")
+    p.add_argument("--expected-deployment", help="Approved signed deployment SHA-256")
     p.add_argument("--deadline-seconds", required=True, type=int)
     p.add_argument("--gpu-limit-bytes", required=True, type=int)
     a = p.parse_args()
+    if a.offline_plan:
+        if not a.arfbench:
+            p.error("--offline-plan requires --arfbench")
+        image = arfbench_inputs()[0]["image"]
+        job = render_arfbench(image, a.run, a.node, a.deadline_seconds, a.gpu_limit_bytes)
+        raw = json.dumps(job, sort_keys=True, separators=(",", ":"))
+        print(json.dumps({"schema": "arfbench-offline-plan-v1", "job_json": raw,
+                          "job_sha256": hashlib.sha256(raw.encode()).hexdigest()}, sort_keys=True))
+        return
+    if not a.provider_id or not a.expected_deployment:
+        p.error("managed review requires --provider-id and --expected-deployment")
     identity = os.environ["NEBIUS_STAGING_OPERATOR_IDENTITY"]
     if identity in ("", "system:anonymous", "system:serviceaccount:training:episode-submit"):
         raise ValueError("Expected the independent placement reader identity")
     images, approval = current_release()
     if approval != a.expected_deployment:
         raise ValueError("Signed deployment differs from approval")
-    job = render(images["flamingo-trainer"], a.run, a.node, a.deadline_seconds, a.gpu_limit_bytes)
+    renderer = render_arfbench if a.arfbench else render
+    job = renderer(images["flamingo-trainer"], a.run, a.node, a.deadline_seconds, a.gpu_limit_bytes)
     kube = kubectl_client_for_identity("training", identity, direct=True)
     node = json.loads(subprocess.check_output([*kube, "get", "node", a.node, "-o", "json"], timeout=15))
     if (node["metadata"]["name"] != a.node or node["metadata"].get("deletionTimestamp")
@@ -87,7 +126,7 @@ def main():
             or not any(c["type"] == "Ready" and c["status"] == "True" for c in node["status"]["conditions"])):
         raise ValueError("Worker differs from approved Ready GPU allocation")
     raw = json.dumps(job, sort_keys=True, separators=(",", ":"))
-    print(json.dumps({"schema": "flamingo-baseline-review-v1", "status": "pending-admission-and-funding",
+    print(json.dumps({"schema": "arfbench-review-v1" if a.arfbench else "flamingo-baseline-review-v1", "status": "pending-admission-and-funding",
                       "cluster_id": os.environ["NEBIUS_TRAINING_CLUSTER_ID"], "deployment_sha256": approval,
                       "provider_id": a.provider_id, "job_sha256": hashlib.sha256(raw.encode()).hexdigest(),
                       "job_json": raw}, sort_keys=True))
