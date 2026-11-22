@@ -2,7 +2,7 @@
 # Verify the exact bundle on a CPU pod before reserving a GPU.
 set -euo pipefail
 target=dev-bm
-kube=(kubectl)
+kube=(kubectl --context "${EPISODE_LOCAL_CONTEXT:-microk8s}")
 base=$(dirname "$0")
 if [[ ${1:-} == --nebius ]]; then
   shift
@@ -10,7 +10,7 @@ if [[ ${1:-} == --nebius ]]; then
   target=prod-nebius
   export NEBIUS_SUBMIT_KUBECONFIG=${NEBIUS_SUBMIT_KUBECONFIG:-${NEBIUS_TRAINING_KUBECONFIG:?Set the scoped training submitter kubeconfig}}
   export KUBECONFIG="$NEBIUS_SUBMIT_KUBECONFIG"
-  kube+=(--kubeconfig "$KUBECONFIG" --context "$target")
+  kube=(kubectl --kubeconfig "$KUBECONFIG" --context "$target")
   python3 "$base/production_target.py" --check-training-submit
 fi
 mode=${1:-}
@@ -26,6 +26,15 @@ for arg in "$@"; do
 done
 if [[ "$target" == prod-nebius && "$mode" == sky ]]; then
   python3 "$base/production_target.py" training
+fi
+if [[ "$target" == dev-bm ]]; then
+  resources=$("${kube[@]}" --request-timeout=10s get node bm -o \
+    'jsonpath={.status.conditions[?(@.type=="Ready")].status}{" "}{.status.allocatable.nvidia\.com/gpu}')
+  read -r ready gpus <<< "$resources"
+  if [[ "$ready" != True || ! "$gpus" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'The local episode target needs a Ready bm node with an allocatable GPU.' >&2
+    exit 1
+  fi
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
