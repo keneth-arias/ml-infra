@@ -49,9 +49,9 @@ spec:
     - name: preflightImage
       expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:50e25655174b3a2ceb7d16a31cf9bfffbc009cd44c11648e18eba31312d2ba6c'"
     - name: flamingoTrainerImage
-      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:af2a985e4a4d030082d527b3f0bf6c09944a73013fffed5d5fd2f1f51525ec7b'"
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:ffb0ce7b536ae68325a3168e5eebf83e06ddc3ad1555f48317341e45dac1c58d'"
     - name: flamingoPreflightImage
-      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:fbc4b1c96d1d48834ad5615af7436dc1ac27159b1d85f565056761ebb25ade36'"
+      expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:ccc390c9d469ac78f2c290d051fbfccb62ecf8b79e8df38480edf3a47628601e'"
     - name: container
       expression: variables.pod.containers[0]
     - name: argv
