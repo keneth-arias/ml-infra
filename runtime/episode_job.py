@@ -291,7 +291,8 @@ def bind_file(path, value):
 
 
 @contextmanager
-def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False):
+def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False, prepare=None):
+    """Run preparation and receipt publication under the same worker lock."""
     with (root / ".episode-worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         intent = root / f".{key}.intent.json"
@@ -304,6 +305,8 @@ def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False
         reuse = artifact.exists()
         if receipt.exists() and not reuse:
             raise ValueError("Published artifact missing")
+        if prepare is not None:
+            prepare(reuse)
         published = False
 
         def publish_verified():
@@ -375,7 +378,8 @@ def training_metrics(event):
     return metrics
 
 
-def verify_fit_result(artifact, args, spec, *, generation=None):
+def verify_fit_result(artifact, args, spec, *, generation=None, recovered=None):
+    """Verify a fit artifact using any checkpoint already checked under the worker lock."""
     from opentslm.forecast_checkpoint import files, read_manifest
 
     result = None
@@ -387,22 +391,31 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
                 result["outcome"] != ("completed" if result["step"] == args.step else "early-stopped")):
             raise ValueError("Unexpected terminal direct fit result")
         directory = artifact.parent / f"step-{result['step']:08d}"
+        if recovered is not None and directory != recovered:
+            raise ValueError("Terminal result does not match the funded checkpoint")
         selected = artifact.parent / f"step-{result['best_step']:08d}"
         best = read_manifest(selected)
-        if (not best or best["identity"] != result["identity"] or best["files"] != files(selected) or
+        if (not best or best["identity"] != result["identity"] or
+                (recovered is None and best["files"] != files(selected)) or
                 sha256(selected / "manifest.json") != result["selected_manifest_sha256"] or
                 sha256(directory / "manifest.json") != result["latest_manifest_sha256"] or
                 (artifact.parent / "best").read_text().strip() != selected.name):
             raise ValueError("Terminal direct checkpoint failed verification")
         last = json.loads((directory / "training.pt.json").read_bytes())["evaluations"][-1]
-        if any(result.get(k) != v for k, v in last.items()):
+        # Recovery checked the selected checkpoint named in this durable evaluation.
+        if result["best_step"] != last.get("best_step") or any(result.get(k) != v for k, v in last.items()):
             raise ValueError("Terminal result differs from durable evaluation")
 
     m = read_manifest(directory)
-    if (not m or not 0 < m["step"] <= args.step or m["files"] != files(directory)
+    if (not m or not 0 < m["step"] <= args.step or (recovered is None and m["files"] != files(directory))
             or generation is None and result is None and m["step"] != args.step):
         raise ValueError("Incomplete checkpoint")
-    identity = m["identity"]
+    if result is not None and result["identity"] != m["identity"]:
+        raise ValueError("Terminal result carries another run identity")
+    verify_fit_identity(m["identity"], args, spec)
+
+
+def verify_fit_identity(identity, args, spec):
     expected = {
         "data": spec["files"]["data.npz"],
         "head": args.head,
@@ -415,15 +428,13 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
                         input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
         if getattr(args, "flamingo_binding_sha256", None):
             expected.update(backbone="flamingo", binding_sha256=args.flamingo_binding_sha256)
-        if result is not None and result["identity"] != identity:
-            raise ValueError("Terminal result carries another run identity")
     if "point_control_of" in spec:
         expected.update(matched_point="complete_epoch_v1", input_manifest_sha256=args.bundle_sha256)
     if any(identity.get(k) != v for k, v in expected.items()):
         raise ValueError("Published checkpoint does not match this fit")
 
 
-def verify_resume_checkpoint(work, artifact, args, spec):
+def verify_resume_checkpoint(work, args, spec):
     from opentslm.forecast_checkpoint import read_manifest, recover
 
     step_text, digest = args.resume_checkpoint.split(":")
@@ -432,13 +443,16 @@ def verify_resume_checkpoint(work, artifact, args, spec):
     manifest = read_manifest(generation)
     if not manifest or sha256(generation / "manifest.json") != digest:
         raise ValueError("Funded checkpoint manifest differs from the retained generation")
-    verify_fit_result(artifact, args, spec, generation=generation)
+    if not 0 < step <= args.step:
+        raise ValueError("Funded checkpoint step exceeds the fit schedule")
+    verify_fit_identity(manifest["identity"], args, spec)
     for path in work.glob("step-????????"):
         other = read_manifest(path)
         if other and other["identity"] != manifest["identity"]:
             raise ValueError("Checkpoint directory contains multiple trainer identities")
     if recover(work, manifest["identity"]) != (step, generation):
         raise ValueError("The trainer would recover a different generation")
+    return generation
 
 
 def main():
@@ -660,10 +674,18 @@ def main():
         image_digest = os.environ["EPISODE_IMAGE"].rsplit("@", 1)[-1]
         baselines = validated_baselines(work, args.flamingo_baselines, args.flamingo_parity_sha256, image_digest)
 
+    recovered = None
+
+    def prepare_attempt(reused):
+        nonlocal recovered
+        generation = verify_resume_checkpoint(work, args, spec)
+        if reused:
+            recovered = generation
+
     def verify_result(generation=None):
         nonlocal evidence
         if args.phase == "fit":
-            verify_fit_result(artifact, args, spec, generation=generation)
+            verify_fit_result(artifact, args, spec, generation=generation, recovered=recovered)
             if binding and generation is None:
                 evidence = verify_flamingo_selection(weights, artifact, baselines, args.flamingo_baselines, image_digest)
         else:
@@ -708,10 +730,9 @@ def main():
             command.extend(["--backbone", "flamingo", "--flamingo-binding", staged.name,
                             "--flamingo-binding-sha256", args.flamingo_binding_sha256])
         reused, publish_verified = stack.enter_context(
-            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
+            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result,
+                          with_publisher=True, prepare=prepare_attempt if args.resume_checkpoint else None)
         )
-        if args.resume_checkpoint and not reused:
-            verify_resume_checkpoint(work, artifact, args, spec)
         tracking_id = None
         tags = {}
         existing = []
