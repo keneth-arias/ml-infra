@@ -1,17 +1,17 @@
 {
-  "build_commit": "ccdea3acf074b50773f7258b3969407d3c26a0e2",
+  "build_commit": "79b6b8261e63e33bfd65a0e5ed413e8df56a8b0e",
   "forecast_commit": "87e0b8167faa0d569993437b004d6c3d85032ce1",
   "images": {
     "preflight": {
-      "config": "sha256:bc97c4b33b8d4c4cb754f6196df91fd161c2e8eb54a4cb48487690165b092996",
-      "index": "sha256:ccc390c9d469ac78f2c290d051fbfccb62ecf8b79e8df38480edf3a47628601e",
-      "linux_amd64": "sha256:490225ba4f68b780421591d7bf5c217ae5cf653f047a7a05460c60e48f766696",
+      "config": "sha256:0bf47ca953642096b67f1291ce5f77bb8da8d56b78fb567addf191957ab48fb3",
+      "index": "sha256:5fa14b32d4cfd741b9da3f383cf146c79a61e1a9fc01e568f0f9abba553720a9",
+      "linux_amd64": "sha256:f77fac8e7f68f0225c0f56b8846fd50d9ced180c68c1c48655f42c7dd103a9a2",
       "repository": "ghcr.io/keneth-arias/ml-infra-qwen"
     },
     "trainer": {
-      "config": "sha256:80a3d1ad6b57bdb5350f1533253cd913fda82d1abe70b2c88f74c272fbbaaa7f",
-      "index": "sha256:ffb0ce7b536ae68325a3168e5eebf83e06ddc3ad1555f48317341e45dac1c58d",
-      "linux_amd64": "sha256:0d8d083a74d38d2add6a877177a0f866c5b40c7e12d8bb50645c964a763d7df3",
+      "config": "sha256:f5af15dabb02677a63efb2ec6cc40787fc0beb2910137d03d995ffa19094be71",
+      "index": "sha256:975e53ad9f00289786417baa86d06b6c62d09a7feb67bb75ef89be5a439b5916",
+      "linux_amd64": "sha256:28adddf8ae12ce5f14d75f65ee0240a0e787abf2a937181514200790e9b7f4dc",
       "repository": "ghcr.io/keneth-arias/ml-infra-qwen"
     }
   },
