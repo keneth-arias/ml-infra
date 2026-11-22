@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import os
 
-from ci.test_gpu_plan import scope as window, ledger, NOW as CLOCK
+from ci.test_gpu_plan import scope as window, ledger, NOW as CLOCK, utc
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "bootstrap/nebius/management/flamingo-baseline.py"
@@ -134,6 +134,32 @@ class FundingTest(unittest.TestCase):
             B["record_submission"](store, self.scope, dict(submission, uid=str(uuid.uuid4())), CLOCK)
         self.assertEqual(store.version, 15)
         self.assertEqual(json.loads(store.raw)["active_reservation"], read["hold"])
+
+    def test_short_job_requires_funding_through_vm_cutoff(self):
+        # With ten hours to cutoff, either cap can leave just fifteen minutes.
+        prior_vm = dict(vm="previous", start=utc(CLOCK - timedelta(hours=98, minutes=45)),
+                        end=self.scope["start"])
+        for changes in ({"accrued_gpu_usd": "148.125"},
+                        {"gpu_intervals": [prior_vm, *self.funds["gpu_intervals"]]}):
+            funds = dict(self.funds, **changes)
+            store = VersionedLedger(funds)
+            with self.subTest(changes=changes, phase="reserve"), self.assertRaisesRegex(ValueError, "Full remaining"):
+                B["reserve"](store, self.scope, B["sha"](store.raw), "13", self.request, CLOCK)
+            self.assertEqual(store.version, 13)
+
+            # Dispatch must also reject a hold issued before the full-window check.
+            hold = {"request": self.request}
+            store = VersionedLedger(dict(funds, active_reservation=hold))
+            receipt = dict(version_id="13", revision=funds["revision"], ledger_sha256=B["sha"](store.raw), hold=hold)
+            with self.subTest(changes=changes, phase="dispatch"), self.assertRaisesRegex(ValueError, "Full remaining"):
+                B["check_reserved"](store, self.scope, receipt, CLOCK)
+
+    def test_exactly_funded_vm_window_allows_reservation_and_dispatch(self):
+        prior_vm = dict(vm="previous", start=utc(CLOCK - timedelta(hours=89)), end=self.scope["start"])
+        store = VersionedLedger(dict(self.funds, gpu_intervals=[prior_vm, *self.funds["gpu_intervals"]],
+                                     accrued_gpu_usd="133.50"))
+        receipt = B["reserve"](store, self.scope, B["sha"](store.raw), "13", self.request, CLOCK)
+        B["check_reserved"](store, self.scope, receipt, CLOCK + timedelta(minutes=6))
 
     def test_exhaustion_stale_approval_wrong_vm_and_replay_fail_before_cas(self):
         for changes, req, version, clock in (

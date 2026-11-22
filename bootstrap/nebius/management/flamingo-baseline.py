@@ -23,7 +23,7 @@ STORE = runpy.run_path(str(ROOT / "workloads/sky/training-storage-handoff.py"))
 render = R["render"]
 from control_storage import LEDGER_KEY, control_bucket, verify_bucket_projects
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
-from gpu_window import bounds, check_projection
+from gpu_window import bounds, check_projection, hours
 from production_release import current_release, check_native_policy
 from production_target import kubectl_client_for_identity
 from worker_cleanup import scope_digest
@@ -153,6 +153,10 @@ def funded_limits(scope, ledger, request, now, margin):
             or request["cluster_id"] != scope["cluster_id"]):
         raise ValueError("Funding requires the exact current worker and allocation")
     limits = bounds(scope, ledger, now)
+    # Finishing the Job does not release its VM. Both caps must cover the
+    # installed cutoff, with post-cutoff release already reserved by bounds().
+    if hours(timestamp(scope["cutoff"]) - now) > min(limits["hour_limit"], limits["dollar_limit_hours"]):
+        raise ValueError("Full remaining VM allocation exceeds the baseline funding")
     seconds = request["deadline_seconds"] + request["termination_grace_seconds"] + margin
     check_projection(limits, Decimal(seconds) / 3600)
     return {k: str(v) for k, v in limits.items()}
