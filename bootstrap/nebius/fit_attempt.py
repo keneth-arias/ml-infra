@@ -190,6 +190,8 @@ def recovery_checkpoint(ledger, approval, request, group):
 
 def reserve_fit(s3, scope, request, measurements, cluster, now):
     current, ledger = read_ledger(s3, scope)
+    if scope.get("gpu_mode", "native") != "native" or ledger.get("gpu_mode", "native") != "native":
+        raise ValueError("Native fit requires a native GPU window")
     limits = bounds(scope, ledger, now)
     approval = ledger["fit_approval"]
     if (

@@ -44,6 +44,17 @@ variable "worker_run" {
   }
 }
 
+variable "gpu_mode" {
+  description = "Use hami only for a separately approved serial allocation."
+  type        = string
+  default     = "native"
+  nullable    = false
+  validation {
+    condition     = contains(["native", "hami"], var.gpu_mode)
+    error_message = "GPU mode must be native or hami."
+  }
+}
+
 variable "node_pools" {
   description = "Omit both pools for a worker-free foundation. Add each pool only when ready to allocate compute."
   type = object({
@@ -179,11 +190,11 @@ resource "nebius_storage_v1_bucket" "artifacts" {
 resource "nebius_mk8s_v1_node_group" "training" {
   for_each  = { for name, pool in var.node_pools : name => pool if pool != null && local.window_open }
   parent_id = local.cluster_id
-  name      = "training-${each.key}"
-  labels = {
+  name      = "training-${each.key == "gpu" && var.gpu_mode == "hami" ? "hami" : each.key}"
+  labels = merge({
     airaware-run    = var.worker_run.id
     airaware-cutoff = formatdate("YYYYMMDDhhmmss", var.worker_run.cutoff)
-  }
+  }, var.gpu_mode == "hami" ? { airaware-gpu-mode = "hami" } : {})
   fixed_node_count = each.value.count
   version          = var.kubernetes_version
   lifecycle {
@@ -203,14 +214,18 @@ resource "nebius_mk8s_v1_node_group" "training" {
   }
   template = {
     os                  = "ubuntu24.04"
-    gpu_settings        = each.key == "gpu" ? { drivers_preset = "cuda13.0" } : null
+    gpu_settings        = each.key == "gpu" && var.gpu_mode == "native" ? { drivers_preset = "cuda13.0" } : null
     preemptible         = each.key == "gpu" ? {} : null
     spot_pricing_policy = each.key == "gpu" ? { id = local.pricing_policy.id } : null
     metadata = { labels = merge(
-      { "airaware.training/pool" = "training-${each.key}" },
-      each.key == "gpu" ? { "skypilot.co/accelerator" = "rtxpro6000" } : {}
+      { "airaware.training/pool" = "training-${each.key == "gpu" && var.gpu_mode == "hami" ? "hami" : each.key}" },
+      each.key == "gpu" && var.gpu_mode == "native" ? { "skypilot.co/accelerator" = "rtxpro6000" } : {}
     ) }
-    taints             = each.key == "gpu" ? [{ key = "nvidia.com/gpu", value = "true", effect = "NO_SCHEDULE" }] : []
+    taints = each.key != "gpu" ? [] : [
+      var.gpu_mode == "hami"
+      ? { key = "airaware.training/gpu-mode", value = "hami", effect = "NO_SCHEDULE" }
+      : { key = "nvidia.com/gpu", value = "true", effect = "NO_SCHEDULE" }
+    ]
     network_interfaces = [{ subnet_id = var.subnet_id }]
     resources          = { platform = each.value.platform, preset = each.value.preset }
     boot_disk          = { type = each.value.disk_type, size_gibibytes = each.value.disk_gib }

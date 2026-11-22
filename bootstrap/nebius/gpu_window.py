@@ -11,6 +11,7 @@ from worker_plan import (
     amount,
     check_envelope,
     check_group,
+    check_gpu_mode,
     compact,
     pilot_budget,
     timestamp,
@@ -199,6 +200,9 @@ def check_support(change, scope):
 def check_stage(plan, scope, ledger, now):
     check_envelope(plan)
     stage = scope["stage"]
+    mode = check_gpu_mode(scope, ledger)
+    if plan["variables"].get("gpu_mode", {"value": "native"})["value"] != mode:
+        raise ValueError("Saved plan GPU mode differs from the approved scope")
     if stage not in ("pilot", "support", "gpu"):
         raise ValueError("Expected pilot, support or gpu allocation stage")
     planned = timestamp(plan["timestamp"])

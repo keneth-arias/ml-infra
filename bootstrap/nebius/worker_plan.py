@@ -99,12 +99,23 @@ def check_envelope(plan):
             raise ValueError("Unexpected drift at " + drift["address"])
 
 
+def check_gpu_mode(scope, ledger):
+    mode = scope.get("gpu_mode", "native")
+    if mode not in ("native", "hami") or ledger.get("gpu_mode", "native") != mode:
+        raise ValueError("GPU mode differs from the approved funding ledger")
+    if mode == "hami" and scope["stage"] == "pilot":
+        raise ValueError("HAMi requires an approved support and GPU window")
+    return mode
+
+
 def check_group(change, pool, scope):
+    hami = pool == "gpu" and scope.get("gpu_mode") == "hami"
+    name = "training-hami" if hami else "training-" + pool
     after = compact(change["after"])
     expected_template = {
         "os": "ubuntu24.04",
         "resources": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
-        "metadata": {"labels": {"airaware.training/pool": "training-cpu"}},
+        "metadata": {"labels": {"airaware.training/pool": name}},
         "taints": [],
         "network_interfaces": [{"subnet_id": scope["subnet_id"]}],
         "boot_disk": {"type": "NETWORK_SSD", "size_gibibytes": 128},
@@ -114,19 +125,22 @@ def check_group(change, pool, scope):
             resources={"platform": "gpu-rtx6000-a", "preset": "1gpu-24vcpu-218gb"},
             preemptible={},
             spot_pricing_policy={"id": scope["policy_id"]},
-            gpu_settings={"drivers_preset": "cuda13.0"},
             taints=[
                 {"key": "nvidia.com/gpu", "value": "true", "effect": "NO_SCHEDULE"}
             ],
         )
-        expected_template["metadata"]["labels"] = {
-            "airaware.training/pool": "training-gpu",
-            "skypilot.co/accelerator": "rtxpro6000",
-        }
+        if hami:
+            expected_template["metadata"]["labels"] = {"airaware.training/pool": name}
+            expected_template["taints"] = [
+                {"key": "airaware.training/gpu-mode", "value": "hami", "effect": "NO_SCHEDULE"}
+            ]
+        else:
+            expected_template["gpu_settings"] = {"drivers_preset": "cuda13.0"}
+            expected_template["metadata"]["labels"]["skypilot.co/accelerator"] = "rtxpro6000"
     expected = {
         "parent_id": scope["cluster_id"],
         "fixed_node_count": 1,
-        "name": "training-" + pool,
+        "name": name,
         "version": "1.36",
         "template": expected_template,
         "strategy": {
@@ -139,6 +153,8 @@ def check_group(change, pool, scope):
             "airaware-cutoff": timestamp(scope["cutoff"]).strftime("%Y%m%d%H%M%S"),
         },
     }
+    if scope.get("gpu_mode") == "hami":
+        expected["labels"]["airaware-gpu-mode"] = "hami"
     # v0.6.88 duplicates resource labels in labels_all.
     if (
         after.pop("labels_all", expected["labels"]) != expected["labels"]
@@ -152,11 +168,12 @@ def check_group(change, pool, scope):
         "metadata",
         "resource_version",
         "status",
-        "template.gpu_settings.dra" if pool == "gpu" else "template.gpu_settings",
         "template.local_disks",
         "template.network_interfaces.public_ip_address",
         "template.network_interfaces.security_groups",
     }
+    if not hami:
+        generated.add("template.gpu_settings.dra" if pool == "gpu" else "template.gpu_settings")
     generated.update(
         "template.boot_disk." + field
         for field in (
