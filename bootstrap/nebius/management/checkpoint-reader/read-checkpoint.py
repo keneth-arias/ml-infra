@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Inspect or stream one fenced synthetic checkpoint over the attended operator channel."""
+"""Inspect one fenced checkpoint or stream an approved synthetic archive."""
 
 import argparse
+from decimal import Decimal
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,10 @@ IDENTITY_FIELDS = {
     "logical_run", "seed", "head", "direct_objective", "schedule",
     "input_manifest_sha256", "validation_manifest_sha256", "weights",
 }
+FLAMINGO_FIELDS = {"backbone", "binding_sha256"}
+EVAL_INTERVAL = 500
+PATIENCE = 4
+MIN_IMPROVEMENT = Decimal("0.02")
 
 
 def checkpoint_api():
@@ -29,7 +35,11 @@ def checkpoint_api():
 
 
 def verify_identity(identity):
-    if (set(identity) != IDENTITY_FIELDS
+    fields = set(identity)
+    flamingo = fields == IDENTITY_FIELDS | FLAMINGO_FIELDS
+    if ((fields != IDENTITY_FIELDS and not flamingo)
+            or (flamingo and (identity["backbone"] != "flamingo"
+                             or not re.fullmatch("[a-f0-9]{64}", identity["binding_sha256"])))
             or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", identity["logical_run"])
             or identity["head"] != "direct" or identity["direct_objective"] not in ("normalized-mse", "physical-mae")
             or type(identity["seed"]) is not int or not 0 <= identity["seed"] < 2**32
@@ -68,6 +78,49 @@ def safe_files(generation, bound):
         if path.exists():
             load_metadata(path)
     return size
+
+
+def verified_flamingo_stop(expected, result, final, history, selected_history):
+    identity = result["identity"]
+    # The producer hashes its recipe before adding run-specific and model-load metadata.
+    excluded = {"logical_run", "recipe_sha256", "frozen_parameters_sha256",
+                "trainable_parameters", "trainable_bytes", "initial_trainable_sha256"}
+    recipe = {k: v for k, v in identity.items() if k not in excluded}
+    recipe_pin = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
+    if (identity.get("recipe_sha256") != recipe_pin or
+            (recipe.get("evaluation_interval"), recipe.get("patience_checks"),
+             recipe.get("min_improvement_ug_m3")) != (EVAL_INTERVAL, PATIENCE, str(MIN_IMPROVEMENT))):
+        raise ValueError("Flamingo training recipe differs from the terminal checkpoint")
+
+    ceiling, stop = expected["schedule"], result["step"]
+    steps = [*range(0, stop + 1, EVAL_INTERVAL)]
+    if stop == ceiling and steps[-1] != stop:
+        steps.append(stop)
+    if steps[-1] != stop or [event["step"] for event in history] != steps:
+        raise ValueError("Flamingo training history differs from the scheduled evaluations")
+    best_step = best_mae = None
+    patience = 0
+    for step, event in zip(steps, history, strict=True):
+        score = event["inner_validation"]["mae"]
+        if type(score) not in (int, float) or not Decimal(str(score)).is_finite() or score < 0:
+            raise ValueError("Invalid physical MAE in Flamingo training history")
+        if step >= EVAL_INTERVAL:
+            if best_mae is None or Decimal(str(best_mae)) - Decimal(str(score)) >= MIN_IMPROVEMENT:
+                best_step, best_mae, patience = step, score, 0
+            else:
+                patience += 1
+        outcome = "completed" if step == ceiling else "early-stopped" if patience >= PATIENCE else "running"
+        next_step = min(ceiling, step + EVAL_INTERVAL) if outcome == "running" else None
+        selection = (event.get("best_step"), event.get("best_mae"), event.get("patience"),
+                     event.get("outcome"), event.get("next_eval_step"))
+        if (selection != (best_step, best_mae, patience, outcome, next_step)
+                or (outcome != "running") != (step == stop)):
+            raise ValueError("Flamingo evaluation history has an inconsistent promotion or training stop")
+    if selected_history != history[:steps.index(best_step) + 1]:
+        raise ValueError("Selected Flamingo checkpoint does not carry the promoted evaluation history")
+    return {k: v for k, v in final.items() if k != "receipt_bytes"} | {
+        "identity": expected | {"recipe_sha256": recipe_pin},
+    }
 
 
 def inspect(root, max_bytes, expected, checkpoint):
@@ -112,6 +165,7 @@ def inspect(root, max_bytes, expected, checkpoint):
             raise ValueError("Checkpoint payload changed")
         kept[path.name] = {"manifest_sha256": checkpoint.sha256(path/"manifest.json"), "files": record["files"]}
     final = None
+    training_stop = {}
     if result_path.exists() or result_path.is_symlink():
         result = load_metadata(result_path)
         selected = result["best_step"]
@@ -132,6 +186,13 @@ def inspect(root, max_bytes, expected, checkpoint):
             "step", "best_step", "outcome", "latest_manifest_sha256", "selected_manifest_sha256",
         )}
         final.update(receipt_sha256=checkpoint.sha256(result_path), receipt_bytes=result_path.stat().st_size)
+        if expected.get("backbone") == "flamingo":
+            selected_history = load_metadata(root/selected_name/"training.pt.json")["evaluations"]
+            stop = verified_flamingo_stop(expected, result, final, history, selected_history)
+            training_stop = {
+                "flamingo_training_stop": stop,
+                "flamingo_training_stop_sha256": hashlib.sha256(json.dumps(stop, sort_keys=True).encode()).hexdigest(),
+            }
     archive_files = {
         f"{path.name}/{name}": path/name for path in sorted(dependencies)
         for name in [*kept[path.name]["files"], "manifest.json"]
@@ -144,7 +205,7 @@ def inspect(root, max_bytes, expected, checkpoint):
         raise ValueError("Combined checkpoint archive exceeds funded read bound")
     receipt = {"logical_run": run, "checkpoint": f"{latest['step']}:{kept[latest_dir.name]['manifest_sha256']}",
                "latest_generation": latest_dir.name, "generations": kept, "terminal": final,
-               "payload_bytes": payload_bytes, "archive_upper_bound": archive_bound}
+               "payload_bytes": payload_bytes, "archive_upper_bound": archive_bound, **training_stop}
     return receipt, archive_files
 
 

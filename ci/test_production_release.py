@@ -1,11 +1,15 @@
 import copy
+from contextlib import redirect_stdout
 from hashlib import sha256
+from io import StringIO
 import json
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "workloads/sky"))
@@ -91,15 +95,113 @@ class ProductionReleaseTests(unittest.TestCase):
         variables = [{"name": role + "Image", "expression": repr(images[role])}
                      for role in ("trainer", "preflight")]
         policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "episode-submit-inputs"},
-                  "spec": {"variables": variables}}
+                  "spec": {"variables": [*variables, *[
+                      {"name": name, "expression": expression}
+                      for name, expression in release.QWEN_ONLY_VARIABLES.items()
+                  ]], "validations": [release.QWEN_ONLY]}}
         release.check_native_policy(images, policy)
         variables[0]["expression"] = repr(images["preflight"])
         with self.assertRaisesRegex(ValueError, "approved trainer image"):
             release.check_native_policy(images, policy)
         variables[0]["expression"] = repr(images["trainer"])
-        variables.pop()
+        policy["spec"]["variables"].remove(variables[1])
         with self.assertRaisesRegex(ValueError, "approved preflight image"):
             release.check_native_policy(images, policy)
+
+    def test_operator_digest_guard_with_signed_v1_v2_and_rollback(self):
+        activation = runpy.run_path(str(ROOT / "bootstrap/nebius/management/native-activation.py"))
+        held, _ = activation["held_policy_and_binding"]()
+        pins = {v["name"]: v["expression"].strip("'").split("@")[-1] for v in held["spec"]["variables"]
+                if v["name"] in release.ROLE_VARIABLES.values()}
+
+        def pair(prefix):
+            return copy.deepcopy(self.release["paired"]) | {"images": {
+                role: candidate(release.PAIRED, "0") | {"index": pins[release.ROLE_VARIABLES[prefix + role]]}
+                for role in ("trainer", "preflight")
+            }}
+
+        v1 = self.release | {"paired": pair("")}
+        v2 = v1 | {"schema": "nebius-image-release-v2", "flamingo": pair("flamingo-")}
+
+        def operator_check(policy):
+            stream = StringIO()
+            with (patch.object(sys, "argv", ["production_release.py", "check-native-policy"]),
+                  patch.object(sys, "stdin", StringIO(json.dumps(policy))),
+                  patch.object(release, "current_release", self.verify), redirect_stdout(stream)):
+                release.main()
+            return stream.getvalue().strip()
+
+        for serial, record in enumerate((v1, v2, v1)):
+            with self.subTest(schema=record["schema"], serial=serial):
+                raw = json.dumps(record).encode()
+                approval = json.dumps(self.approval | {"release_sha256": sha256(raw).hexdigest()},
+                                      indent=serial).encode()
+                self.sign("release.json", raw)
+                self.sign("deployment.json", approval)
+                digest = sha256(approval).hexdigest()
+                self.assertEqual(operator_check(held), digest)
+                images, receipt = self.verify()
+                for stage in ("support", "gpu"):
+                    active = activation["active_policy"](images, receipt, stage)
+                    self.assertEqual(operator_check(active), digest)
+                    if record is v1:
+                        bypassed = copy.deepcopy(active)
+                        bypassed["spec"]["validations"].remove(release.QWEN_ONLY)
+                        with self.assertRaisesRegex(ValueError, "explicit Flamingo denial"):
+                            operator_check(bypassed)
+                        bypassed = copy.deepcopy(active)
+                        selector = next(v for v in bypassed["spec"]["variables"] if v["name"] == "flamingo")
+                        selector["expression"] = "false"
+                        with self.assertRaisesRegex(ValueError, "explicit Flamingo denial"):
+                            operator_check(bypassed)
+                for role in images.keys() & release.ROLE_VARIABLES.keys():
+                    bad = copy.deepcopy(held)
+                    pin = next(v for v in bad["spec"]["variables"] if v["name"] == release.ROLE_VARIABLES[role])
+                    pin["expression"] = repr(f"{release.PAIRED}@sha256:" + "0" * 64)
+                    with self.assertRaisesRegex(ValueError, f"approved {role} image"):
+                        operator_check(bad)
+                if record is v1:
+                    unheld = copy.deepcopy(held)
+                    unheld["spec"]["validations"].pop(0)
+                    with self.assertRaisesRegex(ValueError, "approved flamingo-trainer image"):
+                        operator_check(unheld)
+
+    def test_separate_signed_roles_bind_native_backbone(self):
+        release_doc = copy.deepcopy(self.release)
+        gemma = copy.deepcopy(release_doc["paired"])
+        gemma["images"] = {"trainer": candidate(release.PAIRED, "d"), "preflight": candidate(release.PAIRED, "e")}
+        release_doc.update(schema="nebius-image-release-v2", flamingo=gemma)
+        raw = json.dumps(release_doc).encode()
+        self.sign("release.json", raw)
+        self.sign("deployment.json", json.dumps({**self.approval, "release_sha256": sha256(raw).hexdigest()}).encode())
+        refs, _ = self.verify()
+        self.assertEqual(len(set(refs.values())), 5)
+        variables = [{"name": var, "expression": repr(refs[role])} for role, var in release.ROLE_VARIABLES.items()]
+        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "episode-submit-inputs"},
+                  "spec": {"variables": variables}}
+        release.check_native_policy(refs, policy)
+        with self.assertRaisesRegex(ValueError, "flamingo-trainer"):
+            release.check_native_policy(release.release_refs(self.release), policy)
+
+        def job(role, trainer, flags):
+            container = {"image": refs[role], "env": [{"name": "EPISODE_IMAGE", "value": refs[trainer]}],
+                         "command": ["python", "episode_job.py", *flags]}
+            return {"kind": "Job", "spec": {"template": {"spec": {"containers": [container]}}}}
+
+        for prefix, flags in (("", []), ("flamingo-", ["--flamingo-binding-sha256", "1" * 64])):
+            trainer, preflight = prefix + "trainer", prefix + "preflight"
+            pre, task = job(preflight, trainer, flags), job(trainer, trainer, flags)
+            release.check_episode(refs, pre, task)
+            other = "trainer" if prefix else "flamingo-trainer"
+            for wrong_pre, wrong_task in ((job(other.replace("trainer", "preflight"), trainer, flags), task),
+                                           (job(preflight, other, flags), task),
+                                           (pre, job(other, trainer, flags)), (pre, job(trainer, other, flags)),
+                                           (pre, job(trainer, trainer, [] if prefix else ["--flamingo-binding-sha256"]))):
+                with self.assertRaises(ValueError):
+                    release.check_episode(refs, wrong_pre, wrong_task)
+        release_doc["flamingo"] = release_doc["paired"]
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            release.release_refs(release_doc)
 
     def test_invalid_candidate_records(self):
         for field, value in (("index", "latest"), ("repository", "example.invalid/trainer")):

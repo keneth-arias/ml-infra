@@ -3,6 +3,8 @@
 from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal, ROUND_CEILING
+import hashlib
+import json
 import re
 
 from worker_plan import (
@@ -141,6 +143,12 @@ def bounds(scope, ledger, now):
     ):
         raise BudgetStop("Allocation, money or cutoff exhausted", limits)
     return limits
+
+
+def check_vm_funding(scope, limits, now):
+    # The installed cutoff governs the VM even after the Job exits.
+    if hours(timestamp(scope["cutoff"]) - now) > min(limits["hour_limit"], limits["dollar_limit_hours"]):
+        raise ValueError("Full remaining VM allocation exceeds funding")
 
 
 def check_projection(limits, projected_hours):
@@ -299,8 +307,128 @@ def whole(value, low, high):
     return value
 
 
-def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
-    """Price two ceiling-length arms; only the operator's verified ledger can credit work."""
+def backbone_of(request):
+    return "flamingo" if "flamingo_binding" in request["pair"] else "qwen"
+
+
+def fit_records(ledger, backbone):
+    if backbone == "qwen":
+        return ledger
+    if backbone == "flamingo":
+        return ledger.get("flamingo", {})
+    raise ValueError("Unknown fit backbone")
+
+
+def sha(value):
+    return isinstance(value, str) and re.fullmatch("[0-9a-f]{64}", value) is not None
+
+
+def terminal_complete(record, backbone):
+    if record["terminal"] is not True:
+        return False
+    if not sha(record.get("export_sha256")):
+        raise ValueError("Terminal arm needs a verified export")
+    if backbone == "qwen":
+        return True
+    report = record.get("flamingo_qualification")
+    pin = record.get("flamingo_qualification_sha256")
+    if report is None and pin is None:
+        return False  # direct-result.json may precede both fresh-process probes.
+    if not isinstance(report, dict):
+        raise ValueError("Missing verified Flamingo comparison")
+    if hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest() != pin:
+        raise ValueError("Flamingo comparison differs from its verified MLflow digest")
+    for field in ("restored_receipts_sha256", "baseline_receipts_sha256"):
+        pair = report.get(field)
+        if not isinstance(pair, list) or len(pair) != 2 or not all(map(sha, pair)) or pair[0] == pair[1]:
+            raise ValueError("Expected two independent receipts for " + field)
+    if (report.get("selected_receipt_sha256") != record["export_sha256"]
+            or not sha(report.get("selected_manifest_sha256"))
+            or report.get("matching_horizons") != 6
+            or any(type(report.get(k)) is not int or report[k] <= 0 for k in ("cases", "reference_tokens"))
+            or any(type(report.get(k)) not in (int, float) for k in ("restored_max_abs_nll", "repeat_max_abs_nll"))
+            or amount(report["restored_max_abs_nll"]) > amount(report["repeat_max_abs_nll"])):
+        raise ValueError("Invalid verified Flamingo selection comparison")
+    return True
+
+
+def fenced_selected(entry):
+    return (entry["purpose"] == "selected" and entry.get("writer_fenced") is True
+            and sha(entry.get("closeout_sha256")))
+
+
+def check_progress_sources(ledger, backbone, *, allow_legacy=False):
+    selected = {
+        (e["attempt_id"], str(e["request"]["seed"]), e["request"]["arm"]): e["request"]["pair"]
+        for e in ledger.get("fit_attempts", [])
+        if fenced_selected(e) and backbone_of(e["request"]) == backbone
+    }
+    for seed, arms in fit_records(ledger, backbone).get("fit_progress", {}).items():
+        for arm, record in arms.items():
+            if allow_legacy and "attempt_id" not in record:
+                continue
+            source = (record.get("attempt_id"), seed, arm)
+            if source not in selected:
+                raise ValueError("Progress has no matching reconciled attempt")
+            if backbone == "flamingo" and terminal_complete(record, backbone):
+                if record["flamingo_qualification"]["baseline_receipts_sha256"] != selected[source]["flamingo_baselines"]:
+                    raise ValueError("Selection comparison differs from the funded baselines")
+
+
+def flamingo_training_complete(ledger, seed, arm, record):
+    if record["terminal"] is not True or record["step"] != record["evaluated_through"]:
+        return False
+    attempts = [e for e in ledger.get("fit_attempts", []) if fenced_selected(e)]
+    source = next((e for e in attempts if e["attempt_id"] == record.get("attempt_id")), None)
+    if source is None:
+        return False
+    request = source["request"]
+    pair = request["pair"]
+    if ((request["seed"], request["arm"], request["ceiling"]) != (seed, arm, EPOCH)
+            or backbone_of(request) != "flamingo"):
+        return False
+    expected = {
+        "backbone": "flamingo", "logical_run": request["run"], "seed": seed, "schedule": EPOCH,
+        "head": "direct", "direct_objective": {"control": "normalized-mse", "candidate": "physical-mae"}[arm],
+        "input_manifest_sha256": pair["fit"], "validation_manifest_sha256": pair["validation"],
+        "weights": pair["weights"], "binding_sha256": pair["flamingo_binding"],
+    }
+    step, checkpoint = record["step"], record["checkpoint_sha256"]
+    for entry in attempts:
+        proof = entry.get("flamingo_training_stop")
+        if not isinstance(proof, dict):
+            continue
+        if any(entry["request"][k] != request[k] for k in ("run", "seed", "arm", "ceiling", "pair")):
+            continue
+        # A later closeout can retain an earlier proof when it resumed that exact generation.
+        if entry is not source and (request.get("resume") is not True
+                                    or request.get("checkpoint") != f"{step}:{checkpoint}"):
+            continue
+        proof_pin = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
+        identity = proof.get("identity")
+        best = proof.get("best_step")
+        if (proof_pin == entry.get("flamingo_training_stop_sha256")
+                and isinstance(identity, dict) and sha(identity.get("recipe_sha256"))
+                and identity == expected | {"recipe_sha256": identity["recipe_sha256"]}
+                and step > 0 and proof.get("step") == step
+                and proof.get("outcome") == ("completed" if step == EPOCH else "early-stopped")
+                and type(best) is int and best in EVALUATIONS and 0 < best <= step
+                and sha(proof.get("selected_manifest_sha256"))
+                and proof.get("latest_manifest_sha256") == checkpoint
+                and proof.get("receipt_sha256") == record["export_sha256"]):
+            return True
+    return False
+
+
+def timed_checkpoint_limit(updates, interval, seconds):
+    if not interval:
+        return updates
+    return min(updates, int((amount(seconds) / interval).to_integral_value(rounding=ROUND_CEILING)))
+
+
+def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_preflight=False,
+                   job_deadline_seconds=None):
+    """Price both arms up to their ceiling using verified ledger progress."""
     seed = measurements["seed"]
     if seed not in (27, 28) or not re.fullmatch(
         "[0-9a-f]{64}", measurements["measurement_sha256"]
@@ -308,13 +436,20 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         raise ValueError("Expected a selected seed and measured benchmark digest")
     every = whole(measurements["checkpoint_every"], 1, EPOCH)
     interval = whole(measurements.get("save_interval_seconds", 900), 0, 2**31 - 1)
+    backbone = measurements.get("backbone", "qwen")
+    progress = fit_records(ledger, backbone).get("fit_progress", {}).get(str(seed), {})
+    flamingo = backbone == "flamingo"
     timing = {}
+    dispatch_seconds = {}
+    save_key = "checkpoint_publish_seconds" if flamingo else "save_seconds"
+    startup_key = "job_startup_restore_seconds" if flamingo else "startup_restore_seconds"
     for key in (
         "update_seconds",
         "fit_sample_pass_seconds",
         "validation_pass_seconds",
-        "save_seconds",
-        "startup_restore_seconds",
+        save_key,
+        startup_key,
+        *(("allocated_preflight_seconds", "selected_restore_probe_seconds") if flamingo else ()),
         "export_seconds",
     ):
         observations = measurements["samples"][key]
@@ -324,13 +459,16 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         if min(samples) <= 0:
             raise ValueError(f"Expected measured positive {key}")
         timing[key] = max(samples)
-    progress = ledger.get("fit_progress", {}).get(str(seed), {})
     if progress.keys() - {"control", "candidate"}:
         raise ValueError("Unexpected fit arm in the approved ledger")
     updates = evaluations = saves = starts = exports = 0
     replay_updates = replay_evals = 0
+    eval_seconds = timing["fit_sample_pass_seconds"] + timing["validation_pass_seconds"]
+    terminal_replay_extra = Decimal(0)
+    save_retries = 0
     for arm in ("control", "candidate"):
         step, evaluated = 0, -1
+        training_complete = False
         if arm in progress:
             record = progress[arm]
             if (
@@ -342,45 +480,83 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
             evaluated = whole(record["evaluated_through"], -1, step)
             if evaluated not in (-1, *EVALUATIONS):
                 raise ValueError("Invalid completed evaluation step")
-            if record["terminal"]:
-                if not re.fullmatch("[0-9a-f]{64}", record["export_sha256"]):
-                    raise ValueError("Terminal arm needs a verified export")
+            if terminal_complete(record, backbone):
                 continue
-        remaining = EPOCH - step
-        checks = sum(e > evaluated for e in EVALUATIONS)
+            training_complete = flamingo and flamingo_training_complete(ledger, seed, arm, record)
+        remaining = 0 if training_complete else EPOCH - step
+        checks = 0 if training_complete else sum(e > evaluated for e in EVALUATIONS)
         updates += remaining
         evaluations += checks
         # Price each periodic and best checkpoint and the final publication.
-        saves += checks + 1
+        scheduled_saves = sum(step < e <= step + remaining for e in EVALUATIONS) if flamingo else checks + 1
+        saves += scheduled_saves
+        if flamingo:
+            # A single, uninterrupted Job must fit its own deadline. Replacement
+            # Jobs, future CPU preflights and the other arm have separate deadlines.
+            budget = window_seconds if job_deadline_seconds is None else job_deadline_seconds
+            timed = timed_checkpoint_limit(remaining, interval, budget)
+            job_saves = min(remaining, scheduled_saves + timed)
+            dispatch_seconds[arm] = (
+                timing[startup_key] + remaining * timing["update_seconds"] + checks * eval_seconds
+                + job_saves * timing[save_key] + 2 * timing["selected_restore_probe_seconds"]
+                + timing["export_seconds"]
+            )
         starts += 1
         exports += 1
+        training_replay = Decimal(0)
         if remaining:
             # One additional interruption up to the next durable save per arm.
             # Include setup, any evaluation in that stretch and the interrupted write.
             # The direct trainer always checkpoints at the 500-update evaluation grid.
-            replay = min(1 if interval == 0 else max(500, every), remaining)
+            gap = 500 if flamingo else max(500, every)
+            replay = min(1 if interval == 0 else gap, remaining)
             replay_updates += replay
-            replay_evals += sum(evaluated < e <= step + replay for e in EVALUATIONS)
-            saves += 1
+            repeat_checks = sum(evaluated < e <= step + replay for e in EVALUATIONS)
+            if flamingo:
+                # An interruption may land at any future evaluation boundary.
+                # Every scheduled evaluation publishes a checkpoint, so later
+                # loss spans at most one evaluation. The initial span can also
+                # contain the as-yet-unpublished diagnostic evaluation.
+                repeat_checks = max(repeat_checks, int(checks > 0))
+            replay_evals += repeat_checks
+            save_retries += 1
+            training_replay = replay * timing["update_seconds"] + repeat_checks * eval_seconds + timing[save_key]
+        if flamingo:
+            # Atomic restore receipts survive a retry. One interrupted receipt
+            # can repeat under the same single-interruption allowance as training.
+            # The worker also re-verifies and republishes terminal evidence.
+            terminal_replay = timing["selected_restore_probe_seconds"] + timing["export_seconds"]
+            terminal_replay_extra += max(Decimal(0), terminal_replay - training_replay)
+        if remaining or flamingo:
             starts += 1
     # A wall-clock checkpoint resets the trainer timer after the save. Across
     # sequential workers their total running time cannot exceed the window.
     # At interval zero every completed update, including a replay, can save.
     updates_with_replay = updates + replay_updates
-    timed_saves = updates_with_replay if not interval else min(
-        updates_with_replay, int((amount(window_seconds) / interval).to_integral_value(rounding=ROUND_CEILING))
-    )
-    saves += timed_saves
-    eval_seconds = timing["fit_sample_pass_seconds"] + timing["validation_pass_seconds"]
+    timed_saves = timed_checkpoint_limit(updates_with_replay, interval, window_seconds)
+    if flamingo:
+        # At most one checkpoint per completed update. Replay ends at its
+        # first (possibly interrupted) publication, already priced separately.
+        timed_saves = min(timed_saves, updates)
+        saves = min(updates, saves + timed_saves)
+    else:
+        saves += timed_saves
+    saves += save_retries
     components = {
         "training": updates * timing["update_seconds"],
         "evaluations": evaluations * eval_seconds,
         "replay": replay_updates * timing["update_seconds"]
         + replay_evals * eval_seconds,
-        "checkpoints": saves * timing["save_seconds"],
-        "startup_and_restore": starts * timing["startup_restore_seconds"],
+        "checkpoints": saves * timing[save_key],
+        "startup_and_restore": starts * timing[startup_key],
         "exports": exports * timing["export_seconds"],
     }
+    if flamingo:
+        components.update(
+            selected_restore_probes=2 * exports * timing["selected_restore_probe_seconds"],
+            terminal_replay_extra=terminal_replay_extra,
+            allocated_preflights=max(0, starts - int(after_preflight)) * timing["allocated_preflight_seconds"],
+        )
     post_release = Decimal(0)
     if measurements["post_work"].keys() != POST_WORK.keys():
         raise ValueError(
@@ -388,20 +564,26 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         )
     for work, count in POST_WORK.items():
         item = measurements["post_work"][work]
+        if flamingo and work in ("language", "clean_reload"):
+            if item == {"when": "included-in-selected-restores"}:
+                continue
+            if item["when"] == "allocated" and item.get("scope") != "additional-package-tests":
+                raise ValueError("Identify independent allocated Flamingo package tests or include them in selected restores")
+        if item["when"] not in ("allocated", "after-release"):
+            raise ValueError("Specify where post-fit work executes")
         seconds = count * amount(item["seconds_each"])
         if seconds <= 0:
             raise ValueError("Missing post-fit timing: " + work)
         if item["when"] == "allocated":
             components[work] = seconds
-        elif item["when"] == "after-release":
+        else:
             rate = amount(item["hourly_usd"])
             post_release += seconds * rate / 3600
-        else:
-            raise ValueError("Specify where post-fit work executes")
     if post_release > amount(ledger.get("post_release_usd", 0)):
         raise ValueError("Post-release work exceeds its funded ledger line")
     return {
         "seed": seed,
+        "backbone": backbone,
         "updates": updates,
         "timed_checkpoint_upper_bound": timed_saves,
         "save_interval_seconds": interval,
@@ -411,5 +593,6 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         "replay_updates": replay_updates,
         "post_release_usd": post_release,
         "component_seconds": components,
+        **({"job_seconds_by_arm": dispatch_seconds} if flamingo else {}),
         "projected_hours": sum(components.values()) / 3600,
     }

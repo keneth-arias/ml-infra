@@ -69,6 +69,7 @@ class OwnerActivation(unittest.TestCase):
         self.closeout = runpy.run_path(str(sky / "public-flamingo-stage-closeout.py"))
         stage = runpy.run_path(str(sky / "render-public-flamingo-stage.py"))["stage_job"](
             "test", "stage-test-inventory", "stage-test-program", "signed-image", "a", "b")
+        self.stage = stage
         self.job = owner["owner_job"](stage, owner["worker_source"]())
         self.job_uid = str(uuid4())
         self.live = deepcopy(self.job)
@@ -85,6 +86,16 @@ class OwnerActivation(unittest.TestCase):
     def verify(self):
         return owner["verify_owner_job"](self.closeout, self.job, self.live, self.job_uid,
                                          suspended=True, expected_rv="19")
+
+    def test_successor_owner_enrollment_preserves_exact_signed_window_annotation(self):
+        annotation = {"airaware.training/stage-window-sha256": "a" * 64}
+        self.stage["metadata"]["annotations"] = annotation
+        self.job = owner["owner_job"](self.stage, owner["worker_source"]())
+        self.assertEqual(self.job["metadata"]["annotations"], annotation)
+        with self.assertRaisesRegex(ValueError, "annotations"):
+            self.verify()
+        self.live["metadata"]["annotations"] = annotation
+        self.assertEqual(self.verify()["uid"], self.job_uid)
 
     def test_only_pristine_owner_job_at_enrolled_uid_rv_can_release(self):
         self.assertEqual(self.verify()["uid"], self.job_uid)

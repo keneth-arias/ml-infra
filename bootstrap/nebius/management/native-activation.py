@@ -24,7 +24,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "workloads/sky"))
 from private_api import api_host, pinned_kubeconfig_ca
-from production_release import check_native_policy, current_release
+from production_release import (
+    FLAMINGO_ROLES, QWEN_IMAGE_SELECTORS, QWEN_ONLY, ROLE_VARIABLES, check_native_policy, current_release,
+)
 sys.path.insert(0, str(ROOT / "bootstrap/nebius"))
 from worker_plan import timestamp
 
@@ -75,10 +77,18 @@ def active_policy(images, receipt, stage):
     if stage not in ("support", "gpu") or not re.fullmatch("[0-9a-f]{64}", receipt):
         raise ValueError("Expected a verified deployment digest and explicitly selected window stage")
     policy, _ = held_policy_and_binding()
-    check_native_policy(images, policy)
     policy["metadata"]["annotations"] = {RECEIPT: receipt, STAGE: stage}
-    checks = policy["spec"]["validations"]
-    policy["spec"]["validations"] = ([SUPPORT] if stage == "support" else []) + checks[1:]
+    spec = policy["spec"]
+    checks = [SUPPORT] if stage == "support" else []
+    if "flamingo-trainer" not in images:
+        checks.append(QWEN_ONLY)
+        candidates = {ROLE_VARIABLES[role] for role in FLAMINGO_ROLES}
+        spec["variables"] = [
+            {**var, "expression": QWEN_IMAGE_SELECTORS.get(var["name"], var["expression"])}
+            for var in spec["variables"] if var["name"] not in candidates
+        ]
+    spec["validations"] = checks + spec["validations"][1:]
+    check_native_policy(images, policy)
     return policy
 
 
@@ -348,7 +358,13 @@ class Transaction:
         return expiry
 
     def probe(self, images=None):
-        args = ["--trainer-image", images["trainer"], "--preflight-image", images["preflight"]] if images else []
+        args = []
+        if images:
+            roles = ["trainer", "preflight"]
+            if "flamingo-trainer" in images or "flamingo-preflight" in images:
+                roles.extend(["flamingo-trainer", "flamingo-preflight"])
+            for role in roles:
+                args.extend([f"--{role}-image", images[role]])
         env = dict(os.environ, NEBIUS_SUBMIT_KUBECONFIG=str(self.session / "kubeconfig"))
         subprocess.run(
             [sys.executable, str(ROOT / "workloads/smoke/verify-training-access.py"), *args],

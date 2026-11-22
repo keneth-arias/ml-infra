@@ -2,9 +2,13 @@
 
 The default production overlay holds `training:episode-submit` closed. The operator-only transaction opens one attended session during a reviewed support or GPU window. In support mode actual training submissions are limited to CPU preflight. The verification probe can dry-run the signed GPU Job shape. GPU mode also admits the signed GPU Job under the existing workload policy.
 
+With a signed v1 release, both stages activate only the Qwen pair and deny Flamingo submissions, including dry runs. With a signed v2 release, activation verifies both pairs against the checked-in policy.
+
 ## Verify the deployment and window
 
 Use the exact reviewed deployment checkout on bm, an approved managed operator identity and its independently pinned public kubeconfig. Verify the signed production release and independently approved deployment SHA-256. Confirm the guarded worker allocation, Ready Kubernetes/provider identities, cutoff, ledger and retained storage receipts. Require just the approved support node in a support window. Require the approved support and GPU nodes, successful support and placement checks, and sufficient budget in a GPU window. Keep both worker shutdown schedulers armed.
+
+For both release versions, `current_release` verifies the signed records under `/etc/ml-infra/nebius-release/current` and matches `deployment_commit` to the exact checkout. Keep using the existing enrolled checkout for Qwen until a signed v1 or v2 deployment enrolls the new checkout. Close and fence the existing session to restore the canonical hold before switching the checkout and release.
 
 Reconcile older sessions first. Review other effective grants to `training:episode-submit`, including namespace and cluster bindings, group grants and grants limited to named resources. The held and released probes check effective access, including the denial of direct Pod creation, exec, port-forward, Secret reads and token creation. Use the existing approved policy field manager. The transaction needs exclusive attended control of the native policy and grant during activation and rollback. Schedule and record closure before activation.
 
@@ -56,3 +60,13 @@ If a create started and its response was lost, an absent object leaves the sessi
 Run close again. It checks live ownership first even when audit evidence is present. The completion checkpoint is `closed-reconciled.json`.
 
 The `check-held` command compares the live policy and binding on standard input with the canonical held configuration. It is a read-only diagnostic. If the managed API becomes unreachable, keep the worker shutdown schedulers armed, preserve the session directory and reconcile the grant, policy and workloads as soon as the API is reachable. Reconcile outstanding Jobs before ordinary worker release.
+
+## Flamingo direct forecast fits
+
+Build the committed OpenTSLM forecast code and private reader with the paired image builder. Set `FORECAST_BACKBONE=flamingo` for this build and supply both trainer and preflight image tags. This selects the Gemma 3 runtime. Promote both OCI digests through the existing signed deployment and native admission process on the verified Nebius managed cluster.
+
+Pass `--flamingo-binding-sha256` with the digest exported by AirAware to the staging Job and to `launch-episode.sh --nebius job fit direct`. Use the binding’s original fit and inner-validation manifest hashes and its new base weights hash for the cache. The worker reconstructs and checks the exact binding, rehashes the mounted base, verifies both original cohort manifests and supplies the binding file to the trainer. Provision an independent funded fit request for these artifact and render hashes. Use the seed screen, cooperative shutdown, tracking and checkpoint recovery flow described above.
+
+Before a funded Flamingo fit, run the managed baseline and promote its evidence as described in the [baseline handoff](../../../workloads/smoke/flamingo-baseline.md). Provide `--flamingo-baselines FIRST_SHA REPEAT_SHA --flamingo-parity-sha256 PARITY_SHA` to the launcher. The funded request binds the ordered language receipt digests and independently approved reference parity digest. The worker verifies the parity report, freeze, pair, base and runtime before training. At terminal selection it collects two independent restores, verifies language and numeric outputs against the approved baselines, and publishes the receipts and comparison to MLflow. Allow time for this work in the approved deadline.
+
+For a zero-progress retry, fence and quarantine the previous writer’s state, prepare an empty run directory and record the existing `fit_attempt.py check-fresh` attestation. Promote the same approved parity report, freeze and language receipt pair into that directory after the empty-state check and before launching the fresh attempt.

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from control_storage import control_bucket, verify_bucket_projects
 from gpu_reservation import reserve_remote
-from gpu_window import BudgetStop, bounds, check_projection, check_stage, fit_projection
+from gpu_window import BudgetStop, bounds, check_progress_sources, check_projection, check_stage, check_vm_funding, fit_projection
 from worker_plan import timestamp
 
 SOURCES = ("main.tf", "versions.tf", ".terraform.lock.hcl")
@@ -191,7 +191,12 @@ def project(args):
     observations = args.measurements.read_bytes()
     now = datetime.now(timezone.utc)
     seconds = max(0, (timestamp(scope["cutoff"]) - now).total_seconds())
-    fit = fit_projection(json.loads(observations), ledger, window_seconds=seconds)
+    timing = json.loads(observations)
+    backbone = timing.get("backbone", "qwen")
+    # Legacy standalone Qwen projections predate per-attempt closeout records.
+    if backbone != "qwen" or "flamingo" in ledger:
+        check_progress_sources(ledger, backbone, allow_legacy=backbone == "qwen")
+    fit = fit_projection(timing, ledger, window_seconds=seconds)
     result = {
         "run_id": scope["run_id"],
         "state_bucket": scope["state_bucket"],
@@ -211,6 +216,8 @@ def project(args):
     else:
         result["bounds"] = limits
         try:
+            if backbone == "flamingo" and any(span["end"] is None for span in ledger["gpu_intervals"]):
+                check_vm_funding(scope, limits, now)
             check_projection(limits, fit["projected_hours"])
         except ValueError as exc:
             result.update(decision="budget-stop", reason=str(exc))
@@ -233,7 +240,7 @@ def main():
         else:
             sub.add_argument("--receipt", type=Path, required=True)
     projection = commands.add_parser(
-        "project", help="Price a seed pair or retry using measured timings"
+        "project", help="Price a seed pair or retry for the measurements file's backbone (default qwen)"
     )
     for field in ("scope", "ledger", "measurements"):
         projection.add_argument("--" + field, type=Path, required=True)

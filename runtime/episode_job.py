@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -18,6 +19,128 @@ from pathlib import Path
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+FLAMINGO_REVISION = "5e030b001fb8d4be6d10ebb3a8b9bc3e6ef80983"
+FLAMINGO_WEIGHTS = "7f8562992f1cf3852ced581f331247c6420fc90292d45453424c77f0a29c199f"
+COHORT_WEIGHTS = "1d76cc3cfd4c15f9c749372611e5ca6e0b6f910b1fcf0551ce9157e9bfef29c1"
+
+
+def flamingo_binding(digest, fit, validation):
+    """Reconstruct the independently pinned AirAware binding without mounting extra data."""
+    if not all(re.fullmatch("[a-f0-9]{64}", value or "") for value in (digest, fit, validation)) or fit == validation:
+        raise ValueError("Expected distinct pinned trainer roles and a Flamingo binding digest")
+    record = {
+        "schema": "airaware-flamingo-binding-v1",
+        "model": "opentime/tslm-nov26",
+        "revision": FLAMINGO_REVISION,
+        "weights_manifest_sha256": FLAMINGO_WEIGHTS,
+        "cohort_weights_manifest_sha256": COHORT_WEIGHTS,
+        "roles": {"fit": fit, "inner_validation": validation},
+    }
+    raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("Flamingo binding differs from the approved base and role digests")
+    return raw
+
+
+def approved_flamingo_evidence(folder, digests, parity_digest):
+    if (len(digests) != 2 or len(set(digests)) != 2
+            or not all(re.fullmatch(r"[0-9a-f]{64}", d) for d in (*digests, parity_digest))):
+        raise ValueError("Expected an approved parity digest and two ordered baseline digests")
+    if folder.is_symlink() or not folder.is_dir():
+        raise ValueError("Invalid Flamingo baseline directory")
+    evidence = {}
+    for name, pin in [(d + ".json", d) for d in digests] + [
+        ("reference-parity.json", parity_digest), ("freeze.json", None)
+    ]:
+        path = folder / name
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 2 * 1024**2:
+            raise ValueError(f"Expected a bounded regular Flamingo receipt: {name}")
+        raw = path.read_bytes()
+        if pin is not None and hashlib.sha256(raw).hexdigest() != pin:
+            raise ValueError(f"Flamingo receipt differs from approval: {name}")
+        evidence[name] = raw
+
+    trace = json.loads(evidence["reference-parity.json"])
+    freeze = json.loads(evidence["freeze.json"])
+    if (freeze.pop("reference_parity_sha256", None) != parity_digest or trace.get("language_freeze") != freeze
+            or freeze.get("baseline_receipts_sha256") != list(digests)):
+        raise ValueError("Frozen evidence differs from pre-fit approval")
+
+    if (trace.get("protocol") != "per-series-reference-parity-v1"
+            or trace.get("reference_sha256") != "c19db31d2ce6e84a4ce02c9a0fdfe0869c53775f77b04dd4be5c893afd8335e2"
+            or trace.get("revision") != FLAMINGO_REVISION
+            or trace.get("weights_manifest_sha256") != FLAMINGO_WEIGHTS
+            or trace.get("dtype") != "float32" or trace.get("atol") != 1e-5 or trace.get("rtol") != 1e-5
+            or trace.get("transformers") != "4.57.6" or not trace.get("torch") or not trace.get("device")
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", trace.get("image_digest", ""))
+            or len(trace.get("cases", [])) != 2):
+        raise ValueError("Unexpected reference parity protocol, base or runtime")
+    for case in trace["cases"]:
+        ids = case.get("generated_ids")
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 8
+                or any(type(t) is not int or t < 0 for t in ids)
+                or any(type(case.get(k)) not in (int, float) or not math.isfinite(case[k]) or case[k] < 0
+                       for k in ("latents_max_abs_error", "logits_max_abs_error"))):
+            raise ValueError("Incomplete reference parity case")
+    for digest in digests:
+        receipt = json.loads(evidence[digest + ".json"])
+        runtime, protocol = receipt["runtime"], receipt["protocol"]
+        if (protocol["base_manifest_sha256"] != trace["weights_manifest_sha256"]
+                or protocol["base_revision"] != trace["revision"] or protocol["precision"] != trace["dtype"]
+                or runtime["device"] != "cuda:0" or runtime["gpu"] != trace["device"]
+                or any(runtime[k] != trace[k] for k in ("image_digest", "torch", "transformers"))):
+            raise ValueError("Reference parity identity differs from language baseline")
+    return evidence
+
+
+def validated_baselines(state, digests, parity_digest, image_digest):
+    import torch
+    from importlib.metadata import version
+    from opentslm.flamingo_qualification import compare
+
+    folder = state / "flamingo-baselines"
+    evidence = approved_flamingo_evidence(folder, digests, parity_digest)
+    paths = [folder / (digest + ".json") for digest in digests]
+    frozen = compare(paths, list(digests))
+    if frozen != json.loads(evidence["reference-parity.json"])["language_freeze"]:
+        raise ValueError("Recomputed language freeze differs from parity approval")
+    baseline = json.loads(evidence[paths[0].name])
+    runtime = {"device": "cuda:0", "gpu": torch.cuda.get_device_name(0), "cuda": torch.version.cuda,
+               "torch": str(torch.__version__), "transformers": version("transformers"),
+               "peft": version("peft"), "image_digest": image_digest}
+    if baseline["runtime"] != runtime:
+        raise ValueError("Approved Flamingo baseline differs from this training runtime")
+    return paths
+
+
+def verify_flamingo_selection(weights, result_file, paths, digests, image_digest):
+    """Qualify the actual selected generation before publishing terminal success."""
+    from opentslm.flamingo_qualification import compare
+
+    state = result_file.parent
+    terminal = json.loads(result_file.read_bytes())
+    generation = state / f"step-{terminal['best_step']:08d}"
+    result_pin = sha256(result_file)
+    selected_pin = terminal["selected_manifest_sha256"]
+    folder = state / "flamingo-qualification" / result_pin
+    if folder.parent.is_symlink() or folder.is_symlink():
+        raise ValueError("Invalid qualification receipt directory")
+    folder.mkdir(parents=True, exist_ok=True)
+    restored = [folder / f"restore-{n}.json" for n in (1, 2)]
+    for out in restored:
+        if out.is_symlink():
+            raise ValueError("Invalid restore receipt file")
+        if not out.exists():
+            subprocess.run([
+                sys.executable, "-m", "opentslm.flamingo_qualification", "restore",
+                "--weights", str(weights), "--checkpoint", str(generation), "--image-digest", image_digest,
+                "--selected-receipt", str(result_file), "--selected-receipt-sha256", result_pin, "--output", str(out),
+            ], check=True)
+    report = compare(paths, list(digests), restored, result_pin, selected_pin)
+    bind_file(folder / "comparison.json", report)
+    return folder
 
 
 def bundle_manifest(manifest, digest, phase, head, *, paired=False):
@@ -168,7 +291,8 @@ def bind_file(path, value):
 
 
 @contextmanager
-def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False):
+def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False, prepare=None):
+    """Run preparation and receipt publication under the same worker lock."""
     with (root / ".episode-worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         intent = root / f".{key}.intent.json"
@@ -181,6 +305,8 @@ def stage_attempt(root, key, identity, artifact, verify, *, with_publisher=False
         reuse = artifact.exists()
         if receipt.exists() and not reuse:
             raise ValueError("Published artifact missing")
+        if prepare is not None:
+            prepare(reuse)
         published = False
 
         def publish_verified():
@@ -252,7 +378,8 @@ def training_metrics(event):
     return metrics
 
 
-def verify_fit_result(artifact, args, spec, *, generation=None):
+def verify_fit_result(artifact, args, spec, *, generation=None, recovered=None):
+    """Verify a fit artifact using any checkpoint already checked under the worker lock."""
     from opentslm.forecast_checkpoint import files, read_manifest
 
     result = None
@@ -264,22 +391,31 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
                 result["outcome"] != ("completed" if result["step"] == args.step else "early-stopped")):
             raise ValueError("Unexpected terminal direct fit result")
         directory = artifact.parent / f"step-{result['step']:08d}"
+        if recovered is not None and directory != recovered:
+            raise ValueError("Terminal result does not match the funded checkpoint")
         selected = artifact.parent / f"step-{result['best_step']:08d}"
         best = read_manifest(selected)
-        if (not best or best["identity"] != result["identity"] or best["files"] != files(selected) or
+        if (not best or best["identity"] != result["identity"] or
+                (recovered is None and best["files"] != files(selected)) or
                 sha256(selected / "manifest.json") != result["selected_manifest_sha256"] or
                 sha256(directory / "manifest.json") != result["latest_manifest_sha256"] or
                 (artifact.parent / "best").read_text().strip() != selected.name):
             raise ValueError("Terminal direct checkpoint failed verification")
         last = json.loads((directory / "training.pt.json").read_bytes())["evaluations"][-1]
-        if any(result.get(k) != v for k, v in last.items()):
+        # Recovery checked the selected checkpoint named in this durable evaluation.
+        if result["best_step"] != last.get("best_step") or any(result.get(k) != v for k, v in last.items()):
             raise ValueError("Terminal result differs from durable evaluation")
 
     m = read_manifest(directory)
-    if (not m or not 0 < m["step"] <= args.step or m["files"] != files(directory)
+    if (not m or not 0 < m["step"] <= args.step or (recovered is None and m["files"] != files(directory))
             or generation is None and result is None and m["step"] != args.step):
         raise ValueError("Incomplete checkpoint")
-    identity = m["identity"]
+    if result is not None and result["identity"] != m["identity"]:
+        raise ValueError("Terminal result carries another run identity")
+    verify_fit_identity(m["identity"], args, spec)
+
+
+def verify_fit_identity(identity, args, spec):
     expected = {
         "data": spec["files"]["data.npz"],
         "head": args.head,
@@ -290,15 +426,15 @@ def verify_fit_result(artifact, args, spec, *, generation=None):
     if args.direct_objective:
         expected.update(logical_run=args.run_id, direct_objective=args.direct_objective,
                         input_manifest_sha256=args.bundle_sha256, validation_manifest_sha256=args.validation_sha256)
-        if result is not None and result["identity"] != identity:
-            raise ValueError("Terminal result carries another run identity")
+        if getattr(args, "flamingo_binding_sha256", None):
+            expected.update(backbone="flamingo", binding_sha256=args.flamingo_binding_sha256)
     if "point_control_of" in spec:
         expected.update(matched_point="complete_epoch_v1", input_manifest_sha256=args.bundle_sha256)
     if any(identity.get(k) != v for k, v in expected.items()):
         raise ValueError("Published checkpoint does not match this fit")
 
 
-def verify_resume_checkpoint(work, artifact, args, spec):
+def verify_resume_checkpoint(work, args, spec):
     from opentslm.forecast_checkpoint import read_manifest, recover
 
     step_text, digest = args.resume_checkpoint.split(":")
@@ -307,13 +443,16 @@ def verify_resume_checkpoint(work, artifact, args, spec):
     manifest = read_manifest(generation)
     if not manifest or sha256(generation / "manifest.json") != digest:
         raise ValueError("Funded checkpoint manifest differs from the retained generation")
-    verify_fit_result(artifact, args, spec, generation=generation)
+    if not 0 < step <= args.step:
+        raise ValueError("Funded checkpoint step exceeds the fit schedule")
+    verify_fit_identity(manifest["identity"], args, spec)
     for path in work.glob("step-????????"):
         other = read_manifest(path)
         if other and other["identity"] != manifest["identity"]:
             raise ValueError("Checkpoint directory contains multiple trainer identities")
     if recover(work, manifest["identity"]) != (step, generation):
         raise ValueError("The trainer would recover a different generation")
+    return generation
 
 
 def main():
@@ -328,6 +467,9 @@ def main():
     parser.add_argument("--seed", type=int, default=27)
     parser.add_argument("--direct-objective", choices=("normalized-mse", "physical-mae"))
     parser.add_argument("--validation-sha256")
+    parser.add_argument("--flamingo-binding-sha256")
+    parser.add_argument("--flamingo-parity-sha256")
+    parser.add_argument("--flamingo-baselines", nargs=2, metavar=("FIRST_SHA", "REPEAT_SHA"))
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--resume-checkpoint", help="Verified STEP:SHA256 required for a funded resume")
     parser.add_argument("--resume", action="store_true")
@@ -337,6 +479,17 @@ def main():
     parser.add_argument("--graceful-stop", action="store_true")
     parser.add_argument("--stop-after-seconds", type=int)
     args = parser.parse_args()
+    binding = None
+    qualification = (args.flamingo_binding_sha256, args.flamingo_baselines, args.flamingo_parity_sha256)
+    if any(v is not None for v in qualification) and not all(qualification):
+        parser.error("Bind the Flamingo recipe and approved language baselines and reference parity digest together")
+    if args.flamingo_binding_sha256 is not None:
+        if (not all(re.fullmatch("[0-9a-f]{64}", d) for d in (*args.flamingo_baselines, args.flamingo_parity_sha256))
+                or len(set(args.flamingo_baselines)) != 2):
+            parser.error("Two distinct approved Flamingo baselines are required")
+        if not args.direct_objective:
+            parser.error("Flamingo requires a paired direct forecast fit")
+        binding = flamingo_binding(args.flamingo_binding_sha256, args.bundle_sha256, args.validation_sha256)
     if args.resume_checkpoint is not None and (not args.direct_objective or not args.resume or
             not re.fullmatch(r"[1-9][0-9]*:[a-f0-9]{64}", args.resume_checkpoint)):
         parser.error("Checkpoint pin requires a paired resume and STEP:SHA256")
@@ -370,6 +523,8 @@ def main():
         from opentslm.forecast_inputs import direct_cohorts
 
         spec = bundle_manifest(root / "manifest.json", args.bundle_sha256, "fit", "direct", paired=True)
+        if binding and spec["weights_manifest_sha256"] != COHORT_WEIGHTS:
+            raise ValueError("Flamingo requires the original Qwen cohort manifest")
         validation_root = Path("/validation")
         fit_rows, validation_rows = direct_cohorts(
             root / "manifest.json", args.bundle_sha256, validation_root / "manifest.json",
@@ -381,6 +536,10 @@ def main():
     else:
         spec = bundle(root, args.bundle_sha256, args.phase, args.head)
     bundle_verified = time.monotonic()
+    if binding:
+        # direct_cohorts already verified both original immutable role manifests.
+        # Bind the runtime receipt and checkpoint verification to the actual model base.
+        spec = {**spec, "weights_manifest_sha256": FLAMINGO_WEIGHTS}
     verify_base(weights, spec["weights_manifest_sha256"])
     weights_verified = time.monotonic()
     matched = "point_control_of" in spec
@@ -509,9 +668,26 @@ def main():
         ]
     work = Path("/state") if args.phase == "fit" else artifact.parent
 
+    baselines = []
+    evidence = None
+    if binding:
+        image_digest = os.environ["EPISODE_IMAGE"].rsplit("@", 1)[-1]
+        baselines = validated_baselines(work, args.flamingo_baselines, args.flamingo_parity_sha256, image_digest)
+
+    recovered = None
+
+    def prepare_attempt(reused):
+        nonlocal recovered
+        generation = verify_resume_checkpoint(work, args, spec)
+        if reused:
+            recovered = generation
+
     def verify_result(generation=None):
+        nonlocal evidence
         if args.phase == "fit":
-            verify_fit_result(artifact, args, spec, generation=generation)
+            verify_fit_result(artifact, args, spec, generation=generation, recovered=recovered)
+            if binding and generation is None:
+                evidence = verify_flamingo_selection(weights, artifact, baselines, args.flamingo_baselines, image_digest)
         else:
             with (
                 np.load(data, allow_pickle=False) as inputs,
@@ -541,17 +717,22 @@ def main():
     identity = {
         k: v
         for k, v in vars(args).items()
-        if (v is not None or k not in ("direct_objective", "validation_sha256"))
+        if (v is not None or k not in ("direct_objective", "validation_sha256", "flamingo_binding_sha256", "flamingo_baselines", "flamingo_parity_sha256"))
         and k not in ("attempt", "resume", "resume_checkpoint", "preflight", "save_seconds", "graceful_stop", "stop_after_seconds")
     }
     identity["image"] = os.environ["EPISODE_IMAGE"]
     experiment = mlflow.set_experiment("airaware-pm25")
     with ExitStack() as stack:
+        if binding:
+            staged = stack.enter_context(NamedTemporaryFile(prefix="flamingo-binding-", suffix=".json"))
+            staged.write(binding)
+            staged.flush()
+            command.extend(["--backbone", "flamingo", "--flamingo-binding", staged.name,
+                            "--flamingo-binding-sha256", args.flamingo_binding_sha256])
         reused, publish_verified = stack.enter_context(
-            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result, with_publisher=True)
+            stage_attempt(work, f"{args.phase}-{step_name}", identity, artifact, verify_result,
+                          with_publisher=True, prepare=prepare_attempt if args.resume_checkpoint else None)
         )
-        if args.resume_checkpoint and not reused:
-            verify_resume_checkpoint(work, artifact, args, spec)
         tracking_id = None
         tags = {}
         existing = []
@@ -656,6 +837,12 @@ def main():
                 acknowledge(control, "interrupted", generation)
                 raise SystemExit(75)
         publish_verified()
+        if evidence is not None:
+            for path in baselines:
+                mlflow.log_artifact(str(path), "qualification/baselines")
+            for filename in ("comparison.json", "restore-1.json", "restore-2.json"):
+                mlflow.log_artifact(str(evidence / filename), "qualification")
+            mlflow.set_tag("flamingo_qualification_sha256", sha256(evidence / "comparison.json"))
         selected_dir = artifact.parent
         if args.direct_objective:
             terminal = json.loads(artifact.read_bytes())

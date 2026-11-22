@@ -8,7 +8,7 @@ import subprocess
 import sys
 import uuid
 
-from production_release import release_images, require_image
+from production_release import model_roles, release_images, require_image
 from production_target import kubectl_client_for_identity
 
 
@@ -24,8 +24,10 @@ def main(argv=None):
     if rendered.returncode:
         raise SystemExit("Invalid staging arguments. See --help for the required inputs.")
     job = json.loads(rendered.stdout)
-    image = job["spec"]["template"]["spec"]["containers"][0]["image"]
-    require_image(images, "preflight", image)
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    image = container["image"]
+    _, role = model_roles(container["command"])
+    require_image(images, role, image)
 
     # Staging writes the input claim under separate, operator-approved credentials.
     operator = os.environ["NEBIUS_STAGING_OPERATOR_IDENTITY"]
@@ -35,7 +37,7 @@ def main(argv=None):
     name = "stage-episode-" + uuid.uuid4().hex[:12]
     del job["metadata"]["generateName"]
     job["metadata"]["name"] = name
-    require_image(release_images(), "preflight", image)
+    require_image(release_images(), role, image)
     result = subprocess.run([*client, "--request-timeout=30s", "create", "-f", "-", "-o", "name"],
                             input=json.dumps(job), text=True, capture_output=True)
     if result.returncode or result.stdout.strip() != "job.batch/" + name:

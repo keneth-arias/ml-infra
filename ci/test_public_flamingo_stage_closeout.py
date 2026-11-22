@@ -87,6 +87,32 @@ class StageCloseout(unittest.TestCase):
         self.assertEqual(result, {"run": self.run, "cluster_id": "cluster", "disk_id": "disk",
                          "output_subpath": "flamingo-baselines/test", "writer_fenced": True, **self.worker})
 
+    def test_successor_capture_and_fence_require_same_signed_evidence(self):
+        window = "a" * 64
+        platform = "ghcr.io/example/test@sha256:" + "b" * 64
+        annotations = {"airaware.training/stage-window-sha256": window}
+        self.packet.update(window_sha256=window, preflight_linux_amd64=platform)
+        for obj in (self.job, self.packet["job"], self.cm, self.packet["configmap"]):
+            obj["metadata"]["annotations"] = annotations
+        with self.assertRaisesRegex(ValueError, "source inventory"):
+            self.capture()
+        self.secret["window_sha256"] = window
+        self.guard["window_sha256"] = self.closed["window_sha256"] = window
+        self.evidence["window_sha256"] = window
+        self.pod["status"]["containerStatuses"][0]["imageID"] = CLOSE["PLATFORM_IMAGE"]
+        with self.assertRaisesRegex(ValueError, "executed image"):
+            self.capture()
+        self.pod["status"]["containerStatuses"][0]["imageID"] = platform
+        receipt = self.capture()
+        self.assertEqual(receipt["window_sha256"], window)
+        self.objects.update(pods={"items": []}, jobs={"items": []})
+        self.assertEqual(self.fence(receipt)["fence_evidence"]["window_sha256"], window)
+        for field in (receipt, self.evidence):
+            del field["window_sha256"]
+            with self.assertRaisesRegex(ValueError, "authorized window"):
+                self.fence(receipt)
+            field["window_sha256"] = window
+
     def test_closure_binds_packet_owner_guard_and_window(self):
         stage = {"stage_guard": self.guard, "storage_operator": "storage", "expires_at": "2026-11-22T02:20:00Z"}
         scope = {"cutoff": "2026-11-22T02:25:00Z"}

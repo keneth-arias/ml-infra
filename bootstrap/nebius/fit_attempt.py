@@ -11,16 +11,18 @@ import re
 
 from control_storage import STORAGE_FIELDS, verify_bucket_projects
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
-from gpu_window import EPOCH, bounds, check_projection, fit_projection, whole
+from gpu_window import (
+    EPOCH, backbone_of, bounds, check_progress_sources, check_projection, check_vm_funding,
+    fit_projection, fit_records, sha, terminal_complete, whole,
+)
 from worker_plan import amount, timestamp
+
+
+TERMINATION_GRACE_SECONDS = 90
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
-
-
-def sha(value):
-    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
 
 
 def describe(preflight, task):
@@ -43,7 +45,7 @@ def describe(preflight, task):
         pod_spec = spec["config"]["kubernetes"]["pod_config"]["spec"]
         deadline = pod_spec.get("activeDeadlineSeconds")
     grace = pod_spec.get("terminationGracePeriodSeconds")
-    if grace != 90 or type(deadline) is not int or deadline <= 0:
+    if grace != TERMINATION_GRACE_SECONDS or type(deadline) is not int or deadline <= 0:
         raise ValueError("Use cooperative shutdown and a bounded deadline for paid paired fits")
     arm = {"normalized-mse": "control", "physical-mae": "candidate"}[arg("direct-objective")]
     mounts = {v["mountPath"]: v["subPath"] for v in validator["volumeMounts"]}
@@ -54,6 +56,22 @@ def describe(preflight, task):
         "preflight_image": validator["image"],
         "trainer_image": next(v["value"] for v in validator["env"] if v["name"] == "EPISODE_IMAGE"),
     }
+    worker_cmd = pod_spec["containers"][0]["command"] if mode == "job" else []
+    if "--flamingo-binding-sha256" in cmd or "--flamingo-binding-sha256" in worker_cmd:
+        pair["flamingo_binding"] = arg("flamingo-binding-sha256")
+        pair["flamingo_parity_sha256"] = arg("flamingo-parity-sha256")
+        if not sha(pair["flamingo_parity_sha256"]):
+            raise ValueError("Require the independently approved parity report digest")
+        first = cmd.index("--flamingo-baselines") + 1
+        pair["flamingo_baselines"] = cmd[first:first + 2]
+        approved = ["--flamingo-binding-sha256", pair["flamingo_binding"], "--flamingo-baselines",
+                    *pair["flamingo_baselines"], "--flamingo-parity-sha256", pair["flamingo_parity_sha256"]]
+        for command in (cmd, worker_cmd):
+            if any(command.count(flag) != 1 for flag in ("--flamingo-binding-sha256", "--flamingo-baselines", "--flamingo-parity-sha256")):
+                raise ValueError("Require one set of approved Flamingo evidence per Job")
+            start = command.index("--flamingo-binding-sha256")
+            if command[start:start + len(approved)] != approved:
+                raise ValueError("Preflight and fit must carry the same approved Flamingo evidence")
     return {
         "mode": mode,
         "task_sha256": digest(task),
@@ -71,14 +89,14 @@ def describe(preflight, task):
     }
 
 
-def check_seed_28(ledger):
-    pair = ledger["fit_progress"]["27"]
-    gate = ledger["seed_28_decision"]
+def check_seed_28(ledger, backbone="qwen"):
+    records = fit_records(ledger, backbone)
+    pair = records["fit_progress"]["27"]
+    gate = records["seed_28_decision"]
     for arm in ("control", "candidate"):
         progress = pair[arm]
         if (
-            progress["terminal"] is not True
-            or not sha(progress["export_sha256"])
+            not terminal_complete(progress, backbone)
             or gate["exports"][arm] != progress["export_sha256"]
         ):
             raise ValueError("Seed 28 requires both verified seed-27 exports")
@@ -96,15 +114,33 @@ def fit_attempt_id(purpose, request):
     ordinal = request["attempt"]
     if type(ordinal) is not int or ordinal < 1:
         raise ValueError("Invalid request ordinal for paired attempt ID")
-    return f"paired-{purpose}-{request['seed']}-{request['arm']}-{ordinal}"
+    prefix = "paired-flamingo" if backbone_of(request) == "flamingo" else "paired"
+    return f"{prefix}-{purpose}-{request['seed']}-{request['arm']}-{ordinal}"
 
 
 def previous_attempts(ledger, request, purpose, max_attempts):
-    seed, arm, number = request["seed"], request["arm"], request["attempt"]
     history = ledger.get("fit_attempts", [])
     attempts = ledger["attempt_ids"]
-    group = []
+    groups = {}
+    pairs = {}
+    run_owners = {}
     seen = set()
+
+    def group_for(candidate, stage_purpose, limit):
+        stage = (backbone_of(candidate), stage_purpose)
+        key = (*stage, candidate["seed"], candidate["arm"])
+        group = groups.setdefault(key, [])
+        if (pairs.setdefault(stage, candidate["pair"]) != candidate["pair"]
+                or run_owners.setdefault(candidate["run"], key) != key
+                or group and group[0]["request"]["run"] != candidate["run"]):
+            raise ValueError("Logical run or immutable paired inputs changed")
+        if group and group[0]["request"]["ceiling"] != candidate["ceiling"]:
+            raise ValueError("Retry must retain the original training schedule")
+        if (candidate["attempt"] != len(group) + 1 or candidate["attempt"] > limit
+                or group and group[0]["max_attempts"] != limit):
+            raise ValueError("Attempt already consumed, out of order or beyond the approved retry limit")
+        return group
+
     for entry in history:
         prev = entry["request"]
         if entry["attempt_id"] != fit_attempt_id(entry["purpose"], prev):
@@ -117,38 +153,23 @@ def previous_attempts(ledger, request, purpose, max_attempts):
         ):
             raise ValueError("Reconcile the previous workload, writer and checkpoint before another launch")
         seen.add(entry["attempt_id"])
-        same_arm = (entry["purpose"], prev["seed"], prev["arm"]) == (purpose, seed, arm)
-        if (
-            same_arm != (prev["run"] == request["run"])
-            or entry["purpose"] == purpose
-            and prev["pair"] != request["pair"]
-        ):
-            raise ValueError("Logical run or immutable paired inputs changed")
-        if same_arm:
-            if prev["attempt"] != len(group) + 1:
-                raise ValueError("Paired attempt history is out of order")
-            if prev["ceiling"] != request["ceiling"]:
-                raise ValueError("Retry must retain the original training schedule")
-            group.append(entry)
-    if {a for a in attempts if a.startswith("paired-")} != seen:
+        group_for(prev, entry["purpose"], entry["max_attempts"]).append(entry)
+    paired_ids = [a for a in attempts if a.startswith("paired-")]
+    if set(paired_ids) != seen or len(paired_ids) != len(seen):
         raise ValueError("Incomplete paired attempt history")
     attempt_id = fit_attempt_id(purpose, request)
-    if (
-        number != len(group) + 1
-        or number > max_attempts
-        or attempt_id in attempts
-        or any(e["max_attempts"] != max_attempts for e in group)
-    ):
-        raise ValueError("Attempt already consumed, out of order or beyond the approved retry limit")
-
+    if attempt_id in seen:
+        raise ValueError("Attempt already consumed")
+    group = group_for(request, purpose, max_attempts)
     return group, attempt_id
 
 
 def recovery_checkpoint(ledger, approval, request, group):
     """Bind the one recovery drill to its completed control and replacement VM."""
     reference = approval["recovery_reference"]
+    baseline_id = fit_attempt_id("qualification", dict(request, attempt=1))
     baseline = next((entry for entry in ledger["fit_attempts"]
-                     if entry["attempt_id"] == "paired-qualification-27-control-1"), None)
+                     if entry["attempt_id"] == baseline_id), None)
     if (baseline is None or baseline["purpose"] != "qualification" or baseline["max_attempts"] != 1
             or baseline.get("outcome") != "complete"
             or reference != {"attempt_id": baseline["attempt_id"], "closeout_sha256": baseline["closeout_sha256"],
@@ -208,6 +229,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     open_vms = [v["vm"] for v in ledger["gpu_intervals"] if v["end"] is None]
     if open_vms != [approval["vm"]] or ledger.get("active_reservation"):
         raise ValueError("Require one approved live GPU and a reconciled previous reservation")
+    if backbone_of(request) == "flamingo":
+        check_vm_funding(scope, limits, now)
     seed, arm = request["seed"], request["arm"]
     purpose = approval["purpose"]
     if purpose == "selected":
@@ -215,40 +238,38 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
             raise ValueError("Selected fit requires the full epoch ceiling")
     elif purpose not in ("qualification", "qualification-recovery") or seed != 27 or not 0 < request["ceiling"] < EPOCH:
         raise ValueError("Expected a selected pair or bounded seed-27 qualification")
-    history = ledger.get("fit_attempts", [])
     max_attempts = whole(approval["max_attempts"], 1, 2**31 - 1)
     if purpose == "qualification-recovery" and (arm != "control" or request["mode"] != "job" or max_attempts != 2):
         raise ValueError("Recovery requires two separately approved native control qualification attempts")
     group, attempt_id = previous_attempts(ledger, request, purpose, max_attempts)
     projection = Decimal(request["deadline_seconds"]) / 3600
+    dispatch_seconds = None
     checkpoint = None
     if purpose == "selected":
         timing = json.loads(measurements)
+        backbone = backbone_of(request)
+        if timing.get("backbone", "qwen") != backbone:
+            raise ValueError("Wrong backbone for fit projection")
         if timing["seed"] != seed:
             raise ValueError("Wrong seed for fit projection")
-        # Only earlier, reconciled attempts may earn credit towards either arm.
-        for key, records in ledger.get("fit_progress", {}).items():
-            for name, record in records.items():
-                if not any(
-                    e["purpose"] == "selected"
-                    and str(e["request"]["seed"]) == key
-                    and e["request"]["arm"] == name
-                    and e["attempt_id"] == record["attempt_id"]
-                    for e in history
-                ):
-                    raise ValueError("Progress has no matching reconciled attempt")
+        for family in ("qwen", "flamingo"):
+            check_progress_sources(ledger, family)
         if seed == 28:
-            check_seed_28(ledger)
-        progress = ledger.get("fit_progress", {}).get(str(seed), {}).get(arm)
+            check_seed_28(ledger, backbone)
+        progress = fit_records(ledger, backbone).get("fit_progress", {}).get(str(seed), {}).get(arm)
         if progress:
-            if progress["terminal"] or progress["step"] <= 0:
+            if terminal_complete(progress, backbone) or progress["step"] <= 0:
                 raise ValueError("Selected arm already terminal or checkpoint has no completed update")
             checkpoint = f"{progress['step']}:{progress['checkpoint_sha256']}"
         seconds = (timestamp(scope["cutoff"]) - now).total_seconds()
-        fit = fit_projection(timing, ledger, window_seconds=seconds)
+        active_seconds = request["deadline_seconds"] - TERMINATION_GRACE_SECONDS
+        fit = fit_projection(timing, ledger, window_seconds=seconds, after_preflight=True,
+                             job_deadline_seconds=active_seconds)
         if request["save_interval_seconds"] != fit["save_interval_seconds"]:
             raise ValueError("Rendered save interval differs from the measured checkpoint policy")
         projection = fit["projected_hours"]
+        if backbone == "flamingo":
+            dispatch_seconds = fit["job_seconds_by_arm"][arm]
     elif purpose == "qualification-recovery":
         checkpoint = recovery_checkpoint(ledger, approval, request, group)
     elif group:
@@ -261,6 +282,9 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
         raise ValueError("Fresh replay requires fenced, verified empty run storage")
     check_projection(limits, projection)
     check_projection(limits, Decimal(request["deadline_seconds"]) / 3600)
+    if dispatch_seconds is not None and dispatch_seconds > active_seconds:
+        raise ValueError(f"Measured {arm} Job needs {dispatch_seconds} seconds before its "
+                         f"{active_seconds}-second active deadline")
     hold = dict(
         stage="fit",
         run_id=scope["run_id"],
@@ -277,6 +301,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     )
     if purpose == "qualification-recovery":
         hold["recovery_reference"] = approval["recovery_reference"]
+    if dispatch_seconds is not None:
+        hold["job_seconds"] = str(dispatch_seconds)
     ledger.setdefault("fit_attempts", []).append(hold)
     revision, version = write_reservation(s3, scope, current, ledger, hold)
     return {

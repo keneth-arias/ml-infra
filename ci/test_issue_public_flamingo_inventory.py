@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit, parse_qs
 
@@ -63,6 +64,18 @@ class PublicInventoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check(self.grant, self.key, self.packet, self.approval)
 
+    def test_source_custodian_and_approval_must_bind_same_successor(self):
+        sha = "3"*64
+        w = SimpleNamespace(sha256=sha)
+        grant, approval = dict(self.grant, window_sha256=sha), dict(self.approval, window_sha256=sha)
+        with patch.dict(os.environ, {}, clear=True):
+            check = issuer["check_grant"]
+            check(grant, self.key, self.packet, approval, w)
+            for g, a, window in [(self.grant, approval, w), (grant, self.approval, w),
+                                 (dict(grant, window_sha256="x"), approval, w), (grant, approval, None)]:
+                with self.assertRaises(ValueError):
+                    check(g, self.key, self.packet, a, window)
+
     def test_versioned_gets_match_worker_and_expiry(self):
         row = {"bucket": "airaware-artifacts-test", "key": "model/base/a.json", "name": "a.json",
                "sha256": digest, "version_id": "1", "size": 37}
@@ -91,7 +104,14 @@ class PublicInventoryTests(unittest.TestCase):
             self.assertNotIn("private-test", repr(args))
             secret = json.loads(kwargs["input"])
             self.assertTrue(secret["immutable"])
+            self.assertNotIn("annotations", secret["metadata"])
             self.assertEqual(args[0][args[0].index("create"):][:3], ["create", "-f", "-"])
+            window = SimpleNamespace(sha256=digest)
+            window_reply = fn(prefix, "stage-test-inventory", [{"url": "private-test"}], window)
+            self.assertEqual(window_reply, dict(reply, window_sha256=digest))
+            window_secret = json.loads(run.call_args.kwargs["input"])
+            self.assertEqual(window_secret["metadata"]["annotations"],
+                             {"airaware.training/stage-window-sha256": digest})
             run.return_value = subprocess.CompletedProcess([], 1, "", "private-test")
             with self.assertRaisesRegex(RuntimeError,"inspect") as exc:
                 fn(prefix, "stage-test-inventory", [])
@@ -224,12 +244,23 @@ class PublicInventoryTests(unittest.TestCase):
                     self.assertEqual([call[0] for call in actions.mock_calls], ["guard", "probe", "guard", "create"])
                     for call in actions.guard.call_args_list:
                         self.assertEqual(call.args[1:], ("test", "closed", closed))
+                        self.assertIsNone(call.kwargs["window"])
 
                     actions.reset_mock()
                     actions.guard.side_effect = [None, ValueError("guard changed")]
                     with self.assertRaises(ValueError):
                         main()
                     actions.create.assert_not_called()
+
+                    actions.reset_mock()
+                    windows = main.__globals__["windows"]
+                    window_approval = Mock(return_value={"run": packet["run"], "window_sha256": digest})
+                    with (patch.object(windows, "load_window", return_value=SimpleNamespace(sha256=digest)),
+                          patch.dict(main.__globals__, {"read_private": window_approval})):
+                        with self.assertRaisesRegex(ValueError, "Successor issuance requires"):
+                            main()
+                    window_approval.assert_called_once()
+                    self.assertEqual(actions.mock_calls, [])
 
                     actions.reset_mock()
                     capability_path = Path(directory) / "capability-inventory"

@@ -14,6 +14,7 @@ p.add_argument("--inventory-secret", required=True)
 p.add_argument("--source-prefix", required=True)
 p.add_argument("--weights-sha256", required=True)
 p.add_argument("--bundle-sha256", required=True)
+p.add_argument("--flamingo-binding-sha256")
 p.add_argument("--validation-sha256", help="Pinned inner-validation manifest for a direct paired fit")
 p.add_argument("--phase", choices=["fit", "infer"], required=True)
 p.add_argument("--head", choices=["direct", "episode", "quantile"], required=True)
@@ -36,6 +37,10 @@ if a.validation_sha256 and (
     or a.validation_sha256 == a.bundle_sha256 or (a.phase, a.head) != ("fit", "direct")
 ):
     p.error("Inner validation requires a distinct digest and a direct fit")
+if a.flamingo_binding_sha256 is not None and (
+    not a.validation_sha256 or not re.fullmatch("[a-f0-9]{64}", a.flamingo_binding_sha256)
+):
+    p.error("Flamingo staging requires a pinned binding and both trainer roles")
 spec = {
     "restartPolicy": "Never",
     "serviceAccountName": "episode-input-stager",
@@ -69,6 +74,7 @@ spec = {
                 "--bundle-sha256",
                 a.bundle_sha256,
                 *(["--validation-sha256", a.validation_sha256] if a.validation_sha256 else []),
+                *(["--flamingo-binding-sha256", a.flamingo_binding_sha256] if a.flamingo_binding_sha256 else []),
                 "--phase",
                 a.phase,
                 "--head",
