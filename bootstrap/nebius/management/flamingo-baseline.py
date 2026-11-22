@@ -27,7 +27,7 @@ from gpu_window import bounds, check_projection, hours
 from production_release import current_release, check_native_policy
 from production_target import kubectl_client_for_identity
 from worker_cleanup import scope_digest
-from worker_plan import timestamp
+from worker_plan import check_gpu_mode, timestamp
 
 
 def sha(raw):
@@ -125,6 +125,7 @@ def baseline_request(args, scope, scope_hash, images, receipt):
             or sha(canonical(expected)) != review["job_sha256"] or type(deadline) != int
             or receipt != args.expected_deployment or review["deployment_sha256"] != receipt
             or scope["cluster_id"] != cluster or review["cluster_id"] != cluster or scope["stage"] != "gpu"
+            or scope.get("gpu_mode", "native") != "native"
             or not re.fullmatch("computeinstance-[a-z0-9]+", vm) or review["provider_id"] != "nebius://" + vm
             or not re.fullmatch("[a-z0-9][a-z0-9-]{0,39}", scope["run_id"])):
         raise ValueError("Review differs from signed renderer, enrolled worker or managed allocation")
@@ -148,6 +149,8 @@ def baseline_request(args, scope, scope_hash, images, receipt):
 
 
 def funded_limits(scope, ledger, request, now, margin):
+    if check_gpu_mode(scope, ledger) != "native":
+        raise ValueError("Flamingo baseline requires a native GPU window")
     if ([v["vm"] for v in ledger["gpu_intervals"] if v["end"] is None] != [request["vm"]]
             or request["cutoff"] != scope["cutoff"] or request["start"] != scope["start"]
             or request["cluster_id"] != scope["cluster_id"]):

@@ -135,6 +135,16 @@ class FundingTest(unittest.TestCase):
         self.assertEqual(store.version, 15)
         self.assertEqual(json.loads(store.raw)["active_reservation"], read["hold"])
 
+    def test_hami_scope_or_ledger_cannot_fund_a_native_baseline(self):
+        for scope_mode, ledger_mode in (("native", "hami"), ("hami", "native"), ("hami", "hami")):
+            with self.subTest(scope=scope_mode, ledger=ledger_mode):
+                scope = dict(self.scope, gpu_mode=scope_mode)
+                funds = dict(self.funds, gpu_mode=ledger_mode)
+                store = VersionedLedger(funds)
+                with self.assertRaises(ValueError):
+                    B["reserve"](store, scope, B["sha"](store.raw), "13", self.request, CLOCK)
+                self.assertEqual(store.version, 13)
+
     def test_short_job_requires_funding_through_vm_cutoff(self):
         # With ten hours to cutoff, either cap can leave just fifteen minutes.
         prior_vm = dict(vm="previous", start=utc(CLOCK - timedelta(hours=98, minutes=45)),
