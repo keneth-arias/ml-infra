@@ -30,10 +30,12 @@ jobs:
       matrix:
         include:
           - {role: rootless-cpu, check: pull-and-verify}
-          - {role: trainer, check: verify-paired-trainer}
-          - {role: preflight, check: verify-paired-preflight}
+          - {pair: flamingo, role: trainer, check: verify-paired-trainer}
+          - {pair: flamingo, role: preflight, check: verify-paired-preflight}
+          - {pair: qwen, role: trainer, check: verify-qwen-trainer}
+          - {pair: qwen, role: preflight, check: verify-qwen-preflight}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -58,6 +60,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/cosign"
       - name: Cold pull the OCI index and verify the candidate
         env:
+          PAIR: ${{ matrix.pair }}
           ROLE: ${{ matrix.role }}
           REGISTRY_READ_TOKEN: ${{ github.token }}
         run: |
@@ -79,15 +82,32 @@ jobs:
           }
           if [[ "$ROLE" != rootless-cpu ]]; then
             [[ "$ROLE" == preflight || "$ROLE" == trainer ]]
-            receipt=bootstrap/nebius/releases/flamingo-candidate.json
+            [[ "$PAIR" == flamingo || "$PAIR" == qwen ]]
+            receipt="bootstrap/nebius/releases/$PAIR-candidate.json"
             commit=$(jq -er .build_commit "$receipt")
             digest=$(jq -er --arg role "$ROLE" '.images[$role].index' "$receipt")
             [[ "$commit" =~ ^[a-f0-9]{40}$ && "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
             git merge-base --is-ancestor "$commit" HEAD
-            git diff --exit-code "$commit" HEAD -- bootstrap/microk8s/build-episodes.sh \
-              runtime/{episode_job.py,episode_stop.py,stage_episode_inputs.py,versioned_episode_inputs.py,Dockerfile.episodes,Dockerfile.preflight}
+            if [[ "$PAIR" == qwen ]]; then
+              # Canonical .paired from the signed production release, including all three source commits.
+              signed_pair_sha256=3991dac5ff326c81333d2379543beea99686093abd73a74cfc16f9eaf27c7464
+              jq -cS . "$receipt" | sha256sum --check <(echo "$signed_pair_sha256  -")
+            else
+              git diff --exit-code "$commit" HEAD -- bootstrap/microk8s/build-episodes.sh \
+                runtime/{episode_job.py,episode_stop.py,stage_episode_inputs.py,versioned_episode_inputs.py,Dockerfile.episodes,Dockerfile.preflight}
+            fi
             image="ghcr.io/keneth-arias/ml-infra-qwen@$digest"
             pull_and_verify "$commit" "$image" "$RUNNER_TEMP/pulled" ci/verify-paired-image.py "$receipt" "$ROLE"
+            if [[ "$PAIR" == qwen && "$ROLE" == trainer ]]; then
+              # Make space on the hosted runner before Docker expands the trainer.
+              rm -rf -- "$RUNNER_TEMP/pulled"
+              sudo rm -rf -- /usr/local/lib/android/sdk
+              platform="ghcr.io/keneth-arias/ml-infra-qwen@$(jq -er .images.trainer.linux_amd64 "$receipt")"
+              docker pull --platform linux/amd64 "$platform"
+              docker run --rm --pull=never --network=none --runtime=runc \
+                -e CUDA_VISIBLE_DEVICES= -e HF_HUB_OFFLINE=1 --entrypoint /opt/conda/bin/python "$platform" \
+                -c 'from transformers import Qwen3_5ForConditionalGeneration; print(Qwen3_5ForConditionalGeneration.__name__)'
+            fi
             exit 0
           fi
           verify_receipt() {
