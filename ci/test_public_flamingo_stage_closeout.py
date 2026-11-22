@@ -1,5 +1,6 @@
 """Offline API snapshots for successful public stage capture and detached closeout."""
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import runpy
@@ -40,9 +41,7 @@ class StageCloseout(unittest.TestCase):
                                      {"apiVersion": "batch/v1", "kind": "Job", "controller": True,
                                       "name": self.job_name, "uid": self.ids["job"]}]},
                     "spec": {**deepcopy(template["spec"]), "priority": 0, "preemptionPolicy": "PreemptLowerPriority",
-                             "nodeName": self.node, "tolerations": [
-                                 {"key": "node.kubernetes.io/not-ready", "operator": "Exists",
-                                  "effect": "NoExecute", "tolerationSeconds": 300}]},
+                             "nodeName": self.node},
                     "status": {"phase": "Succeeded", "containerStatuses": [
                         {"name": "stage", "imageID": self.image, "restartCount": 0, "state": {
                             "terminated": {"exitCode": 0, "finishedAt": "2026-11-22T00:00:00Z"}}}]}}
@@ -51,6 +50,13 @@ class StageCloseout(unittest.TestCase):
         self.secret = {"metadata": {"name": "stage-test-inventory", "namespace": "training", "uid": self.ids["inventory"]},
                        "immutable": True, "type": "Opaque", "keys": ["inventory.json"]}
         self.worker = CLOSE["worker_facts"](self.packet)
+        self.guard = {"policy_uid": str(uuid4()), "binding_uid": str(uuid4()), "policy_generation": 3,
+                      "binding_generation": 1}
+        self.closed = {**self.guard, "policy_generation": 4}
+        self.guard["job_uid"] = self.ids["job"]
+        self.evidence = {"stage_approval_sha256": "approval", "stage_guard": self.guard,
+                         "capture_sha256": "capture", "closure_sha256": "closure"}
+
         self.objects = {"job": self.job, "pod": self.pod, "configmap": self.cm, "pods": {"items": [self.pod]},
                         "jobs": {"items": [self.job]}, "node": {
                             "metadata": {"name": self.node, "uid": "cpu-uid", "labels": {"airaware.training/pool": "training-cpu"}},
@@ -61,18 +67,64 @@ class StageCloseout(unittest.TestCase):
         return self.objects.get(kind, {"items": []})
 
     def capture(self):
-        return CLOSE["capture"](self.packet, self.ids, self.get, lambda *args: json.dumps(self.worker), lambda n: self.secret)
+        return CLOSE["capture"](self.packet, self.ids, self.get, lambda *args: json.dumps(self.worker), lambda n: self.secret,
+                                lambda: self.guard, "approval")
 
-    def fence(self, receipt, absent=lambda *args: True, detached=lambda: True):
-        return CLOSE["fence"](self.packet, self.ids, receipt, self.get, absent, detached)
+    def fence(self, receipt, absent=lambda *args: True, detached=lambda: True, verify=None):
+        return CLOSE["fence"](self.packet, self.ids, receipt, self.get, absent, detached,
+                              verify or (lambda: self.closed), self.evidence)
 
     def test_verified_capture_then_retirement(self):
         receipt = self.capture()
         self.assertEqual(receipt["uids"]["pod"], self.pod_uid)
         self.assertNotIn("writer_fenced", receipt)
         self.objects.update(pods={"items": []}, jobs={"items": []})
-        self.assertEqual(self.fence(receipt), {"run": self.run, "cluster_id": "cluster", "disk_id": "disk",
+        result = self.fence(receipt)
+        evidence = result.pop("fence_evidence")
+        self.assertEqual(evidence["guard_before"], self.closed)
+        self.assertEqual(evidence["guard_after"], self.closed)
+        self.assertEqual(evidence["stage_approval_sha256"], receipt["stage_approval_sha256"])
+        self.assertEqual(result, {"run": self.run, "cluster_id": "cluster", "disk_id": "disk",
                          "output_subpath": "flamingo-baselines/test", "writer_fenced": True, **self.worker})
+
+    def test_closure_binds_packet_owner_guard_and_window(self):
+        stage = {"stage_guard": self.guard, "storage_operator": "storage", "expires_at": "2026-11-22T02:20:00Z"}
+        scope = {"cutoff": "2026-11-22T02:25:00Z"}
+        closure = {"purpose": "public-flamingo-stage-fence", "stage_approval_sha256": "approval",
+                   "packet_sha256": "packet", "capture_sha256": "capture", "storage_operator": "storage",
+                   "cutoff": scope["cutoff"], "valid_until": "2026-11-22T02:15:00Z", "closed_guard": self.closed}
+        args = (stage, "approval", "packet", "capture", scope, "storage")
+        self.assertEqual(CLOSE["check_closure"](closure, *args).minute, 15)
+        for key in ("stage_approval_sha256", "packet_sha256", "capture_sha256", "storage_operator", "cutoff"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                CLOSE["check_closure"]({**closure, key: "other"}, *args)
+        for key, value in (("policy_uid", str(uuid4())), ("binding_uid", str(uuid4())),
+                           ("policy_generation", 5), ("policy_generation", 3), ("binding_generation", 2)):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "successor"):
+                CLOSE["check_closure"]({**closure, "closed_guard": {**self.closed, key: value}}, *args)
+        with self.assertRaisesRegex(ValueError, "window"):
+            CLOSE["check_closure"]({**closure, "valid_until": "2026-11-22T02:22:00Z"}, *args)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            CLOSE["check_deadline"](datetime(2000, 1, 1, tzinfo=timezone.utc))
+
+    def test_guard_is_checked_on_both_sides_of_detach(self):
+        receipt = self.capture()
+        self.objects.update(pods={"items": []}, jobs={"items": []})
+        observed = []
+        def guard():
+            observed.append("guard")
+            if len(observed) == 3:
+                raise ValueError("reopened")
+            return self.closed
+        def detach():
+            observed.append("detach")
+            return True
+        with self.assertRaisesRegex(ValueError, "reopened"):
+            self.fence(receipt, detached=detach, verify=guard)
+        self.assertEqual(observed, ["guard", "detach", "guard"])
+        receipt["stage_approval_sha256"] = "replaced"
+        with self.assertRaisesRegex(ValueError, "stage approval"):
+            self.fence(receipt)
 
     def test_only_exact_suspended_enrollment_can_be_activated(self):
         with self.assertRaises(ValueError):

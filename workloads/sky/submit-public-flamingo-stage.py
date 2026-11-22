@@ -55,16 +55,41 @@ def check_time(cutoff, deadline, now):
         raise ValueError("Insufficient time for the reviewed CPU Job and writer closeout")
 
 
+def read_approval(path, expected):
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected or path.stat().st_mode & 0o077:
+        raise ValueError("Expected the private independently approved handoff")
+    return json.loads(raw)
+
+
+def check_transition(enrolled, active):
+    if (enrolled["action"] != "enroll" or active["action"] != "activate" or any(
+            active[k] != enrolled[k] for k in ("purpose", "run", "packet_file_sha256", "deployment_sha256",
+                                               "inventory_secret", "inventory_uid", "staging_operator",
+                                               "storage_operator", "exclusive_storage_handoff",
+                                               "inventory_secret_immutable"))
+            or datetime.fromisoformat(active["expires_at"]) > datetime.fromisoformat(enrolled["expires_at"])):
+        raise ValueError("Activation differs from the approved enrollment handoff")
+    closed, opened = enrolled["closed_guard"], active["stage_guard"]
+    if (any(closed[k] != opened[k] for k in ("policy_uid", "binding_uid", "binding_generation"))
+            or opened["policy_generation"] != closed["policy_generation"] + 1):
+        raise ValueError("Activation must bind the direct successor of the closed PVC guard")
+
+
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument("action", choices=["enroll", "activate"])
+    cli.add_argument("--enrollment-approval", type=Path)
     for key in ("packet", "approval", "promotion", "binding", "scope"):
         cli.add_argument("--" + key, type=Path, required=True)
     cli.add_argument("--approved-sha256", required=True, help="Independent owner's approval file SHA-256")
     a = cli.parse_args()
-    raw = a.approval.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != a.approved_sha256 or a.approval.stat().st_mode & 0o077:
-        raise ValueError("Expected the private independently approved handoff")
-    approval = json.loads(raw)
+    approval = read_approval(a.approval, a.approved_sha256)
+    if a.action != approval["action"] or (a.enrollment_approval is not None) != (a.action == "activate"):
+        raise ValueError("Expected approval for this action and a predecessor only on activation")
+    if a.action == "activate":
+        enrolled = read_approval(a.enrollment_approval, approval["enrollment_approval_sha256"])
+        check_transition(enrolled, approval)
     if (approval["purpose"] != "public-flamingo-stage" or approval["exclusive_storage_handoff"] is not True
             or approval["inventory_secret_immutable"] is not True):
         raise ValueError("Owner must grant the exclusive handoff and approve the immutable inventory")
@@ -116,7 +141,17 @@ def main():
     closeout = runpy.run_path(str(HERE / "public-flamingo-stage-closeout.py"))
     native = runpy.run_path(str(HERE.parents[1] / "bootstrap/nebius/management/native-activation.py"))
 
+    from public_flamingo_stage_guard import verify_guard
+
+    job = packet["job"]
+    phase = "closed" if a.action == "enroll" else "stage"
+    pins = approval["closed_guard" if phase == "closed" else "stage_guard"]
+
+    def check_guard():
+        return verify_guard(get, packet["run"], phase, pins, job=job if phase == "stage" else None)
+
     def gates(own_job=None):
+        check_guard()
         check_time(cutoff, deadline, datetime.now(timezone.utc))
         native["check_active"](*native["held_policy_and_binding"](),
                                {"items": [get(native["POLICY"]), get(native["GUARD"])]})
@@ -134,43 +169,44 @@ def main():
         subprocess.run([sys.executable, str(HERE / "training-storage-handoff.py")], env=env, check=True, timeout=140)
         check_time(cutoff, deadline, datetime.now(timezone.utc))
 
-    gates()
-    program_uid = create(kube, packet["configmap"])
-    # If admission fails or a read races with retirement, leave the named object for attended reconciliation.
-    print(f"Created {packet['configmap']['metadata']['name']} UID {program_uid}", file=sys.stderr, flush=True)
-    reproduce()
-    gates()
+    name = job["metadata"]["name"]
+    if a.action == "enroll":
+        gates()
+        program_uid = create(kube, packet["configmap"])
+        print(f"Created {packet['configmap']['metadata']['name']} UID {program_uid}", file=sys.stderr, flush=True)
+        reproduce()
+        gates()
+        enrollment = {**job, "spec": {**job["spec"], "suspend": True}}
+        job_uid = create(kube, enrollment)
+        print(f"Enrolled suspended {name} UID {job_uid}", file=sys.stderr, flush=True)
+    else:
+        program_uid = str(uuid.UUID(approval["configmap_uid"]))
+        job_uid = str(uuid.UUID(pins["job_uid"]))
+        gates(job_uid)
     program = get("configmap", packet["configmap"]["metadata"]["name"], "-n", "training")
     if (program["metadata"]["uid"] != program_uid or program["metadata"].get("deletionTimestamp")
             or program.get("immutable") is not True or program["data"] != packet["configmap"]["data"]
             or program.get("binaryData")):
         raise ValueError("Approved stage program changed after creation")
-    job = packet["job"]
-    enrollment = {**job, "spec": {**job["spec"], "suspend": True}}
-    job_uid = create(kube, enrollment)
-    name = job["metadata"]["name"]
-    print(f"Enrolled suspended {name} UID {job_uid}", file=sys.stderr, flush=True)
-    admitted = get("job", name, "-n", "training")
-    closeout["checked_meta"](admitted, name, job_uid)
-    closeout["verify_job"](packet, admitted, suspended=True)
-    gates(job_uid)
     reproduce()
+    check_guard()
     admitted = get("job", name, "-n", "training")
     metadata = closeout["checked_meta"](admitted, name, job_uid)
     if metadata.get("ownerReferences") or admitted.get("status", {}).get("active"):
         raise ValueError("Expected one independently controlled suspended enrollment")
     closeout["verify_job"](packet, admitted, suspended=True)
-    patch = [{"op": "test", "path": "/metadata/uid", "value": job_uid},
-             {"op": "test", "path": "/metadata/resourceVersion", "value": metadata["resourceVersion"]},
-             {"op": "test", "path": "/spec/suspend", "value": True},
-             {"op": "replace", "path": "/spec/suspend", "value": False}]
-    result = subprocess.run([*kube, "--request-timeout=30s", "patch", "job", name, "--type=json",
-                             "--patch", json.dumps(patch), "-o", "json"], capture_output=True, timeout=35)
-    if result.returncode:
-        raise RuntimeError(f"Activation was not confirmed; inspect Job {name} UID {job_uid} before retry")
-    active = json.loads(result.stdout)
-    closeout["checked_meta"](active, name, job_uid)
-    closeout["verify_job"](packet, active)
+    if a.action == "activate":
+        patch = [{"op": "test", "path": "/metadata/uid", "value": job_uid},
+                 {"op": "test", "path": "/metadata/resourceVersion", "value": metadata["resourceVersion"]},
+                 {"op": "test", "path": "/spec/suspend", "value": True},
+                 {"op": "replace", "path": "/spec/suspend", "value": False}]
+        result = subprocess.run([*kube, "--request-timeout=30s", "patch", "job", name, "--type=json",
+                                 "--patch", json.dumps(patch), "-o", "json"], capture_output=True, timeout=35)
+        if result.returncode:
+            raise RuntimeError(f"Activation was not confirmed; inspect Job {name} UID {job_uid} before retry")
+        active = json.loads(result.stdout)
+        closeout["checked_meta"](active, name, job_uid)
+        closeout["verify_job"](packet, active)
     canonical = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode()
     print(json.dumps({"job_uid": job_uid, "configmap_uid": program_uid, "inventory_uid": inventory_uid,
                       "packet_file_sha256": approval["packet_file_sha256"],

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import subprocess
@@ -152,7 +153,50 @@ def worker_facts(packet):
     return {"weights_manifest_sha256": packet["weights_manifest_sha256"], "output_uid": 1000, "output_empty": True}
 
 
-def capture(packet, ids, get, logs, secret_meta):
+def pinned_file(path, expected):
+    if path.stat().st_mode & 0o077:
+        raise ValueError("Approval and evidence files must be owner-only")
+    data = path.read_bytes()
+    if sha256(data).hexdigest() != expected:
+        raise ValueError("File differs from the independently approved digest")
+    return json.loads(data)
+
+
+def timestamp(value):
+    when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if when.tzinfo is None:
+        raise ValueError("Expected an absolute authorization deadline")
+    return when
+
+
+def check_closure(closure, approval, stage_sha, packet_sha, capture_sha, scope, identity):
+    if (closure["purpose"] != "public-flamingo-stage-fence" or closure["stage_approval_sha256"] != stage_sha
+            or closure["capture_sha256"] != capture_sha or closure["packet_sha256"] != packet_sha
+            or closure["storage_operator"] != identity or approval["storage_operator"] != identity
+            or closure["cutoff"] != scope["cutoff"]):
+        raise ValueError("Closure approval differs from the original handoff, operator or evidence")
+    deadline = timestamp(closure["valid_until"])
+    if deadline > min(timestamp(scope["cutoff"]), timestamp(approval["expires_at"])):
+        raise ValueError("Closure exceeds the approved handoff window")
+    # No intervening policy generation or change to the binding may have reopened
+    # the claim between the verified stage and its closed successor.
+    original = approval["stage_guard"]
+    closed = closure["closed_guard"]
+    expected = {key: original[key] for key in ("policy_uid", "binding_uid", "binding_generation")}
+    if (type(original["policy_generation"]) is not int or type(closed["policy_generation"]) is not int
+            or type(closed["binding_generation"]) is not int
+            or closed != {**expected, "policy_generation": original["policy_generation"] + 1}):
+        raise ValueError("Closure is not the direct successor on the enrolled policy and binding")
+    return deadline
+
+
+def check_deadline(deadline):
+    if datetime.now(timezone.utc) >= deadline:
+        raise ValueError("The approved storage handoff or closure has expired")
+
+
+def capture(packet, ids, get, logs, secret_meta, stage_guard, approval_sha):
+    initial_guard = stage_guard()
     job_name = packet["job"]["metadata"]["name"]
     job = get("job", job_name, "-n", NS)
     checked_meta(job, job_name, ids["job"])
@@ -211,13 +255,19 @@ def capture(packet, ids, get, logs, secret_meta):
     exclude_other_writers(get, ids["job"])
     return {"schema": "public-flamingo-stage-capture-v1", "cluster_id": packet["cluster_id"],
             "packet_sha256": digest(packet), "run": packet["run"], "uids": {**ids, "pod": pm["uid"]},
+            "stage_approval_sha256": approval_sha, "guard_before": initial_guard, "guard_after": stage_guard(),
             "pod_name": pm["name"], "job_name": job_name, "configmap_name": cm_name,
             "inventory_name": job_name + "-inventory", "placement": place, "image_id": container["imageID"],
             "finished_at": ended["finishedAt"], "observed_at": datetime.now(timezone.utc).isoformat(),
             "worker": result}
 
 
-def fence(packet, ids, observation, get, absent, detached):
+def fence(packet, ids, observation, get, absent, detached, closed_guard, evidence):
+    initial_guard = closed_guard()
+    if (observation["stage_approval_sha256"] != evidence["stage_approval_sha256"]
+            or digest(observation["guard_before"]) != digest(evidence["stage_guard"])
+            or digest(observation["guard_after"]) != digest(evidence["stage_guard"])):
+        raise ValueError("Capture differs from the original stage approval")
     if (observation["schema"] != "public-flamingo-stage-capture-v1" or observation["packet_sha256"] != digest(packet)
             or observation["cluster_id"] != packet["cluster_id"] or observation["run"] != packet["run"]
             or not expected_image_id(observation["image_id"], packet) or observation["placement"] != packet["placement"]
@@ -237,28 +287,54 @@ def fence(packet, ids, observation, get, absent, detached):
     if not detached():
         raise ValueError("Training disk attachment or consumer remains")
     return {"cluster_id": packet["cluster_id"], "run": packet["run"], "disk_id": packet["binding"]["provider_disk_id"],
-            "output_subpath": "flamingo-baselines/" + packet["run"], **worker_facts(packet), "writer_fenced": True}
+            "output_subpath": "flamingo-baselines/" + packet["run"], **worker_facts(packet), "writer_fenced": True,
+            "fence_evidence": {**evidence, "guard_before": initial_guard, "guard_after": closed_guard(),
+                               "observed_at": datetime.now(timezone.utc).isoformat()}}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("capture", "fence"))
-    for opt in ("promotion", "binding"):
+    for opt in ("promotion", "binding", "scope", "packet", "approval"):
         parser.add_argument("--" + opt, type=Path, required=True)
-    for opt in ("expected-deployment", "run", "packet-sha256"):
+    for opt in ("expected-deployment", "run", "packet-sha256", "approved-sha256"):
         parser.add_argument("--" + opt, required=True)
     for opt in ("job", "configmap", "inventory"):
         parser.add_argument("--" + opt + "-uid", required=True, type=uid)
-    parser.add_argument("--capture", type=Path)
-    parser.add_argument("--capture-sha256")
+    for name in ("capture", "closure"):
+        parser.add_argument("--" + name, type=Path)
+        parser.add_argument("--" + name + "-sha256")
     a = parser.parse_args()
-    if (a.capture is not None) != (a.action == "fence") or bool(a.capture_sha256) != (a.action == "fence"):
-        parser.error("Pass --capture and its independently recorded byte SHA-256 for fence")
+    if any(bool(arg) != (a.action == "fence") for arg in (a.capture, a.capture_sha256, a.closure, a.closure_sha256)):
+        parser.error("Pass the capture and closure files and their approved byte hashes for fence")
     render = runpy.run_path(str(HERE / "render-public-flamingo-stage.py"))
     packet = render["build_packet"](a.promotion, a.binding, a.expected_deployment, a.run, "stage-" + a.run + "-inventory")
     cluster = os.environ["NEBIUS_TRAINING_CLUSTER_ID"]
     if digest(packet) != a.packet_sha256 or packet["cluster_id"] != cluster:
         raise ValueError("Packet or enrolled cluster differs from approval")
+    submit = runpy.run_path(str(HERE / "submit-public-flamingo-stage.py"))
+    approval = pinned_file(a.approval, a.approved_sha256)
+    scope = pinned_file(a.scope, submit["SCOPE_SHA256"])
+    submit["approved_packet"](a.packet, approval["packet_file_sha256"], packet)
+    if (approval["purpose"] != "public-flamingo-stage" or approval["action"] != "activate"
+            or approval["exclusive_storage_handoff"] is not True
+            or approval["inventory_secret_immutable"] is not True or approval["inventory_uid"] != a.inventory_uid
+            or approval["stage_guard"]["job_uid"] != a.job_uid or approval["configmap_uid"] != a.configmap_uid
+            or not re.fullmatch("[a-f0-9]{64}", approval["enrollment_approval_sha256"])
+            or approval["run"] != a.run or approval["inventory_secret"] != packet["inventory_secret"]
+            or approval["deployment_sha256"] != a.expected_deployment
+            or approval["storage_operator"] != os.environ["NEBIUS_STORAGE_OPERATOR_IDENTITY"]
+            or approval["storage_operator"] == approval["staging_operator"]
+            or scope["cluster_id"] != cluster or scope["project_id"] != packet["project_id"]):
+        raise ValueError("Closeout differs from the original independently approved handoff")
+    deadline = min(timestamp(scope["cutoff"]), timestamp(approval["expires_at"]))
+    phase, pins = "stage", approval["stage_guard"]
+    if a.action == "fence":
+        closure = pinned_file(a.closure, a.closure_sha256)
+        deadline = check_closure(closure, approval, a.approved_sha256, a.packet_sha256, a.capture_sha256,
+                                 scope, approval["storage_operator"])
+        phase, pins = "closed", closure["closed_guard"]
+    check_deadline(deadline)
     profile = Path(os.environ["NEBIUS_STORAGE_KUBECONFIG"])
     identity = os.environ["NEBIUS_STORAGE_OPERATOR_IDENTITY"]
     if not identity or identity in ("system:anonymous", HANDOFF["SUBMITTER"]) or profile.stat().st_mode & 0o077:
@@ -278,6 +354,16 @@ def main():
 
     def get(*args):
         return json.loads(read("get", *args, "-o", "json"))
+
+    from public_flamingo_stage_guard import verify_guard
+
+    def live_guard():
+        check_deadline(deadline)
+        result = verify_guard(get, a.run, phase, pins, job=packet["job"] if phase == "stage" else None)
+        if digest(result) != digest(pins):
+            raise ValueError("Observed writer guard differs from the approved identities and generations")
+        check_deadline(deadline)
+        return result
 
     def detached():
         current, idle = HANDOFF["status"](get)
@@ -305,16 +391,17 @@ def main():
             return {"metadata": {"name": nm, "namespace": ns, "uid": ident, "deletionTimestamp": lifecycle != "active"},
                     "immutable": immutable == "true", "type": typ, "keys": keys}
         result = capture(packet, ids, get, lambda pod, name: read("logs", pod, "-c", name, "-n", NS, "--limit-bytes=8192"),
-                         secret_meta)
+                         secret_meta, live_guard, a.approved_sha256)
     else:
-        if a.capture.stat().st_mode & 0o077:
-            raise ValueError("Use an owner-only capture record")
-        raw = a.capture.read_bytes()
-        if sha256(raw).hexdigest() != a.capture_sha256:
-            raise ValueError("Capture bytes differ from the reviewed digest")
+        observation = pinned_file(a.capture, a.capture_sha256)
         def absent(kind, name):
             return not read("get", kind, name, "-n", NS, "--ignore-not-found", "-o", "name").strip()
-        result = fence(packet, ids, json.loads(raw), get, absent, detached)
+        evidence = {"stage_approval_sha256": a.approved_sha256, "closure_sha256": a.closure_sha256,
+                    "enrollment_approval_sha256": approval["enrollment_approval_sha256"],
+                    "stage_guard": approval["stage_guard"], "capture_sha256": a.capture_sha256,
+                    "packet_sha256": a.packet_sha256, "storage_operator": identity,
+                    "cutoff": scope["cutoff"], "valid_until": closure["valid_until"]}
+        result = fence(packet, ids, observation, get, absent, detached, live_guard, evidence)
     print(json.dumps(result, sort_keys=True))
 
 

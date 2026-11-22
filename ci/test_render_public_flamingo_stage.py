@@ -65,7 +65,9 @@ class PublicStageRenderTests(unittest.TestCase):
         self.assertFalse(spec["automountServiceAccountToken"])
         self.assertNotIn("fsGroup", spec["securityContext"])
         self.assertEqual(spec["securityContext"]["runAsUser"], 1000)
-        self.assertNotIn("tolerations", spec)
+        self.assertEqual(spec["tolerations"], [
+            {"key": "node.kubernetes.io/" + state, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
+            for state in ("not-ready", "unreachable")])
         self.assertEqual(spec["nodeSelector"]["airaware.training/pool"], "training-cpu")
         mounts = {m["mountPath"]: m for m in stage["volumeMounts"]}
         self.assertEqual(set(mounts), {"/base", "/output", "/source", "/program"})

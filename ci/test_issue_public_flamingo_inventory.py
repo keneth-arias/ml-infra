@@ -8,6 +8,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit, parse_qs
@@ -31,6 +32,15 @@ class PublicInventoryTests(unittest.TestCase):
                       "project_id": "project-test", "access_key_id_sha256": sha256(b"dummy-key").hexdigest(),
                       "objects_sha256": digest, "exact_versions_only": True,
                       "permissions": ["s3:GetObjectVersion"], "expires_at": self.end.isoformat()}
+
+    def test_explicit_null_cannot_disable_independent_grant_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grant"
+            path.write_bytes(b"{}")
+            path.chmod(0o600)
+            self.assertEqual(issuer["read_private"](path), {})
+            with self.assertRaises(ValueError):
+                issuer["read_private"](path, None)
 
     def test_grant_must_bind_exact_credentials_objects_and_action(self):
         check = issuer["check_grant"]

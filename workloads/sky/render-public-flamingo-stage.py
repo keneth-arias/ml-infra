@@ -72,6 +72,9 @@ def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha):
     }
     pod = {
         "serviceAccountName": "episode-input-stager", "automountServiceAccountToken": False,
+        "priority": 0, "preemptionPolicy": "PreemptLowerPriority",
+        "tolerations": [{"key": "node.kubernetes.io/" + condition, "operator": "Exists", "effect": "NoExecute",
+                         "tolerationSeconds": 300} for condition in ("not-ready", "unreachable")],
         "restartPolicy": "Never", "enableServiceLinks": False, "terminationGracePeriodSeconds": 30,
         "dnsPolicy": "ClusterFirst", "dnsConfig": {"options": [{"name": "ndots", "value": "1"}]},
         "schedulerName": "default-scheduler", "imagePullSecrets": [{"name": "ghcr-pull"}],

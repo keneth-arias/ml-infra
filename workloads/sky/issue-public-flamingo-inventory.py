@@ -28,16 +28,17 @@ RENDER = runpy.run_path(str(HERE / "render-public-flamingo-stage.py"))["build_pa
 SCOPE_SHA = "a82b7ef7bd96295b9ce33fa10d629be2e19b1c9f8dd0b55f0c513921804be7f6"
 CA_SHA = "122a800e233ecae05a71701c057a0f77d786b5c7e357e9cb93b6dfff0b5b301e"
 KUBECTL = "/usr/local/bin/kubectl"
+NO_PIN = object()
 
 
-def read_private(path, pin=None):
+def read_private(path, pin=NO_PIN):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise ValueError("Expected a private owner-held file")
         raw = stream.read(2 ** 20 + 1)
-    if len(raw) > 2 ** 20 or (pin is not None and sha256(raw).hexdigest() != pin):
+    if len(raw) > 2 ** 20 or (pin is not NO_PIN and sha256(raw).hexdigest() != pin):
         raise ValueError("Source evidence size or independent digest mismatch")
     return json.loads(raw)
 
@@ -74,8 +75,8 @@ def check_grant(grant, credential, packet, approval):
     if (len(set(operators)) != 3 or not all(operators) or grant["principal"] in operators
             or grant["principal"] == "serviceaccount-e07ahpx591vnjdv77y"
             or approval["source_operator"] in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
-            or approval["source_operator"].startswith("system:") and
-            approval["source_operator"] != "system:serviceaccount:training:public-flamingo-source-owner"):
+            or approval["source_operator"] in {f"system:serviceaccount:training:{name}" for name in
+                                               ("episode-input-stager", "episode-submit", "episode-worker", "default")}):
         raise ValueError("Expected independent reader, inventory issuer, storage and staging identities")
 
 
@@ -117,6 +118,9 @@ def probe_versions(inventory):
 def source_client(approval, cluster):
     if (os.environ["NEBIUS_TRAINING_CLUSTER_ID"] != cluster or os.environ["NEBIUS_CA_BUNDLE_SHA256"] != CA_SHA):
         raise ValueError("Inventory issuer requires the enrolled managed target and CA")
+    mode = Path(KUBECTL).stat()
+    if mode.st_uid != 0 or not stat.S_ISREG(mode.st_mode) or mode.st_mode & 0o022:
+        raise ValueError("Expected the trusted host kubectl")
     # The production verifier invokes 'kubectl' internally. Resolve it exclusively from the
     # trusted host directory, suppress its diagnostics and keep its configuration private.
     verify = """import json,sys
@@ -130,7 +134,7 @@ print(json.dumps(kubectl_client_for_identity("training", sys.argv[2], direct=Tru
     if verified.returncode:
         raise ValueError("Source-owner identity or managed target verification failed")
     argv = json.loads(verified.stdout)
-    if argv[0] != "kubectl" or not Path(KUBECTL).is_file():
+    if argv[0] != "kubectl":
         raise ValueError("Expected installed management kubectl")
     return [KUBECTL, *argv[1:]]
 
@@ -176,8 +180,9 @@ def main():
     objects = json.loads(packet["configmap"]["data"]["objects.json"])
     inventory = presign(objects, credentials, approval["ttl_seconds"], ends)
     probe_versions(inventory)
-    # Reissue only after all probes so their durations do not consume the mounted inventory's TTL.
-    inventory = presign(objects, credentials, approval["ttl_seconds"], ends)
+    for row in inventory:
+        query = {k: v[0] for k, v in parse_qs(urlsplit(row["url"]).query).items()}
+        validate_query(query, row["version_id"])
     print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory), sort_keys=True))
 
 

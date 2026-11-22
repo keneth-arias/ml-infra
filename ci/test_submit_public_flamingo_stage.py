@@ -25,6 +25,21 @@ class PublicStageSubmission(unittest.TestCase):
                     submit.approved_packet(path, pin, reproduced)
             self.assertEqual(submit.approved_packet(path, digest, {"run": "example"}), {"run": "example"})
 
+    def test_activation_requires_successor_of_original_exclusive_handoff(self):
+        guard = {"policy_uid": "policy", "binding_uid": "binding", "binding_generation": 1,
+                 "policy_generation": 4}
+        enrollment = dict(action="enroll", purpose="public-flamingo-stage", run="r",
+                          packet_file_sha256="pin", deployment_sha256="deployment", inventory_secret="secret",
+                          inventory_uid="inventory", staging_operator="stage", storage_operator="storage",
+                          exclusive_storage_handoff=True, inventory_secret_immutable=True,
+                          expires_at="2026-11-22T01:10:00Z", closed_guard=guard)
+        active = dict(enrollment, action="activate", stage_guard=dict(guard, policy_generation=5, job_uid="job"))
+        submit.check_transition(enrollment, active)
+        for override in ({"storage_operator": "other"}, {"expires_at": "2026-11-22T02:10:00Z"},
+                         {"stage_guard": dict(active["stage_guard"], policy_generation=6)}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                submit.check_transition(enrollment, dict(active, **override))
+
     def test_placement_rejects_replacement_and_unschedulable_node(self):
         placement = {"name": "cpu-node", "provider_id": "nebius://cpu-node", "uid": "original"}
         node = {"metadata": {"name": "cpu-node", "uid": "original", "labels": {"airaware.training/pool": "training-cpu"}},
