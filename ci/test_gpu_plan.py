@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -441,8 +443,8 @@ class SavedPlanTests(unittest.TestCase):
                 command["verify_digests"](plan, scope_digest, ledger_digest, inputs)
 
 
-def timings():
-    return {
+def timings(backbone=None):
+    result = {
         "seed": 27,
         "checkpoint_every": 500,
         "measurement_sha256": "a" * 64,
@@ -467,6 +469,26 @@ def timings():
             )
         },
     }
+
+    if backbone is not None:
+        result["backbone"] = backbone
+    if backbone == "flamingo":
+        for key in ("selected_restore_probe_seconds", "checkpoint_publish_seconds",
+                    "job_startup_restore_seconds", "allocated_preflight_seconds"):
+            result["samples"][key] = [1]
+        for key in ("clean_reload", "language"):
+            result["post_work"][key] = {"when": "included-in-selected-restores"}
+    return result
+
+
+def verified_selection(export, baselines):
+    comparison = dict(baseline_receipts_sha256=baselines, repeat_max_abs_nll=0.0,
+                      cases=10, reference_tokens=22, restored_receipts_sha256=["7" * 64, "8" * 64],
+                      selected_receipt_sha256=export, selected_manifest_sha256="9" * 64,
+                      restored_max_abs_nll=0.0, matching_horizons=6)
+    payload = json.dumps(comparison, sort_keys=True).encode()
+    return dict(flamingo_qualification=comparison,
+                flamingo_qualification_sha256=hashlib.sha256(payload).hexdigest())
 
 
 class FitProjectionTests(unittest.TestCase):
@@ -507,6 +529,81 @@ class FitProjectionTests(unittest.TestCase):
         with self.assertRaises((KeyError, ValueError)):
             gpu_window.fit_projection(timings(), funds)
 
+    def test_flamingo_restores_include_end_to_end_probes_and_one_interruption(self):
+        obs = timings("flamingo")
+        obs["samples"]["selected_restore_probe_seconds"] = [1500, 1800]
+        obs["post_work"]["clean_reload"] = dict(when="after-release", seconds_each=1800, hourly_usd=1)
+        funds = dict(ledger(), post_release_usd=1)
+        def components():
+            return gpu_window.fit_projection(obs, funds)["component_seconds"]
+
+        self.assertEqual(components()["selected_restore_probes"], 7200)
+        self.assertGreater(components()["terminal_replay_extra"], 0)
+        self.assertLess(components()["terminal_replay_extra"], 3600)
+        self.assertNotIn("language", components())
+        self.assertNotIn("clean_reload", components())
+        record = dict(step=14084, evaluated_through=14084, terminal=False, checkpoint_sha256="c"*64)
+        funds["flamingo"] = {"fit_progress": {"27": {"control": record}}}
+        self.assertEqual(components()["selected_restore_probes"], 7200)
+        self.assertGreaterEqual(components()["terminal_replay_extra"], 1800)
+        record.update(terminal=True, export_sha256="a"*64)
+        self.assertEqual(components()["selected_restore_probes"], 7200)
+        evidence = verified_selection(record["export_sha256"], ["2"*64, "3"*64])
+        record.update(evidence)
+        self.assertEqual(components()["selected_restore_probes"], 3600)
+        record["export_sha256"] = "d"*64
+        with self.assertRaises(ValueError):
+            components()
+
+    def test_flamingo_replay_can_reach_a_later_scheduled_evaluation(self):
+        obs = timings("flamingo")
+        obs["save_interval_seconds"] = 0
+        obs["samples"]["checkpoint_publish_seconds"] = [6, 9]
+        obs["samples"]["allocated_preflight_seconds"] = [7]
+        obs["samples"]["job_startup_restore_seconds"] = [10]
+        complete = dict(step=14084, evaluated_through=14084, terminal=True,
+                        checkpoint_sha256="a"*64, export_sha256="b"*64,
+                        **verified_selection("b"*64, ["2"*64, "3"*64]))
+        recovering = dict(step=501, evaluated_through=500, terminal=False, checkpoint_sha256="c"*64)
+        funds = {"flamingo": {"fit_progress": {"27": {"control": recovering, "candidate": complete}}}}
+        for step in (501, 999, 1000, 14084):
+            recovering.update(step=step, evaluated_through=step if step in (1000, 14084) else 500)
+            parts = gpu_window.fit_projection(obs, funds, after_preflight=True)["component_seconds"]
+            with self.subTest(step=step):
+                self.assertEqual(parts["replay"], 0 if step == 14084 else 3)
+                self.assertEqual(parts["checkpoints"], (14084 - step + int(step < 14084)) * 9)
+                self.assertEqual(parts["terminal_replay_extra"], 2 if step == 14084 else 0)
+                self.assertEqual(parts["selected_restore_probes"], 2)
+                self.assertEqual(parts["exports"], 1)
+                self.assertEqual(parts["startup_and_restore"], 20)
+                self.assertEqual(parts["allocated_preflights"], 7)
+        self.assertEqual(gpu_window.fit_projection(obs, funds)["component_seconds"]["allocated_preflights"], 14)
+
+    def test_flamingo_requires_a_positive_allocated_probe_measurement(self):
+        obs = timings("flamingo")
+        del obs["samples"]["selected_restore_probe_seconds"]
+        with self.assertRaises((ValueError, KeyError)):
+            gpu_window.fit_projection(obs, ledger())
+        for samples in ([], [0], [-1], [1, "NaN"]):
+            obs["samples"]["selected_restore_probe_seconds"] = samples
+            with self.subTest(samples=samples), self.assertRaises(ValueError):
+                gpu_window.fit_projection(obs, ledger())
+        obs = timings("flamingo")
+        for stage in ("language", "clean_reload"):
+            obs["post_work"][stage] = {"when": "included-in-selected-restores"}
+        parts = gpu_window.fit_projection(obs, ledger())["component_seconds"]
+        self.assertEqual(parts["selected_restore_probes"], 4)
+        for stage in ("language", "clean_reload"):
+            self.assertNotIn(stage, parts)
+        obs["post_work"]["language"] = dict(when="allocated", seconds_each=60)
+        with self.assertRaisesRegex(ValueError, "independent"):
+            gpu_window.fit_projection(obs, ledger())
+        obs["post_work"]["language"]["scope"] = "additional-package-tests"
+        self.assertEqual(gpu_window.fit_projection(obs, ledger())["component_seconds"]["language"], 240)
+        obs["post_work"]["calibration_scoring"] = {"when": "included-in-selected-restores"}
+        with self.assertRaises(ValueError):
+            gpu_window.fit_projection(obs, ledger())
+
     def test_work_after_drain_requires_separate_funding(self):
         obs = timings()
         obs["post_work"]["calibration_scoring"] = {
@@ -525,6 +622,47 @@ class FitProjectionTests(unittest.TestCase):
 
 
 class ProjectionCommandTest(unittest.TestCase):
+    def test_cli_prices_mandatory_flamingo_probes_before_release(self):
+        import subprocess
+        from tempfile import TemporaryDirectory
+
+        now = datetime.now(timezone.utc)
+        inputs = dict(scope(), start=utc(now - timedelta(minutes=1)), cutoff=utc(now + timedelta(hours=10)))
+        funds = dict(ledger(), observed_at=utc(now), post_release_usd=1)
+        obs = timings("flamingo")
+        obs["post_work"]["clean_reload"] = dict(when="after-release", hourly_usd=2, seconds_each=1800)
+        obs["samples"]["selected_restore_probe_seconds"] = [1800]
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = json.dumps(funds).encode()
+            (root / "ledger").write_bytes(raw)
+            (root / "scope").write_text(json.dumps(dict(inputs, ledger_sha256=hashlib.sha256(raw).hexdigest())))
+            command = [sys.executable, str(Path(gpu_window.__file__).with_name("check-gpu-plan")), "project",
+                       "--scope", root / "scope", "--ledger", root / "ledger", "--measurements", root / "timing"]
+            (root / "timing").write_text(json.dumps(obs))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["decision"], "budget-stop")
+            self.assertGreater(Decimal(data["fit"]["projected_hours"]), Decimal("10.17"))
+            self.assertLessEqual(Decimal(data["bounds"]["cutoff_limit_hours"]), Decimal("9.75"))
+            self.assertEqual(data["fit"]["post_release_usd"], "1")
+            self.assertEqual(data["fit"]["component_seconds"]["selected_restore_probes"], "7200")
+            obs["samples"]["selected_restore_probe_seconds"] = [1]
+            (root / "timing").write_text(json.dumps(obs))
+            funds.update(accrued_gpu_usd=135, gpu_intervals=[dict(vm="current", start=inputs["start"], end=None)])
+            raw = json.dumps(funds).encode()
+            (root / "ledger").write_bytes(raw)
+            (root / "scope").write_text(json.dumps(dict(inputs, ledger_sha256=hashlib.sha256(raw).hexdigest())))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Full remaining VM", json.loads(result.stdout)["reason"])
+            del obs["samples"]["selected_restore_probe_seconds"]
+            (root / "timing").write_text(json.dumps(obs))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("selected_restore_probe_seconds", result.stderr)
+
     def test_cli_publishes_a_budget_stop_or_a_measured_fit(self):
         import hashlib
         import json
@@ -582,12 +720,12 @@ class ProjectionCommandTest(unittest.TestCase):
             (root / "ledger.json").write_bytes(raw)
             (root / "scope.json").write_text(json.dumps(dict(inputs, ledger_sha256=hashlib.sha256(raw).hexdigest())))
             for backbone, updates in (("flamingo", 28168), ("qwen", 27668)):
-                observations.write_text(json.dumps(dict(timings(), backbone=backbone)))
+                observations.write_text(json.dumps(timings(backbone)))
                 receipt = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(receipt.returncode, 0, receipt.stderr)
                 fit = json.loads(receipt.stdout)["fit"]
                 self.assertEqual((fit["backbone"], fit["updates"]), (backbone, updates))
-            observations.write_text(json.dumps(dict(timings(), backbone="flamingo")))
+            observations.write_text(json.dumps(timings("flamingo")))
             candidate = progress["27"]["candidate"]
             candidate["attempt_id"] = "paired-selected-27-candidate-1"
             mixed = dict(json.loads(raw), flamingo={"fit_progress": progress},

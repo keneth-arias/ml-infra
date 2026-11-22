@@ -13,7 +13,7 @@ import tempfile
 from threading import Barrier, Lock
 import unittest
 
-from test_gpu_plan import NOW, ledger, scope, timings, utc
+from test_gpu_plan import NOW, ledger, scope, timings, utc, verified_selection
 from fit_attempt import check_seed_28, describe, digest, reserve_fit
 from gpu_window import fit_projection
 
@@ -223,6 +223,63 @@ class FitAttemptTests(unittest.TestCase):
                     reserve_fit(s3, sc, req, timing, "other" if case == "target" else "c", NOW)
                 self.assertEqual(digest(s3.raw), sc["ledger_sha256"])
 
+    def test_flamingo_reservation_checks_approved_timing_and_full_vm_exposure(self):
+        _, req, _ = inputs("job", "--flamingo-binding-sha256", "1"*64, "--flamingo-baselines",
+                           "2"*64, "3"*64, "--flamingo-parity-sha256", "4"*64)
+        sc, funds, _ = fixture(req)
+        obs = timings("flamingo")
+        obs["samples"]["selected_restore_probe_seconds"] = [1800]
+        original = json.dumps(obs).encode()
+        funds["fit_approval"]["measurements_sha256"] = digest(original)
+
+        def refused(timing, reason):
+            store = Storage(funds)
+            sc["ledger_sha256"] = digest(store.raw)
+            with self.assertRaisesRegex(ValueError, reason):
+                reserve_fit(store, sc, req, timing, "c", NOW)
+            self.assertEqual(digest(store.raw), sc["ledger_sha256"])
+
+        refused(original, "Projected work exceeds")
+        obs["samples"]["selected_restore_probe_seconds"] = [1]
+        refused(json.dumps(obs).encode(), "funded approval")
+        req = dict(req, ceiling=500, deadline_seconds=600)
+        funds["fit_approval"].update(purpose="qualification", request=req)
+        funds["accrued_gpu_usd"] = 139  # Short Job fits, ten hours through cutoff do not.
+        refused(original, "Full remaining VM")
+
+    def test_flamingo_final_step_retry_and_terminal_comparison_credit(self):
+        _, req, _ = inputs("job", "--flamingo-binding-sha256", "1"*64, "--flamingo-baselines",
+                           "2"*64, "3"*64, "--flamingo-parity-sha256", "4"*64)
+        sc, funds, _ = fixture(req)
+        timing = json.dumps(timings("flamingo")).encode()
+        funds["fit_approval"]["measurements_sha256"] = digest(timing)
+
+        def consume():
+            store = Storage(funds)
+            sc["ledger_sha256"] = digest(store.raw)
+            reserve_fit(store, sc, funds["fit_approval"]["request"], timing, "c", NOW)
+            return json.loads(store.raw)
+
+        funds = consume()
+        entry = funds["fit_attempts"][0]
+        entry.update(writer_fenced=True, closeout_sha256="a"*64)
+        funds["active_reservation"] = None
+        pin = "b"*64
+        record = dict(terminal=True, checkpoint_sha256=pin, export_sha256="d"*64, step=14084,
+                      evaluated_through=14084, attempt_id=entry["attempt_id"])
+        funds["flamingo"] = {"fit_progress": {"27": {"control": record}}}
+        funds["fit_approval"]["request"] = dict(req, attempt=2, resume=True, checkpoint="14084:" + pin)
+        self.assertEqual(len(consume()["fit_attempts"]), 2)
+        record.update(verified_selection(record["export_sha256"], list(reversed(req["pair"]["flamingo_baselines"]))))
+        with self.assertRaisesRegex(ValueError, "funded baselines"):
+            consume()
+        record.update(verified_selection(record["export_sha256"], req["pair"]["flamingo_baselines"]))
+        with self.assertRaisesRegex(ValueError, "already terminal"):
+            consume()
+        record["flamingo_qualification"]["cases"] = 0
+        with self.assertRaisesRegex(ValueError, "MLflow digest"):
+            consume()
+
     def test_rendered_save_cadence_is_funded_for_the_full_pair(self):
         _, req, _ = inputs("job", "--save-seconds", "0")
         sc, funds, timing = fixture(req)
@@ -401,9 +458,7 @@ class FitAttemptTests(unittest.TestCase):
 
                 def consume(family, purpose, req, **approval):
                     # Leave Qwen measurement files and ledger records in their legacy format.
-                    obs = dict(timings(), seed=req["seed"])
-                    if family == "flamingo":
-                        obs["backbone"] = family
+                    obs = dict(timings(family if family == "flamingo" else None), seed=req["seed"])
                     timing = json.dumps(obs).encode()
                     funds["fit_approval"].update(purpose=purpose, request=req, max_attempts=1,
                                                  measurements_sha256=digest(timing))
@@ -446,12 +501,14 @@ class FitAttemptTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "immutable"):
                             consume(first, "selected", changed)
                     entry = consume(first, "selected", req)
-                    obs = dict(timings(), backbone=first)
-                    projection = fit_projection(obs, funds, window_seconds=36000)
+                    obs = timings(first)
+                    projection = fit_projection(obs, funds, window_seconds=36000, after_preflight=True)
                     self.assertEqual(projection["updates"], 14084 if arm == "candidate" else 28168)
                     self.assertEqual(entry["projected_hours"], str(projection["projected_hours"]))
                     record = dict(terminal=True, step=14084, evaluated_through=14084,
                                   checkpoint_sha256=pin, export_sha256=pin, attempt_id=entry["attempt_id"])
+                    if first == "flamingo":
+                        record.update(verified_selection(pin, req["pair"]["flamingo_baselines"]))
                     # consume reloads the ledger after each successful reservation.
                     namespace = funds if first == "qwen" else funds.setdefault("flamingo", {})
                     namespace.setdefault("fit_progress", {}).setdefault("27", {})[arm] = record
@@ -478,8 +535,8 @@ class FitAttemptTests(unittest.TestCase):
                     consume(second, "selected", req)
                 funds["accrued_gpu_usd"] = 0
                 entry = consume(second, "selected", req, max_attempts=2)
-                obs = dict(timings(), backbone=second)
-                expected = fit_projection(obs, {}, window_seconds=36000)
+                obs = timings(second)
+                expected = fit_projection(obs, {}, window_seconds=36000, after_preflight=True)
                 self.assertEqual(entry["projected_hours"], str(expected["projected_hours"]))
                 namespace = funds if second == "qwen" else funds.setdefault("flamingo", {})
                 record = dict(terminal=False, step=500, evaluated_through=500, checkpoint_sha256="f" * 64,

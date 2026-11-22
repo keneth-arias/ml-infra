@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from control_storage import control_bucket, verify_bucket_projects
 from gpu_reservation import reserve_remote
-from gpu_window import BudgetStop, bounds, check_progress_sources, check_projection, check_stage, fit_projection
+from gpu_window import BudgetStop, bounds, check_progress_sources, check_projection, check_stage, check_vm_funding, fit_projection
 from worker_plan import timestamp
 
 SOURCES = ("main.tf", "versions.tf", ".terraform.lock.hcl")
@@ -216,6 +216,8 @@ def project(args):
     else:
         result["bounds"] = limits
         try:
+            if backbone == "flamingo" and any(span["end"] is None for span in ledger["gpu_intervals"]):
+                check_vm_funding(scope, limits, now)
             check_projection(limits, fit["projected_hours"])
         except ValueError as exc:
             result.update(decision="budget-stop", reason=str(exc))

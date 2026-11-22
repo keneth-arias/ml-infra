@@ -11,16 +11,15 @@ import re
 
 from control_storage import STORAGE_FIELDS, verify_bucket_projects
 from gpu_reservation import read_ledger, with_ledger_client, write_reservation
-from gpu_window import EPOCH, backbone_of, bounds, check_progress_sources, check_projection, fit_projection, fit_records, whole
+from gpu_window import (
+    EPOCH, backbone_of, bounds, check_progress_sources, check_projection, check_vm_funding,
+    fit_projection, fit_records, sha, terminal_complete, whole,
+)
 from worker_plan import amount, timestamp
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
-
-
-def sha(value):
-    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
 
 
 def describe(preflight, task):
@@ -94,8 +93,7 @@ def check_seed_28(ledger, backbone="qwen"):
     for arm in ("control", "candidate"):
         progress = pair[arm]
         if (
-            progress["terminal"] is not True
-            or not sha(progress["export_sha256"])
+            not terminal_complete(progress, backbone)
             or gate["exports"][arm] != progress["export_sha256"]
         ):
             raise ValueError("Seed 28 requires both verified seed-27 exports")
@@ -228,6 +226,8 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
     open_vms = [v["vm"] for v in ledger["gpu_intervals"] if v["end"] is None]
     if open_vms != [approval["vm"]] or ledger.get("active_reservation"):
         raise ValueError("Require one approved live GPU and a reconciled previous reservation")
+    if backbone_of(request) == "flamingo":
+        check_vm_funding(scope, limits, now)
     seed, arm = request["seed"], request["arm"]
     purpose = approval["purpose"]
     if purpose == "selected":
@@ -254,11 +254,11 @@ def reserve_fit(s3, scope, request, measurements, cluster, now):
             check_seed_28(ledger, backbone)
         progress = fit_records(ledger, backbone).get("fit_progress", {}).get(str(seed), {}).get(arm)
         if progress:
-            if progress["terminal"] or progress["step"] <= 0:
+            if terminal_complete(progress, backbone) or progress["step"] <= 0:
                 raise ValueError("Selected arm already terminal or checkpoint has no completed update")
             checkpoint = f"{progress['step']}:{progress['checkpoint_sha256']}"
         seconds = (timestamp(scope["cutoff"]) - now).total_seconds()
-        fit = fit_projection(timing, ledger, window_seconds=seconds)
+        fit = fit_projection(timing, ledger, window_seconds=seconds, after_preflight=True)
         if request["save_interval_seconds"] != fit["save_interval_seconds"]:
             raise ValueError("Rendered save interval differs from the measured checkpoint policy")
         projection = fit["projected_hours"]
