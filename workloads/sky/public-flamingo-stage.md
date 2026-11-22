@@ -204,9 +204,11 @@ jq -en --slurpfile expected "$review_dir/closed-guard.json" --slurpfile p "$revi
   --slurpfile b "$review_dir/binding.before.json" \
   '$expected[0].items[0].spec == $p[0].spec and $expected[0].items[1].spec == $b[0].spec' >/dev/null
 "${k[@]}" delete --raw "$api/validatingadmissionpolicybindings/$name" -f "$review_dir/binding.delete.json"
-test -z "$("${k[@]}" get validatingadmissionpolicybinding "$name" --ignore-not-found -o name)"
+remaining=$("${k[@]}" get validatingadmissionpolicybinding "$name" --ignore-not-found -o name)
+test -z "$remaining"
 "${k[@]}" delete --raw "$api/validatingadmissionpolicies/$name" -f "$review_dir/policy.delete.json"
-test -z "$("${k[@]}" get validatingadmissionpolicy "$name" --ignore-not-found -o name)"
+remaining=$("${k[@]}" get validatingadmissionpolicy "$name" --ignore-not-found -o name)
+test -z "$remaining"
 ```
 
 After retirement, verify the installed native hold and its Deny binding against `native-activation.py` (`held_policy_and_binding` and `check_active`), recheck both attachment layers with `training-storage-handoff.py`, and retain readbacks under the successor handoff. Use server dry-runs for the successor operator's exact baseline render and the denied ordinary submitter request. The accepted stage receipt records the completed, fenced writer. The retirement record identifies which owner now prevents another writer. A later baseline launch must recheck current writer custody, funding, placement, disk identity and its own admission grant.
