@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -135,6 +135,72 @@ class ProductionFluxTests(unittest.TestCase):
             if denial:
                 with self.subTest(name=name):
                     self.assertTrue(any(denial in v["message"] for v in policy["spec"]["validations"]))
+
+    def test_dual_release_probes_bind_images_to_the_rendered_backbone(self):
+        probe = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))
+        qwen = tuple("ghcr.io/fixture/qwen@sha256:" + pin * 64 for pin in ("1", "2"))
+        flamingo = tuple("ghcr.io/fixture/flamingo@sha256:" + pin * 64 for pin in ("3", "4"))
+        cases = {}
+
+        def collect(job, name, denial=None):
+            self.assertNotIn(name, cases)
+            container, = job["spec"]["template"]["spec"]["containers"]
+            episode_image, = [e["value"] for e in container["env"] if e["name"] == "EPISODE_IMAGE"]
+            cases[name] = (container["image"], episode_image, container["command"], denial)
+
+        probe["exercise_release"](*qwen, collect, flamingo_images=flamingo)
+        for mode, role in (("job", 0), ("preflight", 1)):
+            for backbone, images, other in (("qwen", qwen, flamingo), ("flamingo", flamingo, qwen)):
+                valid = ("paired-" if backbone == "qwen" else "flamingo-") + mode
+                container, trainer, cmd, denial = cases[valid]
+                self.assertEqual((container, trainer, denial), (images[role], images[0], None))
+                self.assertEqual(cmd[2:4], ["fit", "direct"])
+                self.assertEqual("--preflight" in cmd, mode == "preflight")
+                if backbone == "flamingo":
+                    binding = cmd.index("--flamingo-binding-sha256")
+                    flags = cmd[binding:binding + 7]
+                    self.assertEqual([flags[0], flags[2], flags[5]],
+                                     ["--flamingo-binding-sha256", "--flamingo-baselines", "--flamingo-parity-sha256"])
+                    for pin in (flags[1], flags[3], flags[4], flags[6]):
+                        self.assertRegex(pin, "^[0-9a-f]{64}$")
+                    self.assertNotEqual(flags[3], flags[4])
+                else:
+                    self.assertNotIn("--flamingo-binding-sha256", cmd)
+                self.assertEqual(cases[f"{backbone}-wrong-backbone-{mode}"],
+                                 (other[role], images[0], cmd, "approved image"))
+                self.assertEqual(cases[f"{backbone}-wrong-episode-image-{mode}"],
+                                 (images[role], other[0], cmd, "approved environment"))
+                self.assertEqual(cases[f"{backbone}-wrong-pair-{mode}"],
+                                 (other[role], other[0], cmd, "approved image"))
+
+    def test_activation_probe_covers_every_signed_training_role(self):
+        activation = runpy.run_path(str(ROOT / "bootstrap/nebius/management/native-activation.py"))
+        probe = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))["main"]
+        tx = activation["Transaction"](None, None, None, Path("/fixture"), None)
+        refs = {role: f"ghcr.io/fixture/{role}@sha256:" + str(i) * 64 for i, role in
+                enumerate(("rootless-cpu", "trainer", "preflight", "flamingo-trainer", "flamingo-preflight"))}
+        qwen = {k: v for k, v in refs.items() if not k.startswith("flamingo-")}
+        for signed, supplied in ((qwen, qwen), (refs, refs), (refs, qwen),
+                                 (refs, refs | {"flamingo-trainer": refs["trainer"]})):
+            with self.subTest(signed=signed.keys(), supplied=supplied):
+                with patch.object(subprocess, "run") as launch:
+                    tx.probe(supplied)
+                command, = launch.call_args.args
+                self.assertEqual(command[:2], [sys.executable, str(ROOT / "workloads/smoke/verify-training-access.py")])
+                backend, exercise = Mock(), Mock()
+                with (patch.object(sys, "argv", command[1:]),
+                      patch.dict(probe.__globals__, release_images=lambda: signed, kubectl_client=backend,
+                                 check_permissions=Mock(), exercise_release=exercise)):
+                    if signed == supplied:
+                        probe()
+                        flamingo = (refs["flamingo-trainer"], refs["flamingo-preflight"]) if signed == refs else None
+                        self.assertEqual(exercise.call_args.args[:2], (refs["trainer"], refs["preflight"]))
+                        self.assertEqual(exercise.call_args.kwargs, {"flamingo_images": flamingo})
+                    else:
+                        with self.assertRaises(ValueError):
+                            probe()
+                        backend.assert_not_called()
+                        exercise.assert_not_called()
 
     def test_exec_permission_probe_runs_while_held_and_released(self):
         probe = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))

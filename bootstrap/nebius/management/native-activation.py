@@ -348,7 +348,13 @@ class Transaction:
         return expiry
 
     def probe(self, images=None):
-        args = ["--trainer-image", images["trainer"], "--preflight-image", images["preflight"]] if images else []
+        args = []
+        if images:
+            roles = ["trainer", "preflight"]
+            if "flamingo-trainer" in images or "flamingo-preflight" in images:
+                roles.extend(["flamingo-trainer", "flamingo-preflight"])
+            for role in roles:
+                args.extend([f"--{role}-image", images[role]])
         env = dict(os.environ, NEBIUS_SUBMIT_KUBECONFIG=str(self.session / "kubeconfig"))
         subprocess.run(
             [sys.executable, str(ROOT / "workloads/smoke/verify-training-access.py"), *args],
