@@ -68,3 +68,22 @@ python3 workloads/smoke/promote-flamingo-baselines.py "$published_baseline" "$pr
 ```
 
 This filesystem operation requires a separately authorized, writer-fenced storage handoff. Supply the same three approved digests to the fit launcher with `--flamingo-baselines FIRST_SHA REPEAT_SHA --flamingo-parity-sha256 PARITY_SHA`. The fit worker rechecks the approved report, its freeze, both receipts and its own runtime before starting training. A previously staged language-only pair requires a fresh qualification and promotion. Selected-generation replay runs in the fit worker under that request.
+
+## ARFBench checkpoint comparison
+
+The separate ARFBench review uses one native GPU on the existing managed worker. It runs both published QA checkpoints serially on 133 eligible held-out questions (135 assigned) and four channel-swap questions. Each arm loads once in a fresh process, with greedy decoding and 64 new tokens. The output contains four prediction logs and a paired report for each split. Generation failures retain their IDs and mark the Job failed.
+
+The exact trainer image, source revision, six Python wheels, model files, four evaluator modules and data fingerprints are in [the input inventory](arfbench/pins.json). The trainer already contains the model sources. The worker verifies every staged byte before loading code or weights and extracts the six pure-Python wheels to scratch. TimeNet is only needed when regenerating the original manifest. The legacy checkpoint is the 13,947,097,579-byte model_checkpoint.pt at the listed revision. Access to the corresponding gated Llama backbone is required for staging.
+
+Prepare the local bundle from the frozen manifest and a checkout containing the pinned OpenTSLM commit. Supply the exact listed PyPI wheel files and Hub snapshot files under the inventory's `legacy/` and `llama/` paths. The builder copies only the listed inputs, projects away training and validation records, and verifies its output hashes. The original manifest's canonical digest and the projected digest are recorded separately.
+
+```bash
+umask 077
+python3 workloads/smoke/arfbench/prepare.py --manifest "$frozen_manifest" --opentslm "$opentslm_checkout" \
+  --snapshots "$snapshot_root" --wheels "$wheelhouse" --output "$new_private_bundle"
+sha256sum workloads/smoke/arfbench/pins.json
+```
+
+For a separately authorized handoff, stage the verified bundle as `arfbench-inputs/<pins.json SHA-256>` on the enrolled training claim. The Gemma mount uses the eight files already covered by the Flamingo weights manifest under `airaware/cache/weights/<weights-manifest SHA-256>/weights`. Stage an empty UID 1000 output directory under `arfbench-runs/<run>`, verify the mounted input leaves are readable by that UID, and fence the writer. The staging receipt has the baseline fields above with this output subpath and an additional `arfbench_inventory_sha256` matching the exact pins file.
+
+To produce an eligible review, use the managed-target render command above with `--arfbench`. It checks the signed image and the independently approved worker and returns a suspended Job. Use the same management launcher and its `describe` command with the ARFBench review and staging receipt. The funding owner must approve that exact request under `arfbench_approval`. Only the designated issuer may submit after release, placement, funding, detached storage, cutoff and admission checks pass. An ARFBench submission is recorded as `arfbench_submission`. Close out against the expected Job and Pod UIDs, observed node, runtime image and both paired reports.

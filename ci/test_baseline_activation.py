@@ -114,7 +114,7 @@ class FundingTest(unittest.TestCase):
     def setUp(self):
         self.scope = dict(window(), stage="gpu")
         self.request = {k: self.scope[k] for k in ("cluster_id", "cutoff", "start")}
-        self.request.update(vm="computeinstance-a", attempt_id="flamingo-base-probe", deadline_seconds=300,
+        self.request.update(purpose="flamingo-baseline", vm="computeinstance-a", attempt_id="flamingo-base-probe", deadline_seconds=300,
                             termination_grace_seconds=30)
         self.funds = dict(ledger(), gpu_intervals=[dict(vm="computeinstance-a", start=self.scope["start"], end=None)],
                           baseline_approval=self.request, active_reservation=None)
@@ -134,6 +134,19 @@ class FundingTest(unittest.TestCase):
             B["record_submission"](store, self.scope, dict(submission, uid=str(uuid.uuid4())), CLOCK)
         self.assertEqual(store.version, 15)
         self.assertEqual(json.loads(store.raw)["active_reservation"], read["hold"])
+
+    def test_arfbench_needs_separate_exact_approval_and_receipt(self):
+        request = dict(self.request, purpose="arfbench", attempt_id="arfbench-probe")
+        store = VersionedLedger(dict(self.funds, baseline_approval=request))
+        with self.assertRaisesRegex(ValueError, "approved"):
+            B["reserve"](store, self.scope, B["sha"](store.raw), "13", request, CLOCK)
+        store = VersionedLedger(dict(self.funds, arfbench_approval=request))
+        funding = B["reserve"](store, self.scope, B["sha"](store.raw), "13", request, CLOCK)
+        self.assertEqual(funding["hold"]["stage"], "arfbench")
+        submission = dict(funding=funding, job=request["attempt_id"], namespace="training", uid=UID)
+        B["record_submission"](store, self.scope, submission, CLOCK)
+        self.assertEqual(json.loads(store.raw)["arfbench_submission"]["uid"], UID)
+        self.assertNotIn("baseline_submission", json.loads(store.raw))
 
     def test_hami_scope_or_ledger_cannot_fund_a_native_baseline(self):
         for scope_mode, ledger_mode in (("native", "hami"), ("hami", "native"), ("hami", "hami")):
