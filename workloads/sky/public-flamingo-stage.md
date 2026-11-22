@@ -93,6 +93,20 @@ python3 "$sky/issue-public-flamingo-inventory.py" \
 
 The source approval records the observer receipt's `consumer_check_sha256` and pins the live `closed_guard` policy/binding UIDs and generations. The issuer reads those two named admission resources before signing and again before Secret creation. The source approval contains `purpose: issue-public-flamingo-inventory`, `packet_file_sha256`, `deployment_sha256`, `run`, `inventory_secret`, three distinct principal names (`source_operator`, `staging_operator`, `storage_operator`), `reader_grant_sha256`, `expires_at` and integer `ttl_seconds` from 1 to 1800. The private reader credential document contains `access_key_id`, `secret_access_key` and optionally `session_token`. The independently attested effective grant uses schema `public-flamingo-version-reader-grant-v1` and records `principal`, `access_key_id_sha256`, `project_id`, `objects_sha256`, `permissions: ["s3:GetObjectVersion"]`, `exact_versions_only: true` and `expires_at`. Both timestamps include a timezone. Issuance checks a one-byte GET for each promoted version.
 
+For the original allocation, the model owner can also deliver nine pre-issued GET capabilities over a private channel. Keep the signing credentials in model-owner custody. The owner must be distinct from the source, storage and staging operators. This handoff attests to possession of the nine bearer capabilities. Their scope comes from the signed requests. Successor windows use the version reader grant bound to the signed window.
+
+- The private inventory JSON has a single `base` array in the packet's promoted order. Each record has exactly `name`, `size`, `sha256`, `version_id` and `url`. Each URL uses the packet's HTTPS bucket and key, the signed `versionId`, and a host-only SigV4 GET for `eu-south1/s3`.
+- The private attestation JSON has exactly `schema` set to `public-flamingo-scoped-get-attestation-v1`, `model_owner`, `project_id`, `objects_sha256`, `inventory_sha256` and a timezone-aware `expires_at`. Hash the raw inventory file for `inventory_sha256`. The independent source approval pins the raw attestation as `capability_attestation_sha256` in place of `reader_grant_sha256`. Each URL must be live and expire strictly before the scope, approval and attestation cutoffs. Its signed lifetime must be at most the approval's `ttl_seconds`.
+- Keep the inventory and attestation in files owned by the source operator with mode `0600`. The issuer checks all nine values against the approved manifest, probes each URL with a direct one-byte GET, and checks the approved closed generation again before the create. Record only the returned namespace, name, UID and resourceVersion as issuance evidence.
+
+```bash
+python3 -B "$sky/issue-public-flamingo-inventory.py" \
+  --packet "$packet" --promotion "$promotion" --binding "$binding" --scope "$scope" \
+  --approval "$source_approval" --approved-sha256 "$source_approval_sha256" \
+  --consumer-check "$consumer_check" --capability-attestation "$capability_attestation" \
+  --capability-inventory "$capability_inventory" > "$issued"
+```
+
 The Secret contains only `inventory.json`. Its UID is an input to the storage handoff. Source credential material stays out of the Job, ConfigMap, approval packet and receipts. After expiry, a new attempt requires explicit reconciliation and a fresh inventory. Existing Secret names are never overwritten.
 
 ## Submit one approved CPU writer
