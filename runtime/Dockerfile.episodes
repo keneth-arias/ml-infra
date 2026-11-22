@@ -12,7 +12,7 @@ RUN /opt/conda/bin/python -m pip install --no-cache-dir 'transformers==4.57.6' '
     /opt/conda/bin/python -m pip check && \
     /opt/conda/bin/python -c "import torch, peft; from transformers import Gemma3ForCausalLM; assert torch.__version__.split('+')[0] == '2.9.1'"
 
-COPY forecast/reference/ /opt/forecast/reference/
+COPY --chmod=0444 forecast/reference/check_per_series_reference.py forecast/reference/utils.py forecast/reference/LICENSE /opt/forecast/reference/
 
 FROM dependencies-${FORECAST_BACKBONE}
 COPY reader/pyproject.toml reader/uv.lock /opt/reader/

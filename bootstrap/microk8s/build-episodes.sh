@@ -28,11 +28,21 @@ fi
 git -C "$2" archive "$reader_sha:tools/timenet-smoke" | tar --same-permissions -x -C "$stage/reader"
 infra_sha=$(git -C "$infra" rev-parse HEAD)
 git -C "$infra" archive "$infra_sha:runtime" episode_job.py episode_stop.py stage_episode_inputs.py versioned_episode_inputs.py Dockerfile.episodes Dockerfile.preflight | tar --same-permissions -x -C "$stage"
+check_startup() {
+  if [[ "$backbone" == flamingo ]]; then
+    git -C "$infra" show "$infra_sha:ci/check-flamingo-image-startup.py" |
+      docker run -i --rm --pull=never --network none --user 1000:1000 --cap-drop ALL \
+        --read-only --tmpfs /tmp -e HOME=/tmp -e CUDA_VISIBLE_DEVICES= -e HF_HUB_OFFLINE=1 \
+        --entrypoint "$3" "$2" -I -B - "$1"
+  fi
+}
 docker build --build-arg "FORECAST_BACKBONE=$backbone" --build-arg "INFRA_SOURCE_REVISION=$infra_sha" -f "$stage/Dockerfile.episodes" -t "$3" \
   --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" --build-arg "AIRAWARE_SOURCE_REVISION=$reader_sha" "$stage"
+check_startup trainer "$3" /opt/conda/bin/python
 docker image inspect "$3" --format '{{json .RepoDigests}}'
 if (( $# == 4 )); then
   docker build -f "$stage/Dockerfile.preflight" -t "$4" \
     --build-arg "INFRA_SOURCE_REVISION=$infra_sha" --build-arg "FORECAST_SOURCE_REVISION=$forecast_sha" "$stage"
+  check_startup preflight "$4" /usr/local/bin/python
   docker image inspect "$4" --format '{{json .RepoDigests}}'
 fi
