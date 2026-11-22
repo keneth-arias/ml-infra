@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue the approved immutable source inventory with an enrolled version-only reader."""
+"""Issue the approved immutable source inventory using version-bound GET authority."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -9,19 +9,16 @@ import os
 from pathlib import Path
 import re
 import runpy
+import ssl
 import stat
 import subprocess
 import sys
-from urllib.parse import parse_qs, urlsplit
-from urllib.request import build_opener, ProxyHandler, Request
+from urllib.parse import parse_qsl, urlsplit
+from urllib.request import build_opener, HTTPSHandler, ProxyHandler, Request
 from uuid import UUID
 
-from botocore.auth import S3SigV4QueryAuth
-from botocore.awsrequest import AWSRequest
-from botocore.credentials import Credentials
-
 from public_flamingo_stage_guard import verify_guard
-from public_flamingo_stage_worker import HOST, NoRedirect, validate_query
+from public_flamingo_stage_worker import BUCKET, HOST, WEIGHTS, NoRedirect, by_name, unique_pairs, validate_query
 
 
 HERE = Path(__file__).resolve().parent
@@ -32,16 +29,16 @@ KUBECTL = "/usr/local/bin/kubectl"
 NO_PIN = object()
 
 
-def read_private(path, pin=NO_PIN):
+def read_private(path, pin=NO_PIN, *, max_bytes=2 ** 20):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise ValueError("Expected a private owner-held file")
-        raw = stream.read(2 ** 20 + 1)
-    if len(raw) > 2 ** 20 or (pin is not NO_PIN and sha256(raw).hexdigest() != pin):
+        raw = stream.read(max_bytes + 1)
+    if len(raw) > max_bytes or (pin is not NO_PIN and sha256(raw).hexdigest() != pin):
         raise ValueError("Source evidence size or independent digest mismatch")
-    return json.loads(raw)
+    return json.loads(raw, object_pairs_hook=unique_pairs)
 
 
 def timestamp(value):
@@ -49,6 +46,17 @@ def timestamp(value):
     if dt.tzinfo is None:
         raise ValueError("An explicit timezone is required")
     return dt
+
+
+def check_operators(approval, owner):
+    operators = [approval[name] for name in ("source_operator", "storage_operator", "staging_operator")]
+    if (not all(isinstance(name, str) and name and name == name.strip() for name in [owner, *operators])
+            or len(set([owner, *operators])) != 4
+            or owner in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
+            or approval["source_operator"] in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
+            or approval["source_operator"] in {f"system:serviceaccount:training:{name}" for name in
+                                               ("episode-input-stager", "episode-submit", "episode-worker", "default")}):
+        raise ValueError("Expected independent model reader or owner, inventory issuer, storage and staging identities")
 
 
 def check_grant(grant, credential, packet, approval):
@@ -72,18 +80,64 @@ def check_grant(grant, credential, packet, approval):
             or grant["project_id"] != packet["project_id"] or grant["objects_sha256"] != packet["objects_sha256"]
             or grant["permissions"] != ["s3:GetObjectVersion"] or grant["exact_versions_only"] is not True):
         raise ValueError("Missing effective grant for exactly the promoted public versions")
-    operators = [approval[name] for name in ("source_operator", "storage_operator", "staging_operator")]
-    if (len(set(operators)) != 3 or not all(operators) or grant["principal"] in operators
-            or grant["principal"] == "serviceaccount-e07ahpx591vnjdv77y"
-            or approval["source_operator"] in {"system:anonymous", "serviceaccount-e07ahpx591vnjdv77y"}
-            or approval["source_operator"] in {f"system:serviceaccount:training:{name}" for name in
-                                               ("episode-input-stager", "episode-submit", "episode-worker", "default")}):
-        raise ValueError("Expected independent reader, inventory issuer, storage and staging identities")
+    check_operators(approval, grant["principal"])
+
+
+def check_capability_attestation(attestation, packet, approval):
+    if (set(attestation) != {"schema", "model_owner", "project_id", "objects_sha256",
+                            "inventory_sha256", "expires_at"}
+            or attestation["schema"] != "public-flamingo-scoped-get-attestation-v1"
+            or attestation["project_id"] != packet["project_id"]
+            or attestation["objects_sha256"] != packet["objects_sha256"]
+            or not isinstance(attestation["inventory_sha256"], str)
+            or not re.fullmatch("[0-9a-f]{64}", attestation["inventory_sha256"])):
+        raise ValueError("Expected attestation for the exact promoted public version capabilities")
+    check_operators(approval, attestation["model_owner"])
+
+
+def check_lifetime(lifetime):
+    if type(lifetime) is not int or not 1 <= lifetime <= 1800:
+        raise ValueError("Source URL lifetime must be within 1–1800 seconds")
+
+
+def check_url_term(parsed, version, lifetime, latest):
+    query = unique_pairs(parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True,
+                                  max_num_fields=16))
+    validate_query(query, version)
+    seconds = int(query["X-Amz-Expires"])
+    signed_at = datetime.strptime(query["X-Amz-Date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    if seconds > lifetime or signed_at + timedelta(seconds=seconds) >= latest:
+        raise ValueError("Source URL exceeds the approved term")
+
+
+def check_capability_inventory(document, objects, lifetime, latest):
+    check_lifetime(lifetime)
+    if not isinstance(document, dict) or set(document) != {"base"}:
+        raise ValueError("Expected public base objects only")
+    fields = {"name", "size", "sha256", "version_id"}
+    expected = by_name(objects, fields | {"bucket", "key"})
+    records = by_name(document["base"], fields | {"url"})
+    if list(records) != list(expected):
+        raise ValueError("Source inventory differs from the promoted order")
+    for name, row in records.items():
+        bound = expected[name]
+        key = f"model-qualification/{WEIGHTS}/base/{name}"
+        url = row["url"]
+        if (any(row[field] != bound[field] for field in fields) or bound["bucket"] != BUCKET or bound["key"] != key
+                or not isinstance(url, str) or not url.isascii()
+                or not url.startswith(f"https://{HOST}/{BUCKET}/{key}?") or "#" in url
+                or any(ord(char) <= 32 or ord(char) == 127 for char in url)):
+            raise ValueError("Source differs from an exact approved versioned GET")
+        check_url_term(urlsplit(url), row["version_id"], lifetime, latest)
+    return document["base"]
 
 
 def presign(objects, credential, lifetime, latest):
-    if type(lifetime) is not int or not 1 <= lifetime <= 1800:
-        raise ValueError("Source URL lifetime must be within 1–1800 seconds")
+    from botocore.auth import S3SigV4QueryAuth
+    from botocore.awsrequest import AWSRequest
+    from botocore.credentials import Credentials
+
+    check_lifetime(lifetime)
     creds = Credentials(credential["access_key_id"], credential["secret_access_key"], credential.get("session_token"))
     signer = S3SigV4QueryAuth(creds, "s3", "eu-south1", expires=lifetime)
     inventory = []
@@ -94,24 +148,21 @@ def presign(objects, credential, lifetime, latest):
                              params={"versionId": row["version_id"]})
         signer.add_auth(request)
         url = request.prepare().url
-        query = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
-        validate_query(query, row["version_id"])
-        signed_at = datetime.strptime(query["X-Amz-Date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        if signed_at + timedelta(seconds=lifetime) >= latest:
-            raise ValueError("Issued URL exceeds the approved window")
+        check_url_term(urlsplit(url), row["version_id"], lifetime, latest)
         inventory.append({**{field: row[field] for field in ("name", "size", "sha256", "version_id")}, "url": url})
     return inventory
 
 
 def probe_versions(inventory):
-    # Prove that the enrolled credential currently reads each selected version. Breadth of
-    # its effective privileges is independently attested in the approved grant.
-    client = build_opener(ProxyHandler({}), NoRedirect())
+    # An explicit client context avoids SSLKEYLOGFILE while preserving certificate and hostname checks.
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    tls.load_default_certs()
+    client = build_opener(ProxyHandler({}), HTTPSHandler(context=tls), NoRedirect())
     for row in inventory:
-        request = Request(row["url"], headers={"Range": "bytes=0-0"})
+        request = Request(row["url"], headers={"Range": "bytes=0-0"}, method="GET")
         with client.open(request, timeout=10) as response:
-            if (response.status != 206 or response.headers.get("x-amz-version-id") != row["version_id"]
-                    or response.headers.get("Content-Range") != f"bytes 0-0/{row['size']}"
+            if (response.status != 206 or response.headers.get_all("x-amz-version-id") != [row["version_id"]]
+                    or response.headers.get_all("Content-Range") != [f"bytes 0-0/{row['size']}"]
                     or len(response.read(2)) != 1):
                 raise ValueError("Source reader could not verify an exact promoted version")
 
@@ -159,10 +210,18 @@ def create_secret(kube, name, inventory):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ("packet", "promotion", "binding", "scope", "approval", "reader-grant", "reader-credentials", "consumer-check"):
+    for key in ("packet", "promotion", "binding", "scope", "approval", "consumer-check"):
         p.add_argument("--" + key, type=Path, required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--reader-grant", type=Path)
+    mode.add_argument("--capability-attestation", type=Path)
+    p.add_argument("--reader-credentials", type=Path)
+    p.add_argument("--capability-inventory", type=Path)
     p.add_argument("--approved-sha256", required=True)
     args = p.parse_args()
+    if ((args.reader_grant is None) != (args.reader_credentials is None)
+            or (args.capability_attestation is None) != (args.capability_inventory is None)):
+        p.error("Supply either a reader grant and credentials or a capability attestation and inventory")
     approval = read_private(args.approval, args.approved_sha256)
     if approval["purpose"] != "issue-public-flamingo-inventory":
         raise ValueError("Expected independent source-owner approval")
@@ -173,10 +232,22 @@ def main():
     scope = read_private(args.scope, SCOPE_SHA)
     if (scope["cluster_id"], scope["project_id"]) != (packet["cluster_id"], packet["project_id"]):
         raise ValueError("Original allocation differs from the reviewed target")
-    grant = read_private(args.reader_grant, approval["reader_grant_sha256"])
-    credentials = read_private(args.reader_credentials)
-    check_grant(grant, credentials, packet, approval)
-    ends = min(timestamp(date) for date in (scope["cutoff"], approval["expires_at"], grant["expires_at"]))
+    objects = json.loads(packet["configmap"]["data"]["objects.json"])
+    lifetime = approval["ttl_seconds"]
+    check_lifetime(lifetime)
+    if args.capability_attestation is not None:
+        if "reader_grant_sha256" in approval:
+            raise ValueError("Expected approval for scoped GET capabilities")
+        authority = read_private(args.capability_attestation, approval["capability_attestation_sha256"])
+        check_capability_attestation(authority, packet, approval)
+        capabilities = read_private(args.capability_inventory, authority["inventory_sha256"], max_bytes=65536)
+    else:
+        if "capability_attestation_sha256" in approval:
+            raise ValueError("Expected approval for an enrolled reader")
+        authority = read_private(args.reader_grant, approval["reader_grant_sha256"])
+        credentials = read_private(args.reader_credentials)
+        check_grant(authority, credentials, packet, approval)
+    ends = min(timestamp(date) for date in (scope["cutoff"], approval["expires_at"], authority["expires_at"]))
     kube = source_client(approval, packet["cluster_id"])
     observation = read_private(args.consumer_check, approval["consumer_check_sha256"])
     observed_at = timestamp(observation["observed_at"])
@@ -196,13 +267,14 @@ def main():
         verify_guard(get, packet["run"], "closed", approval["closed_guard"])
 
     check_consumer_fence()
-    objects = json.loads(packet["configmap"]["data"]["objects.json"])
-    inventory = presign(objects, credentials, approval["ttl_seconds"], ends)
+    if args.capability_inventory is not None:
+        inventory = check_capability_inventory(capabilities, objects, lifetime, ends)
+    else:
+        inventory = presign(objects, credentials, lifetime, ends)
     probe_versions(inventory)
-    for row in inventory:
-        query = {k: v[0] for k, v in parse_qs(urlsplit(row["url"]).query).items()}
-        validate_query(query, row["version_id"])
     check_consumer_fence()
+    for row in inventory:
+        check_url_term(urlsplit(row["url"]), row["version_id"], lifetime, ends)
     print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory), sort_keys=True))
 
 
