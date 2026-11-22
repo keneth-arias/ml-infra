@@ -224,6 +224,7 @@ class TopologyTests(unittest.TestCase):
         plan["variables"]["gpu_mode"] = {"value": "hami"}
         gpu = plan["resource_changes"][1]["change"]["after"]
         gpu["name"] = "training-hami"
+        gpu["labels"]["airaware-gpu-mode"] = "hami"
         template = gpu["template"]
         template["metadata"]["labels"] = {"airaware.training/pool": "training-hami"}
         del template["gpu_settings"]
@@ -231,6 +232,15 @@ class TopologyTests(unittest.TestCase):
             {"effect": "NO_SCHEDULE", "key": "airaware.training/gpu-mode", "value": "hami"}
         ]
 
+        support = plan["resource_changes"][0]["change"]
+        for previous in (None, "native"):
+            if previous:
+                for side in ("before", "after"):
+                    support[side]["labels"]["airaware-gpu-mode"] = previous
+            with self.subTest(previous=previous), self.assertRaisesRegex(ValueError, "cpu group"):
+                gpu_window.check_stage(plan, sc, funds, NOW)
+        for side in ("before", "after"):
+            support[side]["labels"]["airaware-gpu-mode"] = "hami"
         gpu_window.check_stage(plan, sc, funds, NOW)
 
         for labels in (

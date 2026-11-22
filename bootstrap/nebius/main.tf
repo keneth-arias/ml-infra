@@ -191,10 +191,10 @@ resource "nebius_mk8s_v1_node_group" "training" {
   for_each  = { for name, pool in var.node_pools : name => pool if pool != null && local.window_open }
   parent_id = local.cluster_id
   name      = "training-${each.key == "gpu" && var.gpu_mode == "hami" ? "hami" : each.key}"
-  labels = {
+  labels = merge({
     airaware-run    = var.worker_run.id
     airaware-cutoff = formatdate("YYYYMMDDhhmmss", var.worker_run.cutoff)
-  }
+  }, var.gpu_mode == "hami" ? { airaware-gpu-mode = "hami" } : {})
   fixed_node_count = each.value.count
   version          = var.kubernetes_version
   lifecycle {

@@ -153,6 +153,8 @@ def check_group(change, pool, scope):
             "airaware-cutoff": timestamp(scope["cutoff"]).strftime("%Y%m%d%H%M%S"),
         },
     }
+    if scope.get("gpu_mode") == "hami":
+        expected["labels"]["airaware-gpu-mode"] = "hami"
     # v0.6.88 duplicates resource labels in labels_all.
     if (
         after.pop("labels_all", expected["labels"]) != expected["labels"]
