@@ -18,6 +18,16 @@ ROLES = ("rootless-cpu", "trainer", "preflight")
 FLAMINGO_ROLES = ("flamingo-trainer", "flamingo-preflight")
 ROLE_VARIABLES = {"trainer": "trainerImage", "preflight": "preflightImage",
                   "flamingo-trainer": "flamingoTrainerImage", "flamingo-preflight": "flamingoPreflightImage"}
+QWEN_ONLY = {
+    "expression": "!variables.flamingo",
+    "message": "Flamingo Jobs require a signed dual-backbone release.",
+}
+QWEN_IMAGE_SELECTORS = {"fitImage": "variables.trainerImage", "checkImage": "variables.preflightImage"}
+QWEN_ONLY_VARIABLES = {
+    "argv": "has(variables.container.command) ? variables.container.command : []",
+    "flamingo": "'--flamingo-binding-sha256' in variables.argv",
+    **QWEN_IMAGE_SELECTORS,
+}
 
 
 def model_roles(command):
@@ -111,17 +121,35 @@ def single_container(pod):
     return pod["containers"][0]
 
 
-def check_native_policy(images, policy):
+def check_native_policy(images, policy, *, allow_held_candidates=False):
     if (policy.get("kind"), policy.get("metadata", {}).get("name")) != (
         "ValidatingAdmissionPolicy", "episode-submit-inputs"
     ):
         raise ValueError("Expected the native training admission policy")
-    variables = policy["spec"]["variables"]
+    spec = policy["spec"]
+    flamingo_roles = images.keys() & set(FLAMINGO_ROLES)
+    if flamingo_roles and flamingo_roles != set(FLAMINGO_ROLES):
+        raise ValueError("Expected both signed Flamingo roles")
+    checks = spec.get("validations", [])
+    held_qwen_release = (allow_held_candidates and not flamingo_roles and checks
+                         and checks[0]["expression"] == "false")
+
+    def expressions(name):
+        return [v["expression"] for v in spec["variables"] if v["name"] == name]
+
     for role, variable in ROLE_VARIABLES.items():
-        expressions = [v["expression"] for v in variables if v["name"] == variable]
+        if held_qwen_release and role in FLAMINGO_ROLES:
+            continue
         expected = [repr(images[role])] if role in images else []
-        if expressions != expected:
+        if role not in FLAMINGO_ROLES and not expected:
+            raise ValueError(f"Missing signed {role} image")
+        if expressions(variable) != expected:
             raise ValueError(f"Native admission policy differs from the approved {role} image")
+    if not flamingo_roles and not held_qwen_release and (
+        checks.count(QWEN_ONLY) != 1
+        or any(expressions(name) != [expression] for name, expression in QWEN_ONLY_VARIABLES.items())
+    ):
+        raise ValueError("A v1 native admission policy requires the explicit Flamingo denial and Qwen image selectors")
 
 
 def check_trainer_env(container, trainer):
@@ -183,7 +211,7 @@ def main():
         if args.command == "reference":
             print(images[args.role])
         elif args.command == "check-native-policy":
-            check_native_policy(images, json.load(sys.stdin))
+            check_native_policy(images, json.load(sys.stdin), allow_held_candidates=True)
             print(fingerprint)
         else:
             check_episode(images, json.loads(args.preflight.read_bytes()), json.loads(args.task.read_bytes()))

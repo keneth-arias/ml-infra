@@ -43,7 +43,7 @@ spec:
         variables.pod.containers.exists(c, has(c.resources) &&
           ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
            (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)))
-    # Compare both literals with the signed release before activating this policy.
+    # Check Qwen pins against every signed release and Flamingo pins against v2 releases.
     - name: trainerImage
       expression: "'ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b'"
     - name: preflightImage

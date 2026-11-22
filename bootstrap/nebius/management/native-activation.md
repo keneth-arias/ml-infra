@@ -2,9 +2,13 @@
 
 The default production overlay holds `training:episode-submit` closed. The operator-only transaction opens one attended session during a reviewed support or GPU window. In support mode actual training submissions are limited to CPU preflight. The verification probe can dry-run the signed GPU Job shape. GPU mode also admits the signed GPU Job under the existing workload policy.
 
+With a signed v1 release, both stages activate only the Qwen pair and deny Flamingo submissions, including dry runs. With a signed v2 release, activation verifies both pairs against the checked-in policy.
+
 ## Verify the deployment and window
 
 Use the exact reviewed deployment checkout on bm, an approved managed operator identity and its independently pinned public kubeconfig. Verify the signed production release and independently approved deployment SHA-256. Confirm the guarded worker allocation, Ready Kubernetes/provider identities, cutoff, ledger and retained storage receipts. Require just the approved support node in a support window. Require the approved support and GPU nodes, successful support and placement checks, and sufficient budget in a GPU window. Keep both worker shutdown schedulers armed.
+
+For both release versions, `current_release` verifies the signed records under `/etc/ml-infra/nebius-release/current` and matches `deployment_commit` to the exact checkout. Keep using the existing enrolled checkout for Qwen until a signed v1 or v2 deployment enrolls the new checkout. Close and fence the existing session to restore the canonical hold before switching the checkout and release.
 
 Reconcile older sessions first. Review other effective grants to `training:episode-submit`, including namespace and cluster bindings, group grants and grants limited to named resources. The held and released probes check effective access, including the denial of direct Pod creation, exec, port-forward, Secret reads and token creation. Use the existing approved policy field manager. The transaction needs exclusive attended control of the native policy and grant during activation and rollback. Schedule and record closure before activation.
 

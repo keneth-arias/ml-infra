@@ -126,15 +126,28 @@ class ProductionFluxTests(unittest.TestCase):
             self.assertNotIn("--resume", cases["fresh-retry-" + mode][0]["command"])
             self.assertIn("--resume-checkpoint", cases["retry-" + mode][0]["command"])
             self.assertEqual(cases["inference-" + mode][0]["command"][2:4], ["infer", "quantile"])
+            flamingo, denial = cases["flamingo-unreleased-" + mode]
+            self.assertIn("--flamingo-binding-sha256", flamingo["command"])
+            self.assertEqual(flamingo["image"], images[role])
+            self.assertEqual([e["value"] for e in flamingo["env"] if e["name"] == "EPISODE_IMAGE"],
+                             [images["trainerImage"]])
+            self.assertEqual(denial, "Flamingo Jobs require a signed dual-backbone release.")
+            default, denial = cases["default-entrypoint-" + mode]
+            self.assertNotIn("command", default)
+            self.assertEqual((default["image"], denial), (images[role], "episode entrypoint"))
             for label in ("parallelism", "completions", "backoffLimit", "suspend", "cpu-request",
                           "memory-request", "ephemeral-storage-request"):
                 self.assertIsNotNone(cases[label + "-" + mode][1])
         for label in ("gpu-deadline-None", "gpu-deadline-356401", "preflight-memory-limit"):
             self.assertIsNotNone(cases[label][1])
+        activation = runpy.run_path(str(ROOT / "bootstrap/nebius/management/native-activation.py"))
+        qwen = {role: images[role + "Image"] for role in ("trainer", "preflight")}
+        active = [activation["active_policy"](qwen, "a" * 64, stage) for stage in ("support", "gpu")]
         for name, (_, denial) in cases.items():
             if denial:
                 with self.subTest(name=name):
-                    self.assertTrue(any(denial in v["message"] for v in policy["spec"]["validations"]))
+                    for variant in active:
+                        self.assertTrue(any(denial in v["message"] for v in variant["spec"]["validations"]))
 
     def test_dual_release_probes_bind_images_to_the_rendered_backbone(self):
         probe = runpy.run_path(str(ROOT / "workloads/smoke/verify-training-access.py"))
@@ -146,10 +159,12 @@ class ProductionFluxTests(unittest.TestCase):
             self.assertNotIn(name, cases)
             container, = job["spec"]["template"]["spec"]["containers"]
             episode_image, = [e["value"] for e in container["env"] if e["name"] == "EPISODE_IMAGE"]
-            cases[name] = (container["image"], episode_image, container["command"], denial)
+            cases[name] = (container["image"], episode_image, container.get("command"), denial)
 
         probe["exercise_release"](*qwen, collect, flamingo_images=flamingo)
         for mode, role in (("job", 0), ("preflight", 1)):
+            self.assertEqual(cases[f"flamingo-default-entrypoint-{mode}"],
+                             (flamingo[role], flamingo[0], None, "approved image"))
             for backbone, images, other in (("qwen", qwen, flamingo), ("flamingo", flamingo, qwen)):
                 valid = ("paired-" if backbone == "qwen" else "flamingo-") + mode
                 container, trainer, cmd, denial = cases[valid]

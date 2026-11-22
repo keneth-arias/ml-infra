@@ -10,7 +10,7 @@ import sys
 
 SKY = Path(__file__).resolve().parents[1] / "sky"
 sys.path.insert(0, str(SKY))
-from production_release import release_images, require_image
+from production_release import QWEN_ONLY, release_images, require_image
 from production_target import kubectl_client
 
 
@@ -125,9 +125,15 @@ def exercise_release(trainer_image, preflight_image, check, *, flamingo_images=N
         check(render_job(mode, trainer_image, preflight_image), mode)
         paired_job = render_job(mode, trainer_image, preflight_image, paired=True)
         check(paired_job, "paired-" + mode)
+        job = deepcopy(paired_job)
+        del job["spec"]["template"]["spec"]["containers"][0]["command"]
+        check(job, "default-entrypoint-" + mode, "episode entrypoint")
         if flamingo_images:
             flamingo_job = render_job(mode, *flamingo_images, flamingo=True)
             check(flamingo_job, "flamingo-" + mode)
+            job = deepcopy(flamingo_job)
+            del job["spec"]["template"]["spec"]["containers"][0]["command"]
+            check(job, "flamingo-default-entrypoint-" + mode, "approved image")
             for backbone, valid_job, (other_trainer, other_preflight) in (
                 ("flamingo", flamingo_job, (trainer_image, preflight_image)),
                 ("qwen", paired_job, flamingo_images),
@@ -147,6 +153,9 @@ def exercise_release(trainer_image, preflight_image, check, *, flamingo_images=N
                 swapped = deepcopy(job)
                 swapped["spec"]["template"]["spec"]["containers"][0]["image"] = other_image
                 check(swapped, f"{backbone}-wrong-pair-{mode}", "approved image")
+        else:
+            check(render_job(mode, trainer_image, preflight_image, flamingo=True),
+                  "flamingo-unreleased-" + mode, QWEN_ONLY["message"])
         check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2, restore=True), "retry-" + mode)
         check(render_job(mode, trainer_image, preflight_image, paired=True, attempt=2), "fresh-retry-" + mode)
         check(render_job(mode, trainer_image, preflight_image, phase="infer", head="quantile"), "inference-" + mode)

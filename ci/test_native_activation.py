@@ -38,6 +38,65 @@ class NativeActivationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make(self.images | {"trainer": self.images["preflight"]}, RECEIPT, "gpu")
 
+    def test_qwen_release_renders_support_and_gpu_then_restores_after_dual_release(self):
+        make = self.functions["active_policy"]
+        qwen = {role: self.images[role] for role in ("trainer", "preflight")}
+        held, binding = self.functions["held_policy_and_binding"]()
+        for stage in ("support", "gpu"):
+            with self.subTest(stage=stage):
+                first = make(qwen, RECEIPT, stage)
+                dual = make(self.images, "b" * 64, stage)
+                rollback = make(qwen, "c" * 64, stage)
+                self.assertEqual(first["spec"], rollback["spec"])
+                self.assertEqual(rollback["metadata"]["annotations"][self.functions["RECEIPT"]], "c" * 64)
+                self.assertEqual(dual["spec"]["variables"], held["spec"]["variables"])
+                variables = {v["name"]: v["expression"] for v in rollback["spec"]["variables"]}
+                self.assertNotIn("flamingoTrainerImage", variables)
+                self.assertNotIn("flamingoPreflightImage", variables)
+                self.assertEqual(variables["fitImage"], "variables.trainerImage")
+                self.assertEqual(variables["checkImage"], "variables.preflightImage")
+                self.assertEqual(variables["argv"], "has(variables.container.command) ? variables.container.command : []")
+                self.assertEqual(variables["flamingo"], "'--flamingo-binding-sha256' in variables.argv")
+                checks = rollback["spec"]["validations"]
+                offset = int(stage == "support")
+                self.assertEqual(checks[offset]["expression"], "!variables.flamingo")
+                self.assertEqual(checks[:offset] + checks[offset + 1:], dual["spec"]["validations"])
+                self.assertTrue(any("size(variables.argv) >= 18" in check["expression"] for check in checks))
+                self.assertTrue(any("variables.container.image ==" in check["expression"] for check in checks))
+        self.assertEqual(self.functions["held_policy_and_binding"](), (held, binding))
+
+    def test_release_pins_come_from_the_checked_in_policy_in_each_stage(self):
+        make = self.functions["active_policy"]
+        qwen = {role: self.images[role] for role in ("trainer", "preflight")}
+        for stage in ("support", "gpu"):
+            for images in (qwen, self.images):
+                for role in images:
+                    with self.subTest(stage=stage, roles=list(images), mismatch=role):
+                        bad = images | {role: images[role].split("@")[0] + "@sha256:" + "0" * 64}
+                        with self.assertRaisesRegex(ValueError, f"approved {role} image"):
+                            make(bad, RECEIPT, stage)
+            for flamingo_role in ("flamingo-trainer", "flamingo-preflight"):
+                with self.assertRaises(ValueError):
+                    make(qwen | {flamingo_role: self.images[flamingo_role]}, RECEIPT, stage)
+
+    def test_baseline_requires_the_checked_in_dual_pins(self):
+        baseline = runpy.run_path(str(TOOL.with_name("flamingo-baseline.py")))
+        job = baseline["render"](self.images["flamingo-trainer"], "release-probe", "computeinstance-fixture", 300, 100)
+        uid = "a30d3349-e16c-45d2-a4d4-b90f6d0e6b84"
+
+        def intent(images):
+            return baseline["session_intent"]({}, "operator", "manager", RECEIPT,
+                                              images, self.policy, self.binding, job, uid)
+
+        active = intent(self.images)["active"]
+        self.assertNotIn("variables", active["spec"])
+        self.assertEqual(active["spec"]["validations"], baseline["baseline_checks"](job, uid))
+        with self.assertRaisesRegex(ValueError, "approved flamingo-trainer image"):
+            intent({role: self.images[role] for role in ("trainer", "preflight")})
+        for role in self.images:
+            with self.subTest(mismatch=role), self.assertRaisesRegex(ValueError, f"approved {role} image"):
+                intent(self.images | {role: "example.invalid/wrong@sha256:" + "0" * 64})
+
     def test_live_policy_binding_generation_and_warnings_are_gated(self):
         make = self.functions["active_policy"]
         check = self.functions["check_active"]
