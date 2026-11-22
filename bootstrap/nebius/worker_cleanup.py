@@ -132,6 +132,13 @@ def verify_inventory(profile, project_id, cluster_id, baseline, *, before_stage=
             isinstance(x, str) and x for x in original
         ):
             raise ValueError("Invalid baseline for " + key)
+        if (
+            before_stage
+            and before_stage.get("gpu_mode") == "hami"
+            and key in ("instance_ids", "group_ids")
+            and original
+        ):
+            raise ValueError("A serial HAMi window must start from a worker-free baseline")
         expected = set(original)
         if before_stage and before_stage["stage"] == "gpu":
             extra = before_stage[support_key]
