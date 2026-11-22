@@ -23,15 +23,13 @@ spec:
         resources: ["daemonsets"]
         scope: Namespaced
   mutations:
-    - patchType: ApplyConfiguration
-      applyConfiguration:
+    - patchType: JSONPatch
+      jsonPatch:
         expression: >-
-          Object{spec: Object.spec{template: Object.spec.template{spec: Object.spec.template.spec{
-            nodeSelector: {
-              "airaware.training/pool": "training-hami",
-              "airaware.training.node-restriction.kubernetes.io/gpu-mode": "hami"
-            }
-          }}}}
+          (!has(object.spec.template.spec.nodeSelector)
+          ? [JSONPatch{op: "add", path: "/spec/template/spec/nodeSelector", value: {}}] : [])
+          + [JSONPatch{op: "add", path: "/spec/template/spec/nodeSelector/airaware.training~1pool", value: "training-hami"},
+             JSONPatch{op: "add", path: "/spec/template/spec/nodeSelector/airaware.training.node-restriction.kubernetes.io~1gpu-mode", value: "hami"}]
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding

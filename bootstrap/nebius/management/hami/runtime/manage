@@ -78,11 +78,17 @@ if [[ $1 == install ]]; then
     cp -- "$2" "$stage/gpu-operator.tgz"
     "$runtime/render" "$stage/gpu-operator.tgz" "$version" >"$stage/rendered.yaml"
     "${k[@]}" apply --server-side --field-manager=nebius-hami-runtime -f "$runtime/daemonset-fence.yaml"
-    "${k[@]}" -n "$namespace" create --dry-run=server -o json -f "$runtime/fence-probe.yaml.example" |
-        jq -e --arg pool "$pool_key" --arg mode "$mode_key" '
-          .spec.template.spec.nodeSelector |
-          .[$pool] == "training-hami" and .[$mode] == "hami" and .["kubernetes.io/os"] == "linux"' >/dev/null ||
-        fail "Managed admission did not add both selectors while preserving the existing selector."
+    "${k[@]}" create --dry-run=client -ojson -f "$runtime/fence-probe.yaml.example" >"$stage/probe.json"
+    for selector in '{"kubernetes.io/os":"linux"}' 'null'; do
+        jq --argjson selector "$selector" '
+          if $selector == null then del(.spec.template.spec.nodeSelector)
+          else .spec.template.spec.nodeSelector = $selector end' "$stage/probe.json" |
+          "${k[@]}" create --dry-run=server -ojson -f - |
+          jq -e --arg pool "$pool_key" --arg mode "$mode_key" --argjson original "$selector" '
+            .spec.template.spec.nodeSelector == (($original // {}) +
+              {($pool): "training-hami", ($mode): "hami"})' >/dev/null ||
+            fail "Managed admission did not preserve the selector and confine the driver to the exclusive worker."
+    done
     helm install gpu-operator "$stage/gpu-operator.tgz" --values "$runtime/values.yaml" \
         --namespace "$namespace" --kubeconfig "$OPERATOR_CONFIG" --kube-context "$OPERATOR_CONTEXT"
     exit

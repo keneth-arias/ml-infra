@@ -54,10 +54,13 @@ class HamiRuntimeTests(unittest.TestCase):
             [{"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
               "resources": ["daemonsets"], "scope": "Namespaced"}],
         )
-        mutation = spec["mutations"][0]["applyConfiguration"]["expression"]
-        self.assertIn("nodeSelector:", mutation)
-        self.assertIn(f'"{POOL}": "training-hami"', mutation)
-        self.assertIn(f'"{MODE}": "hami"', mutation)
+        mutation, = spec["mutations"]
+        self.assertEqual(mutation["patchType"], "JSONPatch")
+        expression = mutation["jsonPatch"]["expression"]
+        self.assertIn("!has(object.spec.template.spec.nodeSelector)", expression)
+        for key, value in ((POOL, "training-hami"), (MODE, "hami")):
+            pointer = "/spec/template/spec/nodeSelector/" + key.replace("/", "~1")
+            self.assertIn(f'path: "{pointer}", value: "{value}"', expression)
         self.assertEqual(binding["spec"]["policyName"], policy["metadata"]["name"])
 
     def test_render_rejects_an_unverified_archive_and_an_unsupported_minor(self):
