@@ -124,20 +124,25 @@ def check_native_policy(images, policy):
             raise ValueError(f"Native admission policy differs from the approved {role} image")
 
 
+def check_trainer_env(container, trainer):
+    bound = [e.get("value") for e in container["env"] if e["name"] == "EPISODE_IMAGE"]
+    if bound != [trainer]:
+        raise ValueError("Job does not identify the released trainer")
+
+
 def check_episode(images, preflight, task):
     if preflight.get("kind") != "Job":
         raise ValueError("Expected the rendered preflight Job")
     validator = single_container(preflight["spec"]["template"]["spec"])
     train_role, pre_role = model_roles(validator["command"])
     require_image(images, pre_role, validator["image"])
-    bound = [e.get("value") for e in validator["env"] if e["name"] == "EPISODE_IMAGE"]
-    if bound != [images[train_role]]:
-        raise ValueError("Preflight does not identify the released trainer")
+    check_trainer_env(validator, images[train_role])
     if task.get("kind") == "Job":
         container = single_container(task["spec"]["template"]["spec"])
         if model_roles(container["command"]) != (train_role, pre_role):
             raise ValueError("Preflight and fit must use the same backbone")
         require_image(images, train_role, container["image"])
+        check_trainer_env(container, images[train_role])
     else:
         if train_role != "trainer":
             raise ValueError("Flamingo requires a native managed Job")

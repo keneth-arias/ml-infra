@@ -130,7 +130,7 @@ class ProductionReleaseTests(unittest.TestCase):
             other = "trainer" if prefix else "flamingo-trainer"
             for wrong_pre, wrong_task in ((job(other.replace("trainer", "preflight"), trainer, flags), task),
                                            (job(preflight, other, flags), task),
-                                           (pre, job(other, trainer, flags)),
+                                           (pre, job(other, trainer, flags)), (pre, job(trainer, other, flags)),
                                            (pre, job(trainer, trainer, [] if prefix else ["--flamingo-binding-sha256"]))):
                 with self.assertRaises(ValueError):
                     release.check_episode(refs, wrong_pre, wrong_task)
