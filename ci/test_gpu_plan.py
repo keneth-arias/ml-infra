@@ -4,9 +4,11 @@ from decimal import Decimal
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bootstrap/nebius"))
 import gpu_window
+from worker_cleanup import verify_inventory
 
 NOW = datetime(2026, 11, 21, 10, tzinfo=timezone.utc)
 
@@ -215,6 +217,68 @@ def preview(stage):
 
 
 class TopologyTests(unittest.TestCase):
+    def test_hami_requires_exact_serial_custom_plugin_pool_and_matching_funding(self):
+        sc, plan = preview("gpu")
+        sc["gpu_mode"] = "hami"
+        funds = dict(ledger(), gpu_mode="hami")
+        plan["variables"]["gpu_mode"] = {"value": "hami"}
+        gpu = plan["resource_changes"][1]["change"]["after"]
+        gpu["name"] = "training-hami"
+        template = gpu["template"]
+        template["metadata"]["labels"] = {"airaware.training/pool": "training-hami"}
+        del template["gpu_settings"]
+        template["taints"] = [
+            {"effect": "NO_SCHEDULE", "key": "airaware.training/gpu-mode", "value": "hami"}
+        ]
+
+        gpu_window.check_stage(plan, sc, funds, NOW)
+
+        for labels in (
+            {"gpu": "on"},
+            {"airaware.training/gpu-mode": "hami"},
+            {"airaware.training.node-restriction.kubernetes.io/gpu-mode": "hami"},
+        ):
+            template["metadata"]["labels"].update(labels)
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                gpu_window.check_stage(plan, sc, funds, NOW)
+            for key in labels:
+                del template["metadata"]["labels"][key]
+        for update in (
+            {"gpu_settings": {"drivers_preset": "cuda13.0"}},
+            {"taints": []},
+        ):
+            old = deepcopy(template)
+            template.update(update)
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                gpu_window.check_stage(plan, sc, funds, NOW)
+            template.clear()
+            template.update(old)
+        with self.assertRaisesRegex(ValueError, "GPU mode"):
+            gpu_window.check_stage(plan, sc, ledger(), NOW)
+        plan["variables"]["gpu_mode"]["value"] = "native"
+        with self.assertRaisesRegex(ValueError, "GPU mode"):
+            gpu_window.check_stage(plan, sc, funds, NOW)
+
+    def test_hami_timer_proof_rejects_prior_workers_as_baseline(self):
+        sc = dict(scope(), stage="support", gpu_mode="hami")
+        baseline = dict(
+            project_id="p", cluster_id="c",
+            instance_ids=[], group_ids=[], disk_ids=["retained"],
+        )
+        with patch("worker_cleanup.cloud_items") as inventory:
+            inventory.side_effect = [{}, {"retained": {}}, {}]
+            verify_inventory("ml-prod", "p", "c", baseline, before_stage=sc)
+            for field, live in (
+                ("instance_ids", [{"native": {}}]),
+                ("group_ids", [{}, {"retained": {}}, {"native": {}}]),
+            ):
+                inventory.side_effect = live
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "worker-free"):
+                    verify_inventory(
+                        "ml-prod", "p", "c", dict(baseline, **{field: ["native"]}),
+                        before_stage=sc,
+                    )
+
     def test_pilot_prices_only_cpu_and_allows_an_unchanged_blocked_spot_policy(self):
         sc, plan = preview("pilot")
         funds = dict(ledger(), remaining_gpu_hours=100)
