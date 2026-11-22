@@ -1,0 +1,74 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hami-device-runtime
+rules:
+  # The device and monitor informers watch Pods across namespaces using a node field selector.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]
+  # The admission policy confines writes to the authenticated Pod's dedicated node.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hami-device-runtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hami-device-runtime
+subjects:
+  - kind: ServiceAccount
+    name: hami-device-plugin
+    namespace: hami-device
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hami-device-allocator
+  namespace: hami-workloads
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hami-device-allocator
+  namespace: hami-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hami-device-allocator
+subjects:
+  - kind: ServiceAccount
+    name: hami-device-plugin
+    namespace: hami-device
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hami-device-events
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, list, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hami-device-events
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hami-device-events
+subjects:
+  - kind: ServiceAccount
+    name: hami-device-plugin
+    namespace: hami-device

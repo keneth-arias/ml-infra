@@ -15,6 +15,8 @@ spec:
   schedulerName: hami-scheduler
   runtimeClassName: nvidia
   nodeSelector:
+    airaware.training/pool: training-hami
+    airaware.training.node-restriction.kubernetes.io/gpu-mode: hami
     gpu: "on"
     airaware.training/gpu-mode: hami
   tolerations:
@@ -33,7 +35,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: cuda-probe
-      image: ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b
+      image: docker.io/pytorch/pytorch@sha256:7b324d212a4450795b49edba9949b7cdc72429148a64e974334bfe5774d51385
       imagePullPolicy: IfNotPresent
       securityContext:
         allowPrivilegeEscalation: false

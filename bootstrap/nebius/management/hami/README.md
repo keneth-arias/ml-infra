@@ -81,3 +81,5 @@ Then the operator verifies the serving certificate and Service endpoint before a
 For a later core upgrade, review the immutable replacement source and diff against the live objects. If resource identities change, stage the newly named grant and create the newly reviewed dormant objects before switching the Kustomization source. Retire grants only after verifying the active inventory and intended rollback. For rollback, keep the workload gate closed, retire or disable the webhook under the operator identity, suspend `nebius-hami` and verify reconciliation has stopped before scaling down or restoring core to the previous reviewed revision. Suspending alone leaves installed objects running. Pruning and forced replacement are disabled.
 
 Run the local handoff tests with `python3 bootstrap/nebius/management/hami/test_render_flux.py`.
+
+For the funded device phase, use the [serial cutover](serial-cutover.md). Its two GitOps roots share a commit-pinned source and have separate patch-only workload roles.

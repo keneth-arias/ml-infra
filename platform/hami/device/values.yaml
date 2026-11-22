@@ -1,0 +1,8 @@
+devicePlugin:
+  nvidiaDriverRoot: /run/nvidia/driver
+  gpuOperatorToolkitReady:
+    enabled: true
+    hostPath: /run/nvidia/validations
+  nvidiaNodeSelector:
+    airaware.training/pool: training-hami
+    airaware.training.node-restriction.kubernetes.io/gpu-mode: hami

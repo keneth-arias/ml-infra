@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nvidia-gpu-operator
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: nebius-hami-runtime-daemonsets
+spec:
+  failurePolicy: Fail
+  reinvocationPolicy: IfNeeded
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: nvidia-gpu-operator
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["daemonsets"]
+        scope: Namespaced
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{spec: Object.spec{template: Object.spec.template{spec: Object.spec.template.spec{
+            nodeSelector: {
+              "airaware.training/pool": "training-hami",
+              "airaware.training.node-restriction.kubernetes.io/gpu-mode": "hami"
+            }
+          }}}}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: nebius-hami-runtime-daemonsets
+spec:
+  policyName: nebius-hami-runtime-daemonsets

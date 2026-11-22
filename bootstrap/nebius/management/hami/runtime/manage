@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# != 1 && $# != 2 ]] || [[ ${1:-} != verify && ${1:-} != install ]] ||
+    [[ $1 == install && $# != 2 ]] || [[ $1 == verify && $# != 1 ]]; then
+    echo "Usage: manage verify | manage install VERIFIED_CHART.tgz" >&2
+    exit 2
+fi
+
+fail() { echo "$*" >&2; exit 1; }
+: "${OPERATOR_CONFIG:?}" "${OPERATOR_CONTEXT:?}" "${NEBIUS_OPERATOR_IDENTITY:?}"
+: "${NEBIUS_TRAINING_CLUSTER_ID:?}" "${NEBIUS_CA_BUNDLE_SHA256:?}" "${NEBIUS_API_ENDPOINT:?}" "${HAMI_INSTANCE_ID:?}"
+[[ $HAMI_INSTANCE_ID =~ ^computeinstance-[a-z0-9]+$ ]] || fail "Invalid Nebius instance ID."
+
+runtime=$(cd -- "$(dirname -- "$0")" && pwd)
+k=(kubectl --kubeconfig "$OPERATOR_CONFIG" --context "$OPERATOR_CONTEXT" --request-timeout=15s)
+python3 "$runtime/../../../../../workloads/sky/private_api.py" "${k[@]}"
+identity=$("${k[@]}" auth whoami -o 'jsonpath={.status.userInfo.username}')
+[[ $identity == "$NEBIUS_OPERATOR_IDENTITY" ]] || fail "Unexpected managed Kubernetes operator identity."
+version=$("${k[@]}" version -o json | jq -er '.serverVersion.gitVersion')
+[[ $version =~ ^v1\.36\.[0-9]+$ ]] || fail "Require managed Kubernetes 1.36."
+
+namespace=nvidia-gpu-operator
+pool_key=airaware.training/pool
+mode_key=airaware.training.node-restriction.kubernetes.io/gpu-mode
+nodes=$("${k[@]}" get nodes -o json)
+node=$(jq -e -c --arg pool "$pool_key" --arg mode "$mode_key" --arg instance "$HAMI_INSTANCE_ID" '
+    [.items[] | select(.metadata.labels[$pool] == "training-hami" or .metadata.labels[$mode] == "hami")] |
+    if length == 1 then .[0] else error("Expected exactly one HAMi runtime node") end |
+    select(.metadata.labels[$pool] == "training-hami" and .metadata.labels[$mode] == "hami" and
+      .spec.providerID == ("nebius://" + $instance) and
+      .metadata.labels["node.kubernetes.io/instance-type"] == "gpu-rtx6000-a" and
+      .metadata.labels["airaware.training/gpu-mode"] == null and .metadata.labels.gpu != "on" and
+      .metadata.labels["nebius.com/driverful"] != "true")' <<<"$nodes") ||
+    fail "Expected an exclusive, inactive HAMi runtime node in the approved provider scope."
+jq -e '
+    .spec.unschedulable != true and
+    any(.spec.taints[]?; .key == "airaware.training/gpu-mode" and .value == "hami" and .effect == "NoSchedule") and
+    any(.status.conditions[]; .type == "Ready" and .status == "True") and
+    (.status.nodeInfo.osImage | startswith("Ubuntu 24.04")) and
+    (.status.nodeInfo.containerRuntimeVersion | test("^containerd://(1\\.7|2\\.[0-3])\\.")) and
+    ((.status.capacity["nvidia.com/gpu"] // "0") == "0") and
+    ((.status.allocatable["nvidia.com/gpu"] // "0") == "0")' <<<"$node" >/dev/null ||
+    fail "Exclusive node taint, health, OS, containerd or GPU allocator inventory is ineligible."
+node_name=$(jq -er '.metadata.name' <<<"$node")
+jq -e 'all(.items[]; .metadata.labels["airaware.training/pool"] != "training-gpu") and
+    any(.items[]; .metadata.labels["airaware.training/pool"] == "training-cpu" and
+      .spec.unschedulable != true and any(.status.conditions[]; .type == "Ready" and .status == "True") and
+      all(.spec.taints[]?; .effect != "NoSchedule" and .effect != "NoExecute"))' <<<"$nodes" >/dev/null ||
+    fail "Require native GPU release and a Ready, schedulable training CPU worker."
+pods=$("${k[@]}" get pods -A --field-selector "spec.nodeName=$node_name" -o json)
+jq -e 'all(.items[]; .metadata.name as $name |
+    [$name, (.spec.containers[] | .name, .image)] |
+    all(.[]; test("nvidia[^[:space:]]*device[-_]?plugin|hami-device-plugin|k8s-device-plugin"; "i") | not))' <<<"$pods" >/dev/null ||
+    fail "A GPU device registrar is already present on the exclusive node."
+
+if [[ $1 == install ]]; then
+    owners=$("${k[@]}" get deployments,daemonsets -A -o json)
+    jq -e 'all(.items[];
+      .metadata.namespace != "nvidia-gpu-operator" and
+      ([.metadata.name, .spec.template.spec.containers[].image] |
+        all(.[]; test("node-feature-discovery|(^|[-/])nfd([-/:]|$)|gpu-operator"; "i") | not)))' \
+      <<<"$owners" >/dev/null || fail "Existing NFD or GPU Operator ownership requires review."
+    api=$("${k[@]}" api-resources --no-headers -o name)
+    if grep -Eq '\.(nvidia\.com|nfd\.k8s-sigs\.io)$' <<<"$api"; then
+        fail "Existing NVIDIA GPU Operator or NFD APIs require ownership review."
+    fi
+    existing_runtime=$("${k[@]}" get runtimeclass nvidia --ignore-not-found -o name)
+    [[ -z $existing_runtime ]] ||
+        fail "Existing nvidia RuntimeClass requires ownership review."
+
+    umask 077
+    stage=$(mktemp -d)
+    trap 'rm -rf -- "$stage"' EXIT
+    cp -- "$2" "$stage/gpu-operator.tgz"
+    "$runtime/render" "$stage/gpu-operator.tgz" "$version" >"$stage/rendered.yaml"
+    "${k[@]}" apply --server-side --field-manager=nebius-hami-runtime -f "$runtime/daemonset-fence.yaml"
+    "${k[@]}" -n "$namespace" create --dry-run=server -o json -f "$runtime/fence-probe.yaml.example" |
+        jq -e --arg pool "$pool_key" --arg mode "$mode_key" '
+          .spec.template.spec.nodeSelector |
+          .[$pool] == "training-hami" and .[$mode] == "hami" and .["kubernetes.io/os"] == "linux"' >/dev/null ||
+        fail "Managed admission did not add both selectors while preserving the existing selector."
+    helm install gpu-operator "$stage/gpu-operator.tgz" --values "$runtime/values.yaml" \
+        --namespace "$namespace" --kubeconfig "$OPERATOR_CONFIG" --kube-context "$OPERATOR_CONTEXT"
+    exit
+fi
+
+policy=$("${k[@]}" get clusterpolicy cluster-policy -o json)
+jq -e '.status.state == "ready" and .spec.devicePlugin.enabled == false and .spec.toolkit.enabled == true'     <<<"$policy" >/dev/null || fail "GPU Operator policy or toolkit is unready, or its device plugin is enabled."
+runtime_class=$("${k[@]}" get runtimeclass nvidia -o json)
+jq -e '.handler == "nvidia"' <<<"$runtime_class" >/dev/null || fail "Unexpected NVIDIA RuntimeClass handler."
+jq -e '.metadata.labels["feature.node.kubernetes.io/pci-10de.present"] == "true"' <<<"$node" >/dev/null ||
+    fail "NFD has not reported an NVIDIA PCI device."
+daemonsets=$("${k[@]}" -n "$namespace" get daemonsets -o json)
+jq -e --arg pool "$pool_key" --arg mode "$mode_key" '
+    [.items[].metadata.name] as $names |
+    any(.items[]; .metadata.labels["app.kubernetes.io/component"] == "nvidia-driver") and
+    any($names[]; . == "nvidia-container-toolkit-daemonset") and
+    any($names[]; . == "nvidia-operator-validator") and
+    any($names[]; . == "gpu-operator-node-feature-discovery-worker") and
+    all(.items[]; .spec.template.spec.nodeSelector[$pool] == "training-hami" and
+      .spec.template.spec.nodeSelector[$mode] == "hami" and
+      .status.observedGeneration == .metadata.generation and .status.desiredNumberScheduled == 1 and
+      .status.numberReady == 1 and .status.updatedNumberScheduled == 1)' <<<"$daemonsets" >/dev/null ||
+    fail "Scoped driver, toolkit, validator and NFD DaemonSets must be ready."
+all_operator_pods=$("${k[@]}" -n "$namespace" get pods -o json)
+jq -e --arg node "$node_name" 'all(.items[];
+    if any(.metadata.ownerReferences[]?; .kind == "DaemonSet")
+    then .spec.nodeName == $node else true end)' <<<"$all_operator_pods" >/dev/null ||
+    fail "An operator DaemonSet Pod is outside the approved node."
+controller=$(jq -er --argjson nodes "$nodes" '
+    [$nodes.items[] | select(.metadata.labels["airaware.training/pool"] == "training-cpu") | .metadata.name] as $cpu |
+    [.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "gpu-operator" and
+        (.spec.nodeName as $node | $cpu | index($node) != null) and
+        any(.status.conditions[]; .type == "Ready" and .status == "True"))] |
+    if length == 1 then .[0].metadata.name else error("Expected one Ready GPU Operator controller on an eligible CPU worker") end'     <<<"$all_operator_pods")
+validator=$(jq -er --arg ns "$namespace" '
+    [.items[] | select(.metadata.namespace == $ns and
+      any(.metadata.ownerReferences[]?; .kind == "DaemonSet" and .name == "nvidia-operator-validator") and
+      .spec.runtimeClassName == "nvidia" and
+      any(.spec.volumes[]; .name == "run-nvidia-validations" and .hostPath.path == "/run/nvidia/validations") and
+      any(.spec.containers[]; .name == "nvidia-operator-validator" and
+        any(.volumeMounts[]; .name == "run-nvidia-validations" and .mountPath == "/run/nvidia/validations")) and
+      any(.status.conditions[]; .type == "Ready" and .status == "True"))] |
+    if length == 1 then .[0].metadata.name else error("Expected one scoped validator using the nvidia handler") end' <<<"$pods")
+"${k[@]}" -n "$namespace" exec "$validator" -c nvidia-operator-validator -- test -f /run/nvidia/validations/toolkit-ready ||
+    fail "The scoped validator could not confirm the host toolkit-ready marker."
+jq -n --arg cluster "$NEBIUS_TRAINING_CLUSTER_ID" --arg version "$version" --arg operator "$identity" \
+    --arg validator "$validator" --arg controller "$controller" --argjson node "$node" --argjson policy "$policy" --argjson ds "$daemonsets" \
+    --argjson pods "$all_operator_pods" '
+    {cluster:$cluster,kubernetes:$version,operator:$operator,
+     node:{name:$node.metadata.name,uid:$node.metadata.uid,providerID:$node.spec.providerID,
+           os:$node.status.nodeInfo.osImage,kernel:$node.status.nodeInfo.kernelVersion,
+           containerd:$node.status.nodeInfo.containerRuntimeVersion},
+     clusterPolicy:$policy.status.state,controllerPod:$controller,driverAndToolkit:[ $ds.items[] | {name:.metadata.name,ready:.status.numberReady} ],
+     runtimeHandler:"nvidia",validator:{pod:$validator,marker:"/run/nvidia/validations/toolkit-ready"},
+     images:[ $pods.items[].status | ((.initContainerStatuses // []) + (.containerStatuses // []))[]
+       | {image,imageID} ] | unique}'

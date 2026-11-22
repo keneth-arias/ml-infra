@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import re
 
-IMAGE = "ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b"
+IMAGE = "docker.io/pytorch/pytorch@sha256:7b324d212a4450795b49edba9949b7cdc72429148a64e974334bfe5774d51385"
 ALLOCATION = re.compile(r"(GPU-[0-9a-fA-F-]+),[^,;:]+,4096,25:;")
 NANOSECONDS = 1_000_000_000
 GIB = 1024**3
@@ -25,7 +25,8 @@ def probe(pod, log, node_name):
           and status["phase"] == "Succeeded", "Expected a completed managed pilot Pod")
     container, = spec["containers"]
     live, = status["containerStatuses"]
-    check(container["image"] == IMAGE and live["imageID"].removeprefix("docker-pullable://") == IMAGE
+    pulled = live["imageID"].removeprefix("docker-pullable://").removeprefix("docker.io/")
+    check(container["image"] == IMAGE and pulled == IMAGE.removeprefix("docker.io/")
           and live["state"]["terminated"]["exitCode"] == 0,
           "Pilot image or successful container exit could not be verified")
     for kind in ("requests", "limits"):
@@ -51,6 +52,8 @@ def verify(node, pods, logs, approved_provider_id):
     labels = node["metadata"]["labels"]
     allocatable = node["status"]["allocatable"]
     check(node["spec"]["providerID"] == approved_provider_id and approved_provider_id.startswith("nebius://")
+          and labels.get("airaware.training/pool") == "training-hami"
+          and labels.get("airaware.training.node-restriction.kubernetes.io/gpu-mode") == "hami"
           and labels.get("gpu") == "on" and labels.get("airaware.training/gpu-mode") == "hami"
           and any(t == {"key": "airaware.training/gpu-mode", "value": "hami", "effect": "NoSchedule"}
                   for t in node["spec"].get("taints", []))
