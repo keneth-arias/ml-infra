@@ -2,6 +2,7 @@
 
 import argparse
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -14,6 +15,15 @@ NAMESPACE = "training"
 CLAIM = "airaware-checkpoints"
 CONTROLLER = "system:serviceaccount:kube-system:job-controller"
 TRACKING = "batch.kubernetes.io/job-tracking"
+# The public-baseline release is scoped to the original support-20261121d GPU allocation.
+ALLOCATION_CUTOFF = datetime(2026, 11, 22, 2, 25, tzinfo=timezone.utc)
+CLOSEOUT_SECONDS = 120
+CONTAINER_FIELDS = ("containers", "initContainers", "ephemeralContainers")
+# The same local Secret references must be recognized before issuance and at Pod admission.
+VOLUME_SECRET_FIELDS = (
+    ("secret", "secretName"), ("azureFile", "secretName"), ("csi", "nodePublishSecretRef", "name"),
+    *((kind, "secretRef", "name") for kind in ("cephfs", "cinder", "flexVolume", "rbd", "scaleIO", "iscsi", "storageos")),
+)
 
 
 def cel(value):
@@ -46,9 +56,67 @@ def expected_spec(job):
     return spec
 
 
-def has_claim(obj):
-    return (f"has({obj}.spec.volumes) && {obj}.spec.volumes.exists(v, has(v.persistentVolumeClaim) && "
-            f"v.persistentVolumeClaim.claimName == '{CLAIM}')")
+def preexisting_secret_consumer(pod, name):
+    """Return whether this existing Pod can consume the named local Secret, even without the PVC."""
+    spec = pod["spec"]
+    if any(ref.get("name") == name for ref in spec.get("imagePullSecrets", [])):
+        return True
+    for volume in spec.get("volumes", []):
+        for fields in VOLUME_SECRET_FIELDS:
+            value = volume
+            for field in fields:
+                value = value.get(field, {})
+            if value == name:
+                return True
+        if any(src.get("secret", {}).get("name") == name for src in volume.get("projected", {}).get("sources", [])):
+            return True
+    for field in CONTAINER_FIELDS:
+        for container in spec.get(field, []):
+            if any(src.get("secretRef", {}).get("name") == name for src in container.get("envFrom", [])):
+                return True
+            if any(env.get("valueFrom", {}).get("secretKeyRef", {}).get("name") == name
+                   for env in container.get("env", [])):
+                return True
+    return False
+
+
+def protected_inputs(obj, inventory):
+    """Mirror core/v1 VisitPodSecretNames for direct Secret references on a Pod."""
+    spec = obj + ".spec"
+    secret = cel(inventory)
+    sources = [f"has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == '{CLAIM}'",
+               "has(v.projected) && has(v.projected.sources) && v.projected.sources.exists(p, "
+               f"has(p.secret) && has(p.secret.name) && p.secret.name == {secret})"]
+    for fields in VOLUME_SECRET_FIELDS:
+        path = "v"
+        checks = []
+        for field in fields:
+            path += "." + field
+            checks.append(f"has({path})")
+        sources.append(" && ".join(checks + [f"{path} == {secret}"]))
+    volume_ref = " || ".join("(" + source + ")" for source in sources)
+    tests = [f"has({spec}.volumes) && {spec}.volumes.exists(v, {volume_ref})",
+             f"has({spec}.imagePullSecrets) && {spec}.imagePullSecrets.exists(p, has(p.name) && p.name == {secret})"]
+    env = ("has(c.env) && c.env.exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) && "
+           f"has(e.valueFrom.secretKeyRef.name) && e.valueFrom.secretKeyRef.name == {secret})")
+    env_from = ("has(c.envFrom) && c.envFrom.exists(e, has(e.secretRef) && has(e.secretRef.name) "
+                f"&& e.secretRef.name == {secret})")
+    for field in CONTAINER_FIELDS:
+        path = f"{spec}.{field}"
+        tests.append(f"has({path}) && {path}.exists(c, ({env}) || ({env_from}))")
+    return " || ".join("(" + test + ")" for test in tests)
+
+
+def latest_start(expires_at, job):
+    end = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if end.tzinfo is None:
+        raise ValueError("Expected an independently approved expiry with UTC offset")
+    deadline = job["spec"]["activeDeadlineSeconds"]
+    grace = job["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30)
+    if type(deadline) is not int or not 0 < deadline <= 1800 or type(grace) is not int or not 0 <= grace < CLOSEOUT_SECONDS:
+        raise ValueError("Job deadline or termination grace exceeds the fixed handoff budget")
+    latest = min(end.astimezone(timezone.utc), ALLOCATION_CUTOFF) - timedelta(seconds=deadline + CLOSEOUT_SECONDS)
+    return latest.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def validation(expression):
@@ -90,7 +158,9 @@ def render_guard(run, phase, pins=None, job=None):
         regional = {**labels, "topology.kubernetes.io/region": "eu-south1"}
         owner = {"apiVersion": "batch/v1", "kind": "Job", "controller": True, "blockOwnerDeletion": True,
                  "name": job_name, "uid": uid}
+        latest = latest_start(pins["expires_at"], job)
         checks = [
+            "timestamp(dyn(object.metadata).creationTimestamp) < timestamp(" + cel(latest) + ")",
             f"object.metadata.generateName == {cel(job_name + '-')}",
             "has(object.metadata.ownerReferences) && dyn(object.metadata.ownerReferences) == dyn(" + cel([owner]) + ")",
             "has(object.metadata.labels) && (dyn(object.metadata.labels) == dyn(" + cel(labels) + ") || "
@@ -101,10 +171,11 @@ def render_guard(run, phase, pins=None, job=None):
         ]
         rules.extend("request.operation != 'CREATE' || (" + check + ")" for check in checks)
 
+    inventory = f"stage-{run}-inventory"
     policy = {"apiVersion": API, "kind": "ValidatingAdmissionPolicy", "metadata": {"name": NAME},
               "spec": {"failurePolicy": "Fail", "matchConstraints": match, "matchConditions": [
-                  {"name": "protected-claim", "expression": "(" + has_claim("object") + ") || "
-                   "(oldObject != null && " + has_claim("oldObject") + ")"}],
+                  {"name": "protected-inputs", "expression": "(" + protected_inputs("object", inventory) + ") || "
+                   "(oldObject != null && (" + protected_inputs("oldObject", inventory) + "))"}],
                        "validations": [validation(rule) for rule in rules]}}
     binding = {"apiVersion": API, "kind": "ValidatingAdmissionPolicyBinding", "metadata": {"name": NAME},
                "spec": {"policyName": NAME, "validationActions": ["Deny"],
@@ -143,7 +214,7 @@ def verify_guard(get, run, phase, pins, job=None):
                 or live["metadata"].get("namespace") != NAMESPACE or live["metadata"].get("name") != name
                 or live["metadata"].get("deletionTimestamp") or live["metadata"].get("uid") != pins["job_uid"]):
             raise ValueError("Active guard does not identify the enrolled Job")
-        observed["job_uid"] = pins["job_uid"]
+        observed.update(job_uid=pins["job_uid"], expires_at=pins["expires_at"])
     return observed
 
 
@@ -153,9 +224,12 @@ def main():
     parser.add_argument("--phase", required=True, choices=("closed", "owner", "stage"))
     parser.add_argument("--job", type=Path, help="Reviewed Job JSON for the active phase")
     parser.add_argument("--job-uid", help="Independently observed suspended Job UID")
+    parser.add_argument("--expires-at", help="Independent UTC-offset storage-owner approval expiry")
     args = parser.parse_args()
+    if args.phase != "closed" and not (args.job_uid and args.job and args.expires_at):
+        parser.error("Opening the guard requires --job, --job-uid and --expires-at")
     job = json.loads(args.job.read_bytes()) if args.job else None
-    items = render_guard(args.run, args.phase, {"job_uid": args.job_uid} if args.job_uid else None, job)
+    items = render_guard(args.run, args.phase, {"job_uid": args.job_uid, "expires_at": args.expires_at} if args.job_uid else None, job)
     print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}, indent=2))
 
 

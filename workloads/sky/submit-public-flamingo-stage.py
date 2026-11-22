@@ -71,7 +71,7 @@ def check_transition(enrolled, active):
             or datetime.fromisoformat(active["expires_at"]) > datetime.fromisoformat(enrolled["expires_at"])):
         raise ValueError("Activation differs from the approved enrollment handoff")
     closed, opened = enrolled["closed_guard"], active["stage_guard"]
-    if (any(closed[k] != opened[k] for k in ("policy_uid", "binding_uid", "binding_generation"))
+    if (opened["expires_at"] != active["expires_at"] or any(closed[k] != opened[k] for k in ("policy_uid", "binding_uid", "binding_generation"))
             or opened["policy_generation"] != closed["policy_generation"] + 1):
         raise ValueError("Activation must bind the direct successor of the closed PVC guard")
 

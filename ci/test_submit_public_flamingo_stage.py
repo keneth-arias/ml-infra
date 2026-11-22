@@ -33,7 +33,7 @@ class PublicStageSubmission(unittest.TestCase):
                           inventory_uid="inventory", staging_operator="stage", storage_operator="storage",
                           exclusive_storage_handoff=True, inventory_secret_immutable=True,
                           expires_at="2026-11-22T01:10:00Z", closed_guard=guard)
-        active = dict(enrollment, action="activate", stage_guard=dict(guard, policy_generation=5, job_uid="job"))
+        active = dict(enrollment, action="activate", stage_guard=dict(guard, policy_generation=5, job_uid="job", expires_at=enrollment["expires_at"]))
         submit.check_transition(enrollment, active)
         for override in ({"storage_operator": "other"}, {"expires_at": "2026-11-22T02:10:00Z"},
                          {"stage_guard": dict(active["stage_guard"], policy_generation=6)}):

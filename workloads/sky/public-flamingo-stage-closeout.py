@@ -319,6 +319,7 @@ def main():
     if (approval["purpose"] != "public-flamingo-stage" or approval["action"] != "activate"
             or approval["exclusive_storage_handoff"] is not True
             or approval["inventory_secret_immutable"] is not True or approval["inventory_uid"] != a.inventory_uid
+            or approval["stage_guard"]["expires_at"] != approval["expires_at"]
             or approval["stage_guard"]["job_uid"] != a.job_uid or approval["configmap_uid"] != a.configmap_uid
             or not re.fullmatch("[a-f0-9]{64}", approval["enrollment_approval_sha256"])
             or approval["run"] != a.run or approval["inventory_secret"] != packet["inventory_secret"]

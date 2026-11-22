@@ -85,7 +85,7 @@ def owner_transition(enrolled, active):
             or active["expires_at"] != enrolled["expires_at"]):
         raise ValueError("Leaf activation differs from its approved suspended enrollment")
     closed, opened = enrolled["closed_guard"], active["owner_guard"]
-    if (any(closed[k] != opened[k] for k in ("policy_uid", "binding_uid", "binding_generation"))
+    if (opened["expires_at"] != active["expires_at"] or any(closed[k] != opened[k] for k in ("policy_uid", "binding_uid", "binding_generation"))
             or opened["policy_generation"] != closed["policy_generation"] + 1):
         raise ValueError("Owner guard must directly succeed the enrolled closed guard")
 

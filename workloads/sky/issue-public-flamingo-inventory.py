@@ -20,6 +20,7 @@ from botocore.auth import S3SigV4QueryAuth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
+from public_flamingo_stage_guard import verify_guard
 from public_flamingo_stage_worker import HOST, NoRedirect, validate_query
 
 
@@ -158,7 +159,7 @@ def create_secret(kube, name, inventory):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ("packet", "promotion", "binding", "scope", "approval", "reader-grant", "reader-credentials"):
+    for key in ("packet", "promotion", "binding", "scope", "approval", "reader-grant", "reader-credentials", "consumer-check"):
         p.add_argument("--" + key, type=Path, required=True)
     p.add_argument("--approved-sha256", required=True)
     args = p.parse_args()
@@ -177,12 +178,31 @@ def main():
     check_grant(grant, credentials, packet, approval)
     ends = min(timestamp(date) for date in (scope["cutoff"], approval["expires_at"], grant["expires_at"]))
     kube = source_client(approval, packet["cluster_id"])
+    observation = read_private(args.consumer_check, approval["consumer_check_sha256"])
+    observed_at = timestamp(observation["observed_at"])
+    if (observation["schema"] != "public-flamingo-consumer-check-v1"
+            or observation["cluster_id"] != packet["cluster_id"] or observation["run"] != packet["run"]
+            or observation["storage_operator"] != approval["storage_operator"]
+            or observation["inventory_secret"] != packet["inventory_secret"]
+            or observation["closed_guard"] != approval["closed_guard"]
+            or observation["no_live_consumers"] is not True or observation["secret_absent"] is not True
+            or observed_at > datetime.now(timezone.utc) or observed_at >= ends):
+        raise ValueError("Expected the storage owner's clean pre-issuance inventory in this closed generation")
+
+    def check_consumer_fence():
+        def get(kind, name):
+            return json.loads(subprocess.check_output([*kube, "--request-timeout=10s", "get", kind, name, "-o", "json"],
+                                                       stderr=subprocess.DEVNULL, timeout=15))
+        verify_guard(get, packet["run"], "closed", approval["closed_guard"])
+
+    check_consumer_fence()
     objects = json.loads(packet["configmap"]["data"]["objects.json"])
     inventory = presign(objects, credentials, approval["ttl_seconds"], ends)
     probe_versions(inventory)
     for row in inventory:
         query = {k: v[0] for k, v in parse_qs(urlsplit(row["url"]).query).items()}
         validate_query(query, row["version_id"])
+    check_consumer_fence()
     print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory), sort_keys=True))
 
 

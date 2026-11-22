@@ -14,7 +14,7 @@ class GuardTests(unittest.TestCase):
     def setUp(self):
         self.run = "public-gemma"
         self.job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "stage-public-gemma",
-                    "namespace": "training"}, "spec": {"template": {"spec": {
+                    "namespace": "training"}, "spec": {"activeDeadlineSeconds": 1800, "template": {"spec": {
                         "serviceAccountName": "episode-input-stager", "containers": [{"name": "stage"}]}}}}
         self.objects = {}
         self.pins = {}
@@ -22,6 +22,7 @@ class GuardTests(unittest.TestCase):
     def observe(self, phase):
         if phase != "closed":
             self.pins["job_uid"] = str(uuid.uuid4())
+            self.pins["expires_at"] = "2026-11-22T02:00:00Z"
             self.objects["job"] = deepcopy(self.job)
             self.objects["job"]["metadata"]["uid"] = self.pins["job_uid"]
         policy, binding = guard.render_guard(self.run, phase, self.pins, self.job)
@@ -91,6 +92,53 @@ class GuardTests(unittest.TestCase):
         self.assertNotIn("userInfo", str(primary["matchConditions"]))
         self.assertIn("airaware-checkpoints", str(primary["matchConditions"]))
         self.assertIn("oldObject.spec.volumes", str(primary["matchConditions"]))
+
+    def test_latest_server_start_reserves_runtime_and_margin_within_both_expiries(self):
+        _policy, _binding = self.observe("stage")
+        for expiry, expected in [("2026-11-22T02:01:00Z", "2026-11-22T01:29:00Z"),
+                                 ("2099-01-01T00:00:00Z", "2026-11-22T01:53:00Z")]:
+            self.pins["expires_at"] = expiry
+            policy, _ = guard.render_guard(self.run, "stage", self.pins, self.job)
+            rules = [row["expression"] for row in policy["spec"]["validations"]]
+            self.assertTrue(any("request.operation != 'CREATE'" in expr
+                                and "timestamp(dyn(object.metadata).creationTimestamp)" in expr
+                                and expected in expr for expr in rules))
+        self.pins["expires_at"] = "2026-11-22T02:01:00"
+        with self.assertRaises(ValueError):
+            guard.render_guard(self.run, "stage", self.pins, self.job)
+
+    def test_run_inventory_is_matched_without_claim_for_all_pod_secret_paths(self):
+        for phase in ("stage", "closed"):
+            policy, _ = self.observe(phase)
+            condition, = policy["spec"]["matchConditions"]
+            expression = condition["expression"]
+            self.assertIn("stage-public-gemma-inventory", expression)
+            for obj in ("object", "oldObject"):
+                for field in ("volumes", "containers", "initContainers", "ephemeralContainers", "imagePullSecrets"):
+                    self.assertIn(obj + ".spec." + field, expression)
+            for volume in ("secret", "azureFile", "cephfs", "cinder", "flexVolume", "rbd", "scaleIO",
+                           "iscsi", "storageos", "csi", "projected"):
+                self.assertIn("v." + volume, expression)
+            for field in ("valueFrom.secretKeyRef", "secretRef", "nodePublishSecretRef", "envFrom"):
+                self.assertIn(field, expression)
+
+    def test_preexisting_inventory_consumer_checks_every_direct_reference(self):
+        name = "stage-public-gemma-inventory"
+        direct_volumes = [{kind: {"secretRef": {"name": name}}}
+                          for kind in ("cephfs", "cinder", "flexVolume", "rbd", "scaleIO", "iscsi", "storageos")]
+        direct_volumes.extend([{"secret": {"secretName": name}}, {"azureFile": {"secretName": name}},
+                               {"csi": {"nodePublishSecretRef": {"name": name}}},
+                               {"projected": {"sources": [{"configMap": {"name": name}}, {"secret": {"name": name}}]}}])
+        specs = [{"volumes": [v]} for v in direct_volumes] + [{"imagePullSecrets": [{"name": name}]}]
+        for field in ("containers", "initContainers", "ephemeralContainers"):
+            specs.extend([{field: [{"env": [{"valueFrom": {"secretKeyRef": {"name": name, "key": "key"}}}]}]},
+                          {field: [{"envFrom": [{"secretRef": {"name": name}}]}]}])
+        for spec in specs:
+            with self.subTest(spec=spec):
+                self.assertTrue(guard.preexisting_secret_consumer({"spec": spec}, name))
+                self.assertFalse(guard.preexisting_secret_consumer({"spec": spec}, "different-run"))
+        self.assertFalse(guard.preexisting_secret_consumer({"spec": {"volumes": [
+            {"configMap": {"name": name}}, {"projected": {"sources": [{}]}}]}}, name))
 
     def test_prevent_ambiguous_enrollment_and_render_closed_cli(self):
         with self.assertRaises(ValueError):

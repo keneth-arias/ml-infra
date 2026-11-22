@@ -3,6 +3,7 @@ import fcntl
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from uuid import uuid4
 import runpy
 import tempfile
@@ -12,6 +13,14 @@ from unittest.mock import patch
 
 owner = runpy.run_path(str(Path(__file__).resolve().parents[1] / "workloads/sky/prepare-public-flamingo-leaves.py"))
 prepare = owner["prepare"]
+
+
+def as_approved_owner():
+    real_fstat = os.fstat
+    def owner_stat(fd):
+        info = real_fstat(fd)
+        return SimpleNamespace(st_uid=1000, st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino)
+    return patch("os.fstat", side_effect=owner_stat)
 
 
 class TwoNewLeaves(unittest.TestCase):
@@ -37,7 +46,7 @@ class TwoNewLeaves(unittest.TestCase):
             base.mkdir()
             output.mkdir()
             (output / ".previous").touch()
-            with patch("os.fchown") as chown, self.assertRaises(ValueError):
+            with as_approved_owner(), patch("os.fchown") as chown, self.assertRaises(ValueError):
                 prepare([base, output])
             chown.assert_not_called()
 
@@ -49,7 +58,7 @@ class TwoNewLeaves(unittest.TestCase):
             link.symlink_to(base)
             with self.assertRaises((ValueError, OSError)):
                 prepare([base, link])
-            with self.assertRaises(ValueError):
+            with as_approved_owner(), self.assertRaises(ValueError):
                 prepare([base, base])
 
 
@@ -106,7 +115,7 @@ class OwnerActivation(unittest.TestCase):
                                  "fresh_empty_leaves", "cutoff", "expires_at")}
         enrolled = {**common, "action": "enroll", "closed_guard": self.closed}
         active = {**common, "action": "activate", "owner_guard": {
-            **self.closed, "job_uid": self.job_uid, "policy_generation": 8}}
+            **self.closed, "job_uid": self.job_uid, "policy_generation": 8, "expires_at": common["expires_at"]}}
         owner["owner_transition"](enrolled, active)
         for field in common:
             with self.subTest(field=field), self.assertRaises(ValueError):
@@ -123,7 +132,7 @@ class OwnerActivation(unittest.TestCase):
             fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                with patch("os.fchown") as chown, self.assertRaises(BlockingIOError):
+                with as_approved_owner(), patch("os.fchown") as chown, self.assertRaises(BlockingIOError):
                     prepare([base, output])
                 chown.assert_not_called()
             finally:
