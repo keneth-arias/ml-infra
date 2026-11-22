@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hami-runtime-fence-check
+  namespace: nvidia-gpu-operator
+spec:
+  selector:
+    matchLabels:
+      app: hami-runtime-fence-check
+  template:
+    metadata:
+      labels:
+        app: hami-runtime-fence-check
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: check
+          image: registry.k8s.io/pause:3.10

@@ -1,0 +1,135 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hami-device-binding
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods/binding, bindings]
+  matchConditions:
+    - name: device-namespace
+      expression: request.namespace == 'hami-device'
+  validations:
+    - expression: request.userInfo.username == 'system:kube-scheduler'
+      message: Only the managed default scheduler may bind a device Pod.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hami-device-binding
+spec:
+  policyName: hami-device-binding
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hami-device-node-write
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [nodes]
+  matchConditions:
+    - name: device-runtime
+      expression: request.userInfo.username == 'system:serviceaccount:hami-device:hami-device-plugin'
+  variables:
+    - name: nodeExtra
+      expression: "'authentication.kubernetes.io/node-name'"
+    - name: allowed
+      expression: "['hami.io/node-nvidia-register', 'hami.io/node-nvidia-score', 'hami.io/mutex.lock']"
+    - name: currentAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: previousAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+  validations:
+    - expression: >-
+        has(request.userInfo.extra) && variables.nodeExtra in request.userInfo.extra
+        && request.userInfo.extra[variables.nodeExtra] == [object.metadata.name]
+        && has(oldObject.metadata.labels)
+        && oldObject.metadata.labels['gpu'] == 'on'
+        && oldObject.metadata.labels['airaware.training/gpu-mode'] == 'hami'
+        && oldObject.metadata.labels['airaware.training/pool'] == 'training-hami'
+        && oldObject.metadata.labels['airaware.training.node-restriction.kubernetes.io/gpu-mode'] == 'hami'
+        && has(oldObject.spec.taints) && oldObject.spec.taints.exists(t,
+        t.key == 'airaware.training/gpu-mode' && t.value == 'hami' && t.effect == 'NoSchedule')
+      message: Device credentials may only patch the dedicated, tainted node associated with their bound Pod token.
+    - expression: >-
+        object.spec == oldObject.spec && object.status == oldObject.status
+        && object.metadata.labels == oldObject.metadata.labels
+        && (has(object.metadata.finalizers) == has(oldObject.metadata.finalizers))
+        && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
+        && (has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences))
+        && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
+        && variables.currentAnnotations.all(k, k in variables.allowed
+        || (k in variables.previousAnnotations && variables.currentAnnotations[k] == variables.previousAnnotations[k]))
+        && variables.previousAnnotations.all(k, k in variables.allowed || k in variables.currentAnnotations)
+      message: Device runtime changes are confined to NVIDIA registration and allocation-lock annotations.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hami-device-node-write
+spec:
+  policyName: hami-device-node-write
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hami-device-allocation-write
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [pods]
+  matchConditions:
+    - name: fractional-workload-and-device-runtime
+      expression: >-
+        request.namespace == 'hami-workloads'
+        && request.userInfo.username == 'system:serviceaccount:hami-device:hami-device-plugin'
+  variables:
+    - name: nodeExtra
+      expression: "'authentication.kubernetes.io/node-name'"
+    - name: allowed
+      expression: "['hami.io/bind-phase', 'hami.io/vgpu-devices-to-allocate']"
+    - name: currentAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: previousAnnotations
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+  validations:
+    - expression: >-
+        has(oldObject.spec.nodeName) && oldObject.spec.nodeName != ''
+        && has(request.userInfo.extra) && variables.nodeExtra in request.userInfo.extra
+        && request.userInfo.extra[variables.nodeExtra] == [oldObject.spec.nodeName]
+      message: Device credentials may only patch pilot Pods on the same node as their bound Pod token.
+    - expression: >-
+        object.spec == oldObject.spec && object.status == oldObject.status
+        && (has(object.metadata.labels) == has(oldObject.metadata.labels))
+        && (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels)
+        && (has(object.metadata.finalizers) == has(oldObject.metadata.finalizers))
+        && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
+        && (has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences))
+        && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
+        && variables.currentAnnotations.all(k, k in variables.allowed
+        || (k in variables.previousAnnotations && variables.currentAnnotations[k] == variables.previousAnnotations[k]))
+        && variables.previousAnnotations.all(k, k in variables.allowed || k in variables.currentAnnotations)
+      message: Device runtime changes are confined to bind phase and pending device allocation annotations.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hami-device-allocation-write
+spec:
+  policyName: hami-device-allocation-write
+  validationActions: [Deny]

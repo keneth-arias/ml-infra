@@ -30,7 +30,7 @@ spec:
     - name: callerIsHAMi
       expression: >-
         request.userInfo.username in ['system:serviceaccount:hami-system:hami-scheduler',
-        'system:serviceaccount:hami-system:hami-device-plugin']
+        'system:serviceaccount:hami-device:hami-device-plugin']
     - name: currentAnnotations
       expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
     - name: previousAnnotations
@@ -61,8 +61,11 @@ spec:
       message: Pilot workloads cannot override HAMi allocation policy.
     - expression: >-
         !variables.optedIn || (object.spec.schedulerName == 'hami-scheduler'
-        && has(object.spec.nodeSelector) && size(object.spec.nodeSelector) == 2
+        && has(object.spec.nodeSelector) && size(object.spec.nodeSelector) == 4
         && 'gpu' in object.spec.nodeSelector && object.spec.nodeSelector['gpu'] == 'on'
+        && 'airaware.training/pool' in object.spec.nodeSelector && object.spec.nodeSelector['airaware.training/pool'] == 'training-hami'
+        && 'airaware.training.node-restriction.kubernetes.io/gpu-mode' in object.spec.nodeSelector
+        && object.spec.nodeSelector['airaware.training.node-restriction.kubernetes.io/gpu-mode'] == 'hami'
         && 'airaware.training/gpu-mode' in object.spec.nodeSelector
         && object.spec.nodeSelector['airaware.training/gpu-mode'] == 'hami'
         && (!has(object.spec.nodeName) || (oldObject != null && has(oldObject.spec.nodeName)

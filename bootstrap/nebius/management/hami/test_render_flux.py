@@ -1,16 +1,37 @@
 import importlib.util
+import sys
 from pathlib import Path
 import unittest
 
 source = Path(__file__).with_name("render-flux.py")
 spec = importlib.util.spec_from_file_location("hami_flux", source)
 flux = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = flux
 spec.loader.exec_module(flux)
 
 COMMIT = "6" * 40
 
 
 class FluxHandoffTests(unittest.TestCase):
+    def test_split_planes_share_the_source_and_separate_the_grants(self):
+        account_names = []
+        for plane in (flux.SCHEDULER, flux.DEVICE):
+            source, reconcile = flux.sync(COMMIT, True, plane)
+            self.assertEqual(source["metadata"]["name"], f"hami-{COMMIT}")
+            self.assertTrue(reconcile["spec"]["suspend"])
+            self.assertEqual(reconcile["spec"]["targetNamespace"], plane.namespace)
+            self.assertEqual(reconcile["spec"]["path"], "./" + plane.path)
+            pod_kind = "DaemonSet" if plane == flux.DEVICE else "Deployment"
+            obj = {"apiVersion": "apps/v1", "kind": pod_kind,
+                   "metadata": {"namespace": plane.namespace, "name": "fixture"}}
+            sa, _, _, role, binding = flux.access([obj], plane)
+            account_names.append(sa["metadata"]["name"])
+            self.assertEqual(binding["metadata"]["namespace"], plane.namespace)
+            self.assertEqual(role["rules"][0]["verbs"], ["get", "patch"])
+            with self.assertRaises(ValueError):
+                flux.access([obj], flux.SCHEDULER if plane == flux.DEVICE else flux.DEVICE)
+        self.assertEqual(account_names, ["nebius-hami", "nebius-hami-device"])
+
     def test_fetch_only_switches_source(self):
         source, stage = flux.sync(COMMIT, False)
         fetched, staged = flux.sync(COMMIT, True)

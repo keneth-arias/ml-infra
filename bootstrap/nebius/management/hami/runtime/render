@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# != 2 ]]; then
+    echo "Usage: render VERIFIED_CHART.tgz KUBERNETES_VERSION" >&2
+    exit 2
+fi
+
+chart=$1
+kube_version=${2#v}
+if [[ ! $kube_version =~ ^1\.36\.[0-9]+$ ]]; then
+    echo "The runtime and its placement policy require Kubernetes 1.36." >&2
+    exit 2
+fi
+
+expected=f3e0577de5c1551743e137a361682d684b4f7aee30b46f2ed3f4772907101a82
+actual=$(sha256sum < "$chart")
+if [[ ${actual%% *} != "$expected" ]]; then
+    echo "SHA-256 mismatch for the Nebius GPU Operator v26.3.3 chart." >&2
+    exit 1
+fi
+
+runtime_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+exec helm template gpu-operator "$chart" --values "$runtime_dir/values.yaml" \
+    --namespace nvidia-gpu-operator --kube-version "$kube_version" --include-crds

@@ -1,0 +1,73 @@
+operator:
+  runtimeClass: nvidia
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution: []
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: airaware.training/pool
+                operator: In
+                values: [training-cpu]
+driver:
+  enabled: true
+  nvidiaDriverCRD:
+    enabled: true
+    deployDefaultCR: false
+  version: "580.173.02"
+  kernelModuleType: open
+  usePrecompiled: false
+toolkit:
+  enabled: true
+  env:
+    - name: RUNTIME_CONFIG_SOURCE
+      value: file
+    - name: CONTAINERD_SET_AS_DEFAULT
+      value: "false"
+devicePlugin:
+  enabled: false
+cdi:
+  enabled: false
+  nriPluginEnabled: false
+gdrcopy:
+  enabled: false
+gfd:
+  enabled: false
+dcgm:
+  enabled: false
+dcgmExporter:
+  enabled: false
+mig:
+  strategy: none
+migManager:
+  enabled: false
+validator:
+  cuda:
+    env:
+      - name: WITH_WORKLOAD
+        value: "false"
+daemonsets:
+  tolerations:
+    - key: airaware.training/gpu-mode
+      operator: Equal
+      value: hami
+      effect: NoSchedule
+node-feature-discovery:
+  worker:
+    nodeSelector:
+      airaware.training/pool: training-hami
+      airaware.training.node-restriction.kubernetes.io/gpu-mode: hami
+    tolerations:
+      - key: airaware.training/gpu-mode
+        operator: Equal
+        value: hami
+        effect: NoSchedule
+nebius:
+  nvidiaDriverCRDPatch:
+    profiles:
+      - name: hami-rtx6000
+        nodeSelector:
+          airaware.training/pool: training-hami
+          airaware.training.node-restriction.kubernetes.io/gpu-mode: hami
+          node.kubernetes.io/instance-type: gpu-rtx6000-a
+        managerEnv: []

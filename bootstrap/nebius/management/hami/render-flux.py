@@ -6,6 +6,7 @@
 """Render a bounded production Flux handoff from a reviewed merged HAMi revision."""
 
 import argparse
+from dataclasses import dataclass
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -14,10 +15,21 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[4]
-SYSTEM = "hami-system"
 FLUX = "flux-system"
-NAME = "nebius-hami"
-PATH = "platform/hami/system"
+
+
+@dataclass(frozen=True)
+class Plane:
+    name: str
+    namespace: str
+    path: str
+
+
+STANDBY = Plane("nebius-hami", "hami-system", "platform/hami/system")
+SCHEDULER = Plane("nebius-hami", "hami-system", "platform/hami/scheduler")
+DEVICE = Plane("nebius-hami-device", "hami-device", "platform/hami/device")
+PLANES = {"standby": STANDBY, "scheduler": SCHEDULER, "device": DEVICE}
+
 REPO = "ssh://git@github.com/keneth-arias/ml-infra.git"
 RBAC = "rbac.authorization.k8s.io/v1"
 TARGETS = {
@@ -35,16 +47,16 @@ def object_(api, kind, name, namespace, **body):
     return {"apiVersion": api, "kind": kind, "metadata": {"name": name, "namespace": namespace}, **body}
 
 
-def sync(commit, fetch):
+def sync(commit, fetch, plane=STANDBY):
     source_name = f"hami-{commit}"
     source = object_("source.toolkit.fluxcd.io/v1", "GitRepository", source_name, FLUX, spec={
         "url": REPO, "interval": "10m", "ref": {"commit": commit},
         "secretRef": {"name": "nebius-git-read"}, "suspend": not fetch, "timeout": "60s",
     })
-    reconcile = object_("kustomize.toolkit.fluxcd.io/v1", "Kustomization", NAME, FLUX, spec={
+    reconcile = object_("kustomize.toolkit.fluxcd.io/v1", "Kustomization", plane.name, FLUX, spec={
         "sourceRef": {"kind": "GitRepository", "name": source_name},
-        "path": f"./{PATH}", "interval": "5m", "timeout": "5m",
-        "targetNamespace": SYSTEM, "serviceAccountName": NAME,
+        "path": f"./{plane.path}", "interval": "5m", "timeout": "5m",
+        "targetNamespace": plane.namespace, "serviceAccountName": plane.name,
         "prune": False, "deletionPolicy": "Orphan", "force": False, "suspend": True, "wait": False,
     })
     return source, reconcile
@@ -60,12 +72,12 @@ def binding(name, namespace, account):
                    subjects=[{"kind": "ServiceAccount", "name": account, "namespace": FLUX}])
 
 
-def access(objects):
+def access(objects, plane=STANDBY):
     names = {}
     for obj in objects:
         metadata = obj["metadata"]
         target = TARGETS.get((obj["apiVersion"], obj["kind"]))
-        if target is None or metadata.get("namespace") != SYSTEM or not metadata.get("name"):
+        if target is None or metadata.get("namespace") != plane.namespace or not metadata.get("name"):
             raise ValueError("HAMi core contains an object outside the namespaced Flux grant")
         group = names.setdefault(target, set())
         if metadata["name"] in group:
@@ -73,26 +85,28 @@ def access(objects):
         group.add(metadata["name"])
     if not names:
         raise ValueError("HAMi core is empty")
-    controller = NAME + "-controller"
+    controller = plane.name + "-controller"
     return [
-        object_("v1", "ServiceAccount", NAME, FLUX, automountServiceAccountToken=False),
+        object_("v1", "ServiceAccount", plane.name, FLUX, automountServiceAccountToken=False),
         object_(RBAC, "Role", controller, FLUX, rules=[
             rule("kustomize.toolkit.fluxcd.io",
                  ["kustomizations", "kustomizations/status", "kustomizations/finalizers"],
-                 [NAME], ["patch", "update"]),
-            rule("", ["serviceaccounts"], [NAME], ["get", "impersonate"]),
+                 [plane.name], ["patch", "update"]),
+            rule("", ["serviceaccounts"], [plane.name], ["get", "impersonate"]),
         ]),
         binding(controller, FLUX, "kustomize-controller"),
-        object_(RBAC, "Role", NAME, SYSTEM, rules=[
+        object_(RBAC, "Role", plane.name, plane.namespace, rules=[
             rule(group, [resource], sorted(members), ["get", "patch"])
             for (group, resource), members in sorted(names.items())
         ]),
-        binding(NAME, SYSTEM, NAME),
+        binding(plane.name, plane.namespace, plane.name),
     ]
 
 
-def bootstrap_core(objects):
-    access(objects)
+def bootstrap_core(objects, plane=STANDBY):
+    access(objects, plane)
+    if plane == DEVICE:
+        raise ValueError("Device installation requires the separate worker cutover procedure")
     staged = deepcopy(objects)
     schedulers = [obj for obj in staged if obj["kind"] == "Deployment"
                   and obj["metadata"]["name"] == "hami-scheduler"]
@@ -102,8 +116,8 @@ def bootstrap_core(objects):
     return staged
 
 
-def activate(commit, observed_source, observed_stage):
-    wanted_source, wanted_stage = sync(commit, True)
+def activate(commit, observed_source, observed_stage, plane=STANDBY):
+    wanted_source, wanted_stage = sync(commit, True, plane)
     for observed, wanted in ((observed_source, wanted_source), (observed_stage, wanted_stage)):
         if (any(observed.get(key) != wanted[key] for key in ("kind", "apiVersion"))
                 or any(observed["metadata"].get(key) != val for key, val in wanted["metadata"].items())
@@ -136,21 +150,21 @@ def git(*args):
     return subprocess.check_output(["git", "-C", str(ROOT), *args])
 
 
-def merged(commit):
+def merged(commit, plane=STANDBY):
     if not re.fullmatch(r"[a-f0-9]{40}", commit) or commit == "0" * 40:
         raise ValueError("Supply the full immutable HAMi commit")
     git("merge-base", "--is-ancestor", commit, "refs/remotes/origin/main")
-    if git("cat-file", "-t", f"{commit}:{PATH}/kustomization.yaml").strip() != b"blob":
-        raise ValueError("Merged commit does not contain the HAMi system kustomization")
+    if git("cat-file", "-t", f"{commit}:{plane.path}/kustomization.yaml").strip() != b"blob":
+        raise ValueError("Merged commit does not contain the selected HAMi kustomization")
 
 
-def core(commit):
+def core(commit, plane=STANDBY):
     import yaml
 
-    archive = git("archive", commit, PATH)
+    archive = git("archive", commit, "platform/hami")
     with tempfile.TemporaryDirectory(prefix="hami-flux-") as checkout:
         subprocess.run(["tar", "-xf", "-", "-C", checkout], input=archive, check=True)
-        raw = subprocess.check_output(["kubectl", "kustomize", str(Path(checkout) / PATH)])
+        raw = subprocess.check_output(["kubectl", "kustomize", str(Path(checkout) / plane.path)])
     return [obj for obj in yaml.safe_load_all(raw) if obj is not None]
 
 
@@ -161,6 +175,7 @@ def item_list(objects):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("commit")
+    parser.add_argument("--plane", choices=PLANES, default="standby")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("access", help="Render patch-only grants from the exact merged build")
     commands.add_parser("core", help="Render the exact merged HAMi core as a Kubernetes List")
@@ -172,20 +187,21 @@ def main():
     enable.add_argument("--kustomization-readback", type=Path, required=True)
     args = parser.parse_args()
     try:
-        merged(args.commit)
+        plane = PLANES[args.plane]
+        merged(args.commit, plane)
         if args.command == "access":
-            result = item_list(access(core(args.commit)))
+            result = item_list(access(core(args.commit, plane), plane))
         elif args.command == "core":
-            objects = core(args.commit)
-            access(objects)
+            objects = core(args.commit, plane)
+            access(objects, plane)
             result = item_list(objects)
         elif args.command == "bootstrap-core":
-            result = item_list(bootstrap_core(core(args.commit)))
+            result = item_list(bootstrap_core(core(args.commit, plane), plane))
         elif args.command == "stage":
-            result = item_list(sync(args.commit, args.fetch))
+            result = item_list(sync(args.commit, args.fetch, plane))
         else:
             result = activate(args.commit, json.loads(args.source_readback.read_bytes()),
-                              json.loads(args.kustomization_readback.read_bytes()))
+                              json.loads(args.kustomization_readback.read_bytes()), plane)
     except (KeyError, OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2))

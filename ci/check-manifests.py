@@ -76,3 +76,5 @@ if __name__ == "__main__":
     validate_cluster(Path("platform/overlays/prod/sky-cpu"), production=True)
     validate_cluster(Path("platform/hami/system"), production=True)
     validate_cluster(Path("platform/hami/workloads"), production=True)
+    for path in ("scheduler", "device", "device/operator"):
+        validate_cluster(Path("platform/hami") / path, production=True)
