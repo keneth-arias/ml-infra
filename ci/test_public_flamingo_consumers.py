@@ -3,6 +3,7 @@ from pathlib import Path
 import runpy
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -24,7 +25,7 @@ class PublicInventoryConsumers(unittest.TestCase):
         self.answers = [True, True]
 
     def observe(self, verify=None):
-        def read_guard(get, run, phase, pins):
+        def read_guard(get, run, phase, pins, window=None):
             self.assertEqual((run, phase, pins), (self.run, "closed", self.pins))
             self.calls.append("guard")
             return verify() if verify else self.pins
@@ -45,6 +46,20 @@ class PublicInventoryConsumers(unittest.TestCase):
                                         "closed_guard", "observed_at", "no_live_consumers", "secret_absent"})
         self.assertEqual(receipt["closed_guard"], self.pins)
         self.assertTrue(receipt["secret_absent"] and receipt["no_live_consumers"])
+
+    def test_successor_scan_binds_both_live_guard_reads_and_receipt(self):
+        sha = "7" * 64
+        run = "fsw-" + sha[:32]
+        window = SimpleNamespace(run=run, sha256=sha)
+        pins = dict(self.pins, window_sha256=sha)
+        with patch.object(guard, "verify_guard", return_value=pins) as verify:
+            result = observer["observe"](run, pins, "reader", None, lambda: self.pods, lambda _: True, window)
+        self.assertEqual(verify.call_count, 2)
+        for actual in verify.call_args_list:
+            self.assertIs(actual.kwargs["window"], window)
+        self.assertEqual(result["window_sha256"], sha)
+        with self.assertRaises(ValueError):
+            observer["observe"](run, self.pins, "reader", None, None, None, window)
 
     def test_missing_or_partial_inventory_never_attests(self):
         for metadata in ({}, {"resourceVersion": "18", "continue": "partial"}, {"resourceVersion": "18", "remainingItemCount": 1}):

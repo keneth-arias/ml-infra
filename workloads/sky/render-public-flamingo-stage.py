@@ -9,6 +9,7 @@ import re
 import runpy
 
 import production_release as release
+import public_flamingo_window as windows
 
 
 HERE = Path(__file__).resolve().parent
@@ -51,7 +52,7 @@ def public_objects(promotion):
     return canonical(sorted(rows, key=lambda row: row["name"]))
 
 
-def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha):
+def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha, window=None):
     labels = {"airaware.training/phase": "public-flamingo-stage", "airaware.training/run": run}
     container = {
         "name": "stage", "image": image, "imagePullPolicy": "IfNotPresent",
@@ -83,7 +84,7 @@ def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha):
         "nodeSelector": {"airaware.training/pool": "training-cpu"},
         "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
             "nodeSelectorTerms": [{"matchFields": [
-                {"key": "metadata.name", "operator": "In", "values": [CPU_NODE]}]}]}}},
+                {"key": "metadata.name", "operator": "In", "values": [window.cpu_node if window else CPU_NODE]}]}]}}},
         "containers": [container],
         "volumes": [
             {"name": "claim", "persistentVolumeClaim": {"claimName": CLAIM}},
@@ -92,25 +93,31 @@ def stage_job(run, inventory_secret, configmap, image, worker_sha, objects_sha):
                                              "items": [{"key": "inventory.json", "path": "inventory.json"}]}},
         ],
     }
-    return {"apiVersion": "batch/v1", "kind": "Job",
-            "metadata": {"namespace": "training", "name": "stage-" + run, "labels": labels},
+    meta = {"namespace": "training", "name": "stage-" + run, "labels": labels}
+    if window:
+        meta["annotations"] = {"airaware.training/stage-window-sha256": window.sha256}
+    return {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta,
             "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 1800, "parallelism": 1,
                      "completions": 1, "podReplacementPolicy": "Failed",
                      "template": {"metadata": {"labels": labels}, "spec": pod}}}
 
 
-def build_packet(promotion, binding, expected_deployment, run, inventory_secret):
+def build_packet(promotion, binding, expected_deployment, run, inventory_secret, window=None):
+    windows.validate_window_run(window, run)
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", run):
         raise ValueError("Invalid public baseline run")
     if inventory_secret != f"stage-{run}-inventory":
         raise ValueError("Expected the inventory Secret reserved for this run")
-    images, fingerprint = release.verify_release(release.TRUST, CLUSTER, DEPLOY_COMMIT)
-    if fingerprint != expected_deployment or fingerprint != DEPLOYMENT_SHA:
+    commit = window.deployment_commit if window else DEPLOY_COMMIT
+    binding_sha = window.binding_sha256 if window else BINDING_SHA
+    cluster = window.cluster_id if window else CLUSTER
+    images, fingerprint = release.verify_release(release.TRUST, cluster, commit)
+    if fingerprint != expected_deployment or fingerprint != (window.deployment_sha256 if window else DEPLOYMENT_SHA):
         raise ValueError("Signed deployment differs from the enrolled original and independent pin")
-    project, (pvc_uid, pv_uid, disk) = HANDOFF["approved_binding"](binding, BINDING_SHA, CLUSTER)
+    project, (pvc_uid, pv_uid, disk) = HANDOFF["approved_binding"](binding, binding_sha, cluster)
     # Read only the PV name from the identical, pinned receipt.
     bound_raw = binding.read_bytes()
-    if sha256(bound_raw).hexdigest() != BINDING_SHA:
+    if sha256(bound_raw).hexdigest() != binding_sha:
         raise ValueError("Binding receipt changed during rendering")
     training, = (item for item in json.loads(bound_raw)["bindings"]
                  if (item["namespace"], item["claim"]) == ("training", CLAIM))
@@ -125,13 +132,25 @@ def build_packet(promotion, binding, expected_deployment, run, inventory_secret)
         "data": {"public_flamingo_stage_worker.py": worker.decode("utf-8"), "objects.json": objects.decode()},
     }
     image = images["preflight"]
-    job = stage_job(run, inventory_secret, configmap_name, image, worker_sha, objects_sha)
+    job = stage_job(run, inventory_secret, configmap_name, image, worker_sha, objects_sha, window)
+    extra = {}
+    if window:
+        if (project != window.project_id or image != window.preflight_image
+                or objects_sha != window.objects_sha256 or PROMOTION_SHA != window.promotion_sha256
+                or WEIGHTS != window.weights_manifest_sha256):
+            raise ValueError("Public stage inputs differ from the signed window")
+        configmap["metadata"]["annotations"] = dict(job["metadata"]["annotations"])
+        extra = {"window_sha256": window.sha256, "scope_sha256": window.scope_sha256,
+                 "preflight_linux_amd64": window.preflight_platform_image}
     return {
-        "schema": "public-flamingo-stage-review-v1", "run": run, "cluster_id": CLUSTER,
-        "project_id": project, "deployment_commit": DEPLOY_COMMIT, "deployment_sha256": fingerprint,
+        **extra,
+        "schema": "public-flamingo-stage-review-v1", "run": run, "cluster_id": cluster,
+        "project_id": project, "deployment_commit": commit, "deployment_sha256": fingerprint,
         "image": image, "promotion_sha256": PROMOTION_SHA, "weights_manifest_sha256": WEIGHTS,
-        "placement": {"name": CPU_NODE, "uid": CPU_UID, "provider_id": "nebius://" + CPU_NODE},
-        "binding_sha256": BINDING_SHA,
+        "placement": {"name": window.cpu_node if window else CPU_NODE,
+                      "uid": window.cpu_node_uid if window else CPU_UID,
+                      "provider_id": window.cpu_provider_id if window else "nebius://" + CPU_NODE},
+        "binding_sha256": binding_sha,
         "binding": {"namespace": "training", "claim": CLAIM, "pv": training["pv"], "pv_uid": pv_uid,
                     "pvc_uid": pvc_uid, "provider_disk_id": disk},
         "inventory_secret": inventory_secret, "worker_sha256": worker_sha, "objects_sha256": objects_sha,
@@ -147,9 +166,11 @@ def main():
     parser.add_argument("--expected-deployment", required=True)
     parser.add_argument("--run", required=True)
     parser.add_argument("--inventory-secret", required=True)
+    windows.add_window_args(parser)
     args = parser.parse_args()
+    window = windows.load_window(args, args.run, live=False)
     print(json.dumps(build_packet(args.promotion, args.binding, args.expected_deployment,
-                                  args.run, args.inventory_secret), indent=2, sort_keys=True))
+                                  args.run, args.inventory_secret, window), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

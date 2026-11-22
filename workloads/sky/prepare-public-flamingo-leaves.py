@@ -54,8 +54,11 @@ def owner_job(stage, source):
                securityContext={"runAsUser": 0, "runAsGroup": 0, "seccompProfile": {"type": "RuntimeDefault"}},
                volumes=[{"name": "claim", "persistentVolumeClaim": {"claimName": "airaware-checkpoints"}}])
     labels = {"airaware.training/phase": "public-flamingo-owner", "airaware.training/run": stage["metadata"]["labels"]["airaware.training/run"]}
-    return {"apiVersion": "batch/v1", "kind": "Job",
-            "metadata": {"name": stage["metadata"]["name"] + "-owner", "namespace": "training", "labels": labels},
+    meta = {"name": stage["metadata"]["name"] + "-owner", "namespace": "training", "labels": labels}
+    window = stage["metadata"].get("annotations", {}).get("airaware.training/stage-window-sha256")
+    if window:
+        meta["annotations"] = {"airaware.training/stage-window-sha256": window}
+    return {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta,
             "spec": {"suspend": True, "parallelism": 1, "completions": 1, "backoffLimit": 0, "podReplacementPolicy": "Failed",
                      "activeDeadlineSeconds": 60, "template": {"metadata": {"labels": labels}, "spec": pod}}}
 
@@ -80,6 +83,9 @@ def owner_transition(enrolled, active):
     same = ("purpose", "run", "deployment_sha256", "packet_file_sha256", "owner_job_file_sha256",
             "leaf_operator", "storage_operator", "staging_operator", "exclusive_storage_handoff",
             "fresh_empty_leaves", "cutoff")
+    if (("window_sha256" in active) != ("window_sha256" in enrolled)
+            or active.get("window_sha256") != enrolled.get("window_sha256")):
+        raise ValueError("Enrollment and activation reference different windows")
     if (enrolled["action"] != "enroll" or active["action"] != "activate"
             or any(active[k] != enrolled[k] for k in same)
             or active["expires_at"] != enrolled["expires_at"]):
@@ -124,8 +130,10 @@ def operate(argv):
     from private_api import pinned_kubeconfig_ca
     from production_target import kubectl_client_for_identity
     from public_flamingo_stage_guard import verify_guard
+    from public_flamingo_window import add_window_args, load_window
 
     parser = argparse.ArgumentParser(description="Enroll or activate the approved empty-leaf ownership Job")
+    add_window_args(parser)
     parser.add_argument("action", choices=("enroll", "activate"))
     for name in ("approval", "promotion", "binding", "scope", "owner-job", "packet"):
         parser.add_argument("--" + name, type=Path, required=True)
@@ -138,18 +146,23 @@ def operate(argv):
     render = runpy.run_path(str(here / "render-public-flamingo-stage.py"))
     native = runpy.run_path(str(here.parents[1] / "bootstrap/nebius/management/native-activation.py"))
     approval = submit["read_approval"](a.approval, a.approved_sha256)
+    window = load_window(a, approval["run"], live=True)
+    submit["check_window_approval"](window, approval)
     if (approval["action"] != a.action or approval["purpose"] != "public-flamingo-prepare-leaves"
             or approval["exclusive_storage_handoff"] is not True or approval["fresh_empty_leaves"] is not True
             or bool(a.enrollment_approval) != (a.action == "activate")):
         raise ValueError("Expected separate owner approval for fresh empty leaves on this action")
     if a.action == "activate":
         enrolled = submit["read_approval"](a.enrollment_approval, approval["enrollment_approval_sha256"])
+        submit["check_window_approval"](window, enrolled)
         owner_transition(enrolled, approval)
-    scope = closeout["pinned_file"](a.scope, submit["SCOPE_SHA256"])
+    scope = submit["stage_scope"](a.scope, window, private=True)
     run = approval["run"]
 
     def reproduce():
-        packet = render["build_packet"](a.promotion, a.binding, approval["deployment_sha256"], run, "stage-" + run + "-inventory")
+        current_window = load_window(a, run, live=True)
+        packet = render["build_packet"](a.promotion, a.binding, approval["deployment_sha256"], run,
+                                        "stage-" + run + "-inventory", window=current_window)
         submit["approved_packet"](a.packet, approval["packet_file_sha256"], packet)
         job = owner_job(packet["job"], worker_source())
         submit["approved_packet"](a.owner_job, approval["owner_job_file_sha256"], job)
@@ -184,7 +197,7 @@ def operate(argv):
     job_uid = closeout["uid"](pins["job_uid"]) if phase == "owner" else None
     cutoff = min(closeout["timestamp"](scope["cutoff"]), closeout["timestamp"](approval["expires_at"]))
     def guard():
-        return verify_guard(get, run, phase, pins, job=job if phase == "owner" else None)
+        return verify_guard(get, run, phase, pins, job=job if phase == "owner" else None, window=window)
     def time_check():
         submit["check_time"](cutoff, job["spec"]["activeDeadlineSeconds"], datetime.now(timezone.utc))
     name = job["metadata"]["name"]
@@ -192,7 +205,8 @@ def operate(argv):
     guard()
     native["check_active"](*native["held_policy_and_binding"](), {"items": [get(native["POLICY"]), get(native["GUARD"])]})
     closeout["exclude_other_writers"](get, job_uid)
-    submit["check_placement"](packet["placement"], get("node", packet["placement"]["name"]))
+    if not window:
+        submit["check_placement"](packet["placement"], get("node", packet["placement"]["name"]))
     env = dict(os.environ, NEBIUS_STORAGE_BINDING_RECEIPT=str(a.binding), NEBIUS_STORAGE_BINDING_SHA256=packet["binding_sha256"])
     subprocess.run([sys.executable, str(here / "training-storage-handoff.py")], env=env, check=True, timeout=140)
     reproduce()
@@ -215,6 +229,7 @@ def operate(argv):
             raise ValueError(f"Owner activation unconfirmed; inspect {name} UID {job_uid} before any retry")
         meta = verify_owner_job(closeout, job, json.loads(result.stdout), job_uid, suspended=False)
     print(json.dumps({"action": a.action, "job": name, "job_uid": job_uid, "job_resource_version": meta["resourceVersion"],
+                      **({"window_sha256": window.sha256} if window else {}),
                       "approval_sha256": a.approved_sha256, "owner_job_file_sha256": approval["owner_job_file_sha256"]},
                      sort_keys=True))
 

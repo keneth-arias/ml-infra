@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "workloads" / "sky"))
@@ -37,6 +38,37 @@ class GuardTests(unittest.TestCase):
 
     def get(self, kind, name, *args):
         return self.objects[kind]
+
+    def test_successor_guard_pins_even_closed_phase_and_reproduces_both_jobs(self):
+        sha = "7" * 64
+        run = "fsw-" + sha[:32]
+        w = SimpleNamespace(run=run, sha256=sha, cpu_node="computeinstance-successor",
+                            preflight_image="repo@sha256:" + "b" * 64, objects_sha256="c" * 64,
+                            start="2028-01-01T00:00:00Z", cutoff="2028-01-01T04:00:00Z")
+        pins = {"window_sha256": sha, "expires_at": "2028-01-01T05:00:00Z", "job_uid": str(uuid.uuid4())}
+        closed, _ = guard.render_guard(run, "closed", {"window_sha256": sha}, window=w)
+        self.assertEqual(closed["metadata"]["name"], guard.NAME)
+        self.assertIn(sha, str(closed["spec"]["auditAnnotations"]))
+        for wrong in ({}, {"window_sha256": "d"*64}):
+            with self.assertRaises(ValueError):
+                guard.render_guard(run, "closed", wrong, window=w)
+        for phase in ("stage", "owner"):
+            job = guard.reviewed_window_job(w, run, phase)
+            policy, _ = guard.render_guard(run, phase, pins, job, w)
+            self.assertIn(w.start, str(policy["spec"]["validations"]))
+            self.assertIn("2028-01-01T03:", str(policy["spec"]["validations"]))
+            mutations = [
+                lambda j: j["spec"]["template"]["spec"].update(affinity={}),
+                lambda j: j["spec"]["template"]["spec"]["containers"][0].update(image="wrong"),
+                lambda j: j["spec"]["template"]["spec"]["containers"][0].update(volumeMounts=[]),
+                lambda j: j["spec"]["template"]["spec"]["containers"][0].update(command=["wrong"]),
+                lambda j: j["metadata"].pop("annotations"),
+            ]
+            for mutate in mutations:
+                changed = deepcopy(job)
+                mutate(changed)
+                with self.assertRaisesRegex(ValueError, "reproduced"):
+                    guard.render_guard(run, phase, pins, changed, w)
 
     def test_closed_denies_new_consumers_without_a_job_parameter(self):
         policy, binding = self.observe("closed")

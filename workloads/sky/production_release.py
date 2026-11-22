@@ -54,7 +54,8 @@ def signed_bytes(directory, name, signer):
     return raw
 
 
-def verify_release(trust, cluster_id, deployment_commit):
+def verified_release_manifest(trust, cluster_id, deployment_commit):
+    """Read the release and deployment signed for the same installed directory."""
     directory = (trust / "current").resolve(strict=True)
     signer = trust / "signer.pub"
     approval = signed_bytes(directory, "deployment.json", signer)
@@ -67,7 +68,12 @@ def verify_release(trust, cluster_id, deployment_commit):
         or deploy["release_sha256"] != sha256(release).hexdigest()
     ):
         raise ValueError("Deployment receipt differs from the cluster, checkout or image release")
-    return release_refs(json.loads(release)), sha256(approval).hexdigest()
+    return json.loads(release), sha256(approval).hexdigest()
+
+
+def verify_release(trust, cluster_id, deployment_commit):
+    release, fingerprint = verified_release_manifest(trust, cluster_id, deployment_commit)
+    return release_refs(release), fingerprint
 
 
 def current_release():

@@ -3,10 +3,14 @@
 import argparse
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import runpy
 import uuid
+
+import public_flamingo_window as windows
 
 
 API = "admissionregistration.k8s.io/v1"
@@ -107,7 +111,7 @@ def protected_inputs(obj, inventory):
     return " || ".join("(" + test + ")" for test in tests)
 
 
-def latest_start(expires_at, job):
+def latest_start(expires_at, job, window=None):
     end = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
     if end.tzinfo is None:
         raise ValueError("Expected an independently approved expiry with UTC offset")
@@ -115,7 +119,8 @@ def latest_start(expires_at, job):
     grace = job["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30)
     if type(deadline) is not int or not 0 < deadline <= 1800 or type(grace) is not int or not 0 <= grace < CLOSEOUT_SECONDS:
         raise ValueError("Job deadline or termination grace exceeds the fixed handoff budget")
-    latest = min(end.astimezone(timezone.utc), ALLOCATION_CUTOFF) - timedelta(seconds=deadline + CLOSEOUT_SECONDS)
+    cutoff = datetime.fromisoformat(window.cutoff.replace("Z", "+00:00")) if window else ALLOCATION_CUTOFF
+    latest = min(end.astimezone(timezone.utc), cutoff) - timedelta(seconds=deadline + CLOSEOUT_SECONDS)
     return latest.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
@@ -128,7 +133,22 @@ def same_metadata(field):
             f"(!has(object.metadata.{field}) || object.metadata.{field} == oldObject.metadata.{field})")
 
 
-def render_guard(run, phase, pins=None, job=None):
+def reviewed_window_job(window, run, phase):
+    here = Path(__file__).resolve().parent
+    stage = runpy.run_path(str(here / "render-public-flamingo-stage.py"))
+    stage_job = stage["stage_job"](run, "stage-" + run + "-inventory", "stage-" + run + "-program",
+                                   window.preflight_image, sha256(stage["WORKER"].read_bytes()).hexdigest(),
+                                   window.objects_sha256, window)
+    if phase == "stage":
+        return stage_job
+    owner = runpy.run_path(str(here / "prepare-public-flamingo-leaves.py"))
+    return owner["owner_job"](stage_job, owner["worker_source"]())
+
+
+def render_guard(run, phase, pins=None, job=None, window=None):
+    windows.validate_window_run(window, run)
+    windows.validate_window_pin(window, pins or {})
+
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", run) or phase not in {"stage", "owner", "closed"}:
         raise ValueError("Expected a valid run and guard phase")
     namespace_selector = {"matchLabels": {"kubernetes.io/metadata.name": NAMESPACE}}
@@ -147,6 +167,8 @@ def render_guard(run, phase, pins=None, job=None):
     if phase != "closed":
         if not job or not pins:
             raise ValueError("Active guard requires a reviewed Job and its enrolled UID")
+        if window and job != reviewed_window_job(window, run, phase):
+            raise ValueError("Job differs from the independently reproduced window and role")
         uid = str(uuid.UUID(pins["job_uid"]))
         job_name = f"stage-{run}" + ("-owner" if phase == "owner" else "")
         if ((job.get("apiVersion"), job.get("kind"), job["metadata"].get("namespace"), job["metadata"]["name"])
@@ -158,7 +180,7 @@ def render_guard(run, phase, pins=None, job=None):
         regional = {**labels, "topology.kubernetes.io/region": "eu-south1"}
         owner = {"apiVersion": "batch/v1", "kind": "Job", "controller": True, "blockOwnerDeletion": True,
                  "name": job_name, "uid": uid}
-        latest = latest_start(pins["expires_at"], job)
+        latest = latest_start(pins["expires_at"], job, window)
         checks = [
             "timestamp(dyn(object.metadata).creationTimestamp) < timestamp(" + cel(latest) + ")",
             f"object.metadata.generateName == {cel(job_name + '-')}",
@@ -169,6 +191,8 @@ def render_guard(run, phase, pins=None, job=None):
             f"has(object.metadata.finalizers) && object.metadata.finalizers == ['{TRACKING}']",
             "dyn(object.spec) == dyn(" + cel(expected_spec(job)) + ")",
         ]
+        if window:
+            checks.insert(0, "timestamp(dyn(object.metadata).creationTimestamp) >= timestamp(" + cel(window.start) + ")")
         rules.extend("request.operation != 'CREATE' || (" + check + ")" for check in checks)
 
     inventory = f"stage-{run}-inventory"
@@ -181,13 +205,20 @@ def render_guard(run, phase, pins=None, job=None):
                "spec": {"policyName": NAME, "validationActions": ["Deny"],
                         "matchResources": {"matchPolicy": "Exact", "namespaceSelector": namespace_selector,
                                            "objectSelector": {}}}}
+    if window:
+        policy["spec"]["auditAnnotations"] = [{"key": "stage-window", "valueExpression": cel(window.sha256)}]
     return policy, binding
 
 
-def verify_guard(get, run, phase, pins, job=None):
+def verify_guard(get, run, phase, pins, job=None, window=None):
     """Verify independently enrolled UIDs and generations plus every effective rule."""
-    reviewed = render_guard(run, phase, pins, job)
+    reviewed = render_guard(run, phase, pins, job, window)
     observed = {}
+    if window:
+        windows.verify_live_window(window)
+        window.validate_namespace(get("namespace", NAMESPACE))
+        window.validate_placement(get("node", window.cpu_node))
+        observed["window_sha256"] = window.sha256
     for role, expected in zip(("policy", "binding"), reviewed):
         kind = expected["kind"]
         actual = get(kind.lower(), NAME)
@@ -212,7 +243,9 @@ def verify_guard(get, run, phase, pins, job=None):
         live = get("job", name, "-n", NAMESPACE)
         if (live.get("apiVersion") != "batch/v1" or live.get("kind") != "Job"
                 or live["metadata"].get("namespace") != NAMESPACE or live["metadata"].get("name") != name
-                or live["metadata"].get("deletionTimestamp") or live["metadata"].get("uid") != pins["job_uid"]):
+                or live["metadata"].get("deletionTimestamp") or live["metadata"].get("uid") != pins["job_uid"]
+                or (window and live["metadata"].get("annotations", {}).get("airaware.training/stage-window-sha256")
+                    != window.sha256)):
             raise ValueError("Active guard does not identify the enrolled Job")
         observed.update(job_uid=pins["job_uid"], expires_at=pins["expires_at"])
     return observed
@@ -225,11 +258,16 @@ def main():
     parser.add_argument("--job", type=Path, help="Reviewed Job JSON for the active phase")
     parser.add_argument("--job-uid", help="Independently observed suspended Job UID")
     parser.add_argument("--expires-at", help="Independent UTC-offset storage-owner approval expiry")
+    windows.add_window_args(parser)
     args = parser.parse_args()
+    window = windows.load_window(args, args.run, live=False)
     if args.phase != "closed" and not (args.job_uid and args.job and args.expires_at):
         parser.error("Opening the guard requires --job, --job-uid and --expires-at")
     job = json.loads(args.job.read_bytes()) if args.job else None
-    items = render_guard(args.run, args.phase, {"job_uid": args.job_uid, "expires_at": args.expires_at} if args.job_uid else None, job)
+    pins = {"window_sha256": window.sha256} if window else {}
+    if args.job_uid:
+        pins.update(job_uid=args.job_uid, expires_at=args.expires_at)
+    items = render_guard(args.run, args.phase, pins, job, window)
     print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}, indent=2))
 
 
