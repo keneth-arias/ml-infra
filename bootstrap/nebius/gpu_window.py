@@ -352,12 +352,16 @@ def terminal_complete(record, backbone):
     return True
 
 
+def fenced_selected(entry):
+    return (entry["purpose"] == "selected" and entry.get("writer_fenced") is True
+            and sha(entry.get("closeout_sha256")))
+
+
 def check_progress_sources(ledger, backbone, *, allow_legacy=False):
     selected = {
         (e["attempt_id"], str(e["request"]["seed"]), e["request"]["arm"]): e["request"]["pair"]
         for e in ledger.get("fit_attempts", [])
-        if e["purpose"] == "selected" and backbone_of(e["request"]) == backbone
-        and e.get("writer_fenced") is True and re.fullmatch("[0-9a-f]{64}", e.get("closeout_sha256") or "")
+        if fenced_selected(e) and backbone_of(e["request"]) == backbone
     }
     for seed, arms in fit_records(ledger, backbone).get("fit_progress", {}).items():
         for arm, record in arms.items():
@@ -371,6 +375,51 @@ def check_progress_sources(ledger, backbone, *, allow_legacy=False):
                     raise ValueError("Selection comparison differs from the funded baselines")
 
 
+def flamingo_training_complete(ledger, seed, arm, record):
+    if record["terminal"] is not True or record["step"] != record["evaluated_through"]:
+        return False
+    attempts = [e for e in ledger.get("fit_attempts", []) if fenced_selected(e)]
+    source = next((e for e in attempts if e["attempt_id"] == record.get("attempt_id")), None)
+    if source is None:
+        return False
+    request = source["request"]
+    pair = request["pair"]
+    if ((request["seed"], request["arm"], request["ceiling"]) != (seed, arm, EPOCH)
+            or backbone_of(request) != "flamingo"):
+        return False
+    expected = {
+        "backbone": "flamingo", "logical_run": request["run"], "seed": seed, "schedule": EPOCH,
+        "head": "direct", "direct_objective": {"control": "normalized-mse", "candidate": "physical-mae"}[arm],
+        "input_manifest_sha256": pair["fit"], "validation_manifest_sha256": pair["validation"],
+        "weights": pair["weights"], "binding_sha256": pair["flamingo_binding"],
+    }
+    step, checkpoint = record["step"], record["checkpoint_sha256"]
+    for entry in attempts:
+        proof = entry.get("flamingo_training_stop")
+        if not isinstance(proof, dict):
+            continue
+        if any(entry["request"][k] != request[k] for k in ("run", "seed", "arm", "ceiling", "pair")):
+            continue
+        # A later closeout can retain an earlier proof when it resumed that exact generation.
+        if entry is not source and (request.get("resume") is not True
+                                    or request.get("checkpoint") != f"{step}:{checkpoint}"):
+            continue
+        proof_pin = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
+        identity = proof.get("identity")
+        best = proof.get("best_step")
+        if (proof_pin == entry.get("flamingo_training_stop_sha256")
+                and isinstance(identity, dict) and sha(identity.get("recipe_sha256"))
+                and identity == expected | {"recipe_sha256": identity["recipe_sha256"]}
+                and step > 0 and proof.get("step") == step
+                and proof.get("outcome") == ("completed" if step == EPOCH else "early-stopped")
+                and type(best) is int and best in EVALUATIONS and 0 < best <= step
+                and sha(proof.get("selected_manifest_sha256"))
+                and proof.get("latest_manifest_sha256") == checkpoint
+                and proof.get("receipt_sha256") == record["export_sha256"]):
+            return True
+    return False
+
+
 def timed_checkpoint_limit(updates, interval, seconds):
     if not interval:
         return updates
@@ -379,7 +428,7 @@ def timed_checkpoint_limit(updates, interval, seconds):
 
 def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_preflight=False,
                    job_deadline_seconds=None):
-    """Price two ceiling-length arms; only the operator's verified ledger can credit work."""
+    """Price both arms up to their ceiling using verified ledger progress."""
     seed = measurements["seed"]
     if seed not in (27, 28) or not re.fullmatch(
         "[0-9a-f]{64}", measurements["measurement_sha256"]
@@ -419,6 +468,7 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
     save_retries = 0
     for arm in ("control", "candidate"):
         step, evaluated = 0, -1
+        training_complete = False
         if arm in progress:
             record = progress[arm]
             if (
@@ -432,12 +482,13 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600, after_pref
                 raise ValueError("Invalid completed evaluation step")
             if terminal_complete(record, backbone):
                 continue
-        remaining = EPOCH - step
-        checks = sum(e > evaluated for e in EVALUATIONS)
+            training_complete = flamingo and flamingo_training_complete(ledger, seed, arm, record)
+        remaining = 0 if training_complete else EPOCH - step
+        checks = 0 if training_complete else sum(e > evaluated for e in EVALUATIONS)
         updates += remaining
         evaluations += checks
         # Price each periodic and best checkpoint and the final publication.
-        scheduled_saves = sum(e > step for e in EVALUATIONS) if flamingo else checks + 1
+        scheduled_saves = sum(step < e <= step + remaining for e in EVALUATIONS) if flamingo else checks + 1
         saves += scheduled_saves
         if flamingo:
             # A single, uninterrupted Job must fit its own deadline. Replacement
