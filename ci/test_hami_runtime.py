@@ -74,6 +74,18 @@ class HamiRuntimeTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
                     self.assertIn(error, result.stderr)
 
+    def test_helm_target_overrides_fail_before_cluster_access(self):
+        for key in ("HELM_KUBEAPISERVER", "HELM_KUBECAFILE", "HELM_KUBETOKEN",
+                    "HELM_KUBEINSECURE_SKIP_TLS_VERIFY", "HELM_KUBETLS_SERVER_NAME",
+                    "HELM_KUBEASUSER", "HELM_KUBEASGROUPS", "HELM_KUBECONTEXT"):
+            with self.subTest(key=key):
+                env = {"PATH": os.environ["PATH"], key: "private-test-value"}
+                result = subprocess.run([str(RUNTIME / "manage"), "install", "/unused"],
+                                        env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Unset " + key, result.stderr)
+                self.assertNotIn("private-test-value", result.stderr)
+
     def test_verifier_requires_the_marker_from_the_scoped_validator(self):
         node = "computeinstance-test"
         cpu = "computeinstance-cpu"
@@ -188,12 +200,14 @@ class HamiRuntimeTests(unittest.TestCase):
         objects = [obj for obj in yaml.safe_load_all(manifests) if obj]
         drivers = [obj["spec"] for obj in objects if obj["kind"] == "NVIDIADriver"]
         self.assertEqual(len(drivers), 1)
+        self.assertFalse(drivers[0]["gdrcopy"]["enabled"])
         self.assertEqual(drivers[0]["nodeSelector"][MODE], "hami")
         self.assertEqual(drivers[0]["nodeSelector"][POOL], "training-hami")
         policy = next(obj["spec"] for obj in objects if obj["kind"] == "ClusterPolicy")
         self.assertFalse(policy["devicePlugin"]["enabled"])
         self.assertTrue(policy["toolkit"]["enabled"])
         self.assertFalse(policy["cdi"]["enabled"])
+        self.assertFalse(policy["gdrcopy"]["enabled"])
         worker = next(obj for obj in objects if obj["kind"] == "DaemonSet")
         self.assertEqual(worker["spec"]["template"]["spec"]["nodeSelector"][MODE], "hami")
         self.assertEqual(worker["spec"]["template"]["spec"]["nodeSelector"][POOL], "training-hami")

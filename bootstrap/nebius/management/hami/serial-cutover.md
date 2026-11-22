@@ -14,7 +14,7 @@ The Baseline scheduler remains in `hami-system`. The upstream device plugin need
 
 ## Prepare and qualify the managed worker
 
-Use the serial allocation guard for a new `gpu_mode=hami` support and spot GPU window. Both cleanup schedulers stay armed. Match the worker's Nebius group and instance to the allocation receipt, the Kubernetes providerID and node UID. The group must omit the Nebius managed GPU preset. Verify Ready state, the `training-hami` pool label, the dedicated NoSchedule taint, zero native GPU capacity and absence of a native NVIDIA device registrar, including mirror Pods. An unexpected static registrar stops the handoff.
+Use the [serial allocation guard](../README.md#allocate-an-exclusive-hami-worker) for a new `gpu_mode=hami` support and spot GPU window. Both cleanup schedulers stay armed. Match the worker's Nebius group and instance to the allocation receipt, the Kubernetes providerID and node UID. The group must omit the Nebius managed GPU preset. Verify Ready state, the `training-hami` pool label, the dedicated NoSchedule taint, zero native GPU capacity and absence of a native NVIDIA device registrar, including mirror Pods. An unexpected static registrar stops the handoff.
 
 The operator applies the protected bootstrap label on the verified node. Supply the provider instance and node UID from independent evidence and review the patch first. Re-read the node and reconstruct the patch after any resourceVersion conflict; a changed providerID or UID requires a new qualification. The protected label binds runtime components to this worker. At this point the two legacy activation labels must still be absent.
 

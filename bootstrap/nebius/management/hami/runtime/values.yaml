@@ -29,6 +29,8 @@ devicePlugin:
 cdi:
   enabled: false
   nriPluginEnabled: false
+gdrcopy:
+  enabled: false
 gfd:
   enabled: false
 dcgm:

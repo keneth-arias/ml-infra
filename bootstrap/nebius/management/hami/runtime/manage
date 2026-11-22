@@ -8,6 +8,9 @@ if [[ $# != 1 && $# != 2 ]] || [[ ${1:-} != verify && ${1:-} != install ]] ||
 fi
 
 fail() { echo "$*" >&2; exit 1; }
+for override in "${!HELM_KUBE@}"; do
+    fail "Unset $override before using the managed runtime installer."
+done
 : "${OPERATOR_CONFIG:?}" "${OPERATOR_CONTEXT:?}" "${NEBIUS_OPERATOR_IDENTITY:?}"
 : "${NEBIUS_TRAINING_CLUSTER_ID:?}" "${NEBIUS_CA_BUNDLE_SHA256:?}" "${NEBIUS_API_ENDPOINT:?}" "${HAMI_INSTANCE_ID:?}"
 [[ $HAMI_INSTANCE_ID =~ ^computeinstance-[a-z0-9]+$ ]] || fail "Invalid Nebius instance ID."
