@@ -295,6 +295,33 @@ def whole(value, low, high):
     return value
 
 
+def backbone_of(request):
+    return "flamingo" if "flamingo_binding" in request["pair"] else "qwen"
+
+
+def fit_records(ledger, backbone):
+    if backbone == "qwen":
+        return ledger
+    if backbone == "flamingo":
+        return ledger.get("flamingo", {})
+    raise ValueError("Unknown fit backbone")
+
+
+def check_progress_sources(ledger, backbone, *, allow_legacy=False):
+    selected = {
+        (e["attempt_id"], str(e["request"]["seed"]), e["request"]["arm"])
+        for e in ledger.get("fit_attempts", [])
+        if e["purpose"] == "selected" and backbone_of(e["request"]) == backbone
+        and e.get("writer_fenced") is True and re.fullmatch("[0-9a-f]{64}", e.get("closeout_sha256") or "")
+    }
+    for seed, arms in fit_records(ledger, backbone).get("fit_progress", {}).items():
+        for arm, record in arms.items():
+            if allow_legacy and "attempt_id" not in record:
+                continue
+            if (record.get("attempt_id"), seed, arm) not in selected:
+                raise ValueError("Progress has no matching reconciled attempt")
+
+
 def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
     """Price two ceiling-length arms; only the operator's verified ledger can credit work."""
     seed = measurements["seed"]
@@ -320,7 +347,8 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         if min(samples) <= 0:
             raise ValueError(f"Expected measured positive {key}")
         timing[key] = max(samples)
-    progress = ledger.get("fit_progress", {}).get(str(seed), {})
+    backbone = measurements.get("backbone", "qwen")
+    progress = fit_records(ledger, backbone).get("fit_progress", {}).get(str(seed), {})
     if progress.keys() - {"control", "candidate"}:
         raise ValueError("Unexpected fit arm in the approved ledger")
     updates = evaluations = saves = starts = exports = 0
@@ -398,6 +426,7 @@ def fit_projection(measurements, ledger, *, window_seconds=99 * 3600):
         raise ValueError("Post-release work exceeds its funded ledger line")
     return {
         "seed": seed,
+        "backbone": backbone,
         "updates": updates,
         "timed_checkpoint_upper_bound": timed_saves,
         "save_interval_seconds": interval,

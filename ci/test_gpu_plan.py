@@ -501,6 +501,36 @@ class ProjectionCommandTest(unittest.TestCase):
                 self.assertIn("dollar_limit_hours", data["bounds"])
                 self.assertEqual(data["fit"]["updates"], 28168)
 
+            # A standalone projection selects its pair from the measured backbone.
+            progress = {"27": {"candidate": dict(step=500, evaluated_through=500,
+                                                checkpoint_sha256="a" * 64, terminal=False)}}
+            raw = json.dumps(dict(ledger(), observed_at=utc(now), fit_progress=progress)).encode()
+            (root / "ledger.json").write_bytes(raw)
+            (root / "scope.json").write_text(json.dumps(dict(inputs, ledger_sha256=hashlib.sha256(raw).hexdigest())))
+            for backbone, updates in (("flamingo", 28168), ("qwen", 27668)):
+                observations.write_text(json.dumps(dict(timings(), backbone=backbone)))
+                receipt = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(receipt.returncode, 0, receipt.stderr)
+                fit = json.loads(receipt.stdout)["fit"]
+                self.assertEqual((fit["backbone"], fit["updates"]), (backbone, updates))
+            observations.write_text(json.dumps(dict(timings(), backbone="flamingo")))
+            candidate = progress["27"]["candidate"]
+            candidate["attempt_id"] = "paired-selected-27-candidate-1"
+            mixed = dict(json.loads(raw), flamingo={"fit_progress": progress},
+                         fit_attempts=[dict(attempt_id=candidate["attempt_id"], purpose="selected",
+                                            request=dict(seed=27, arm="candidate", pair={}),
+                                            writer_fenced=True, closeout_sha256="b" * 64)])
+            raw = json.dumps(mixed).encode()
+            (root / "ledger.json").write_bytes(raw)
+            (root / "scope.json").write_text(json.dumps(dict(inputs, ledger_sha256=hashlib.sha256(raw).hexdigest())))
+            receipt = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(receipt.returncode, 1)
+            self.assertIn("matching reconciled", receipt.stderr)
+            observations.write_text(json.dumps(dict(timings(), backbone="unknown")))
+            receipt = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(receipt.returncode, 1)
+            self.assertIn("Unknown fit backbone", receipt.stderr)
+
             for bad_scope in (
                 {k: v for k, v in inputs.items() if k != "control_bucket"},
                 dict(inputs, control_bucket=inputs["state_bucket"]),
