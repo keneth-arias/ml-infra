@@ -11,6 +11,7 @@ import sys
 
 from private_api import pinned_kubeconfig_ca
 import public_flamingo_stage_guard as guard
+import public_flamingo_window as windows
 
 
 HERE = Path(__file__).resolve().parent
@@ -19,13 +20,15 @@ NS = "training"
 PIN_KEYS = {"policy_uid", "binding_uid", "policy_generation", "binding_generation"}
 
 
-def observe(run, pins, operator, get, list_pods, secret_absent):
-    if set(pins) != PIN_KEYS:
+def observe(run, pins, operator, get, list_pods, secret_absent, window=None):
+    windows.validate_window_run(window, run)
+    windows.validate_window_pin(window, pins)
+    if set(pins) != (PIN_KEYS | {"window_sha256"} if window else PIN_KEYS):
         raise ValueError("Expected the four independently enrolled closed guard pins")
     secret = "stage-" + run + "-inventory"
 
     def closed():
-        if guard.verify_guard(get, run, "closed", pins) != pins:
+        if guard.verify_guard(get, run, "closed", pins, window=window) != pins:
             raise ValueError("Closed guard identity or generation differs from approval")
 
     closed()
@@ -44,7 +47,8 @@ def observe(run, pins, operator, get, list_pods, secret_absent):
     if not secret_absent(secret):
         raise ValueError("Inventory Secret appeared during the consumer check")
     closed()
-    return {"schema": "public-flamingo-consumer-check-v1", "cluster_id": CLUSTER, "run": run,
+    return {**({"window_sha256": window.sha256} if window else {}),
+            "schema": "public-flamingo-consumer-check-v1", "cluster_id": CLUSTER, "run": run,
             "storage_operator": operator, "inventory_secret": secret, "closed_guard": pins,
             "observed_at": datetime.now(timezone.utc).isoformat(), "no_live_consumers": True,
             "secret_absent": True}
@@ -55,7 +59,9 @@ def main():
     parser.add_argument("--run", required=True)
     parser.add_argument("--closed-pins", type=Path, required=True)
     parser.add_argument("--closed-pins-sha256", required=True)
+    windows.add_window_args(parser)
     a = parser.parse_args()
+    window = windows.load_window(a, a.run, live=True)
     closeout = runpy.run_path(str(HERE / "public-flamingo-stage-closeout.py"))
     pins = closeout["pinned_file"](a.closed_pins, a.closed_pins_sha256)
     profile = Path(os.environ["NEBIUS_STORAGE_KUBECONFIG"])
@@ -78,7 +84,7 @@ def main():
     def secret_absent(name):
         # A 403 or transport error exits nonzero. A successful 404 suppression alone is empty.
         return not read("get", "secret", name, "-n", NS, "--ignore-not-found", "-o", "name").strip()
-    print(json.dumps(observe(a.run, pins, operator, get, list_pods, secret_absent), sort_keys=True))
+    print(json.dumps(observe(a.run, pins, operator, get, list_pods, secret_absent, window), sort_keys=True))
 
 
 if __name__ == "__main__":

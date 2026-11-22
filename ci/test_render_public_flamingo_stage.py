@@ -7,6 +7,7 @@ import runpy
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -68,7 +69,7 @@ class PublicStageRenderTests(unittest.TestCase):
         self.assertEqual(spec["tolerations"], [
             {"key": "node.kubernetes.io/" + state, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}
             for state in ("not-ready", "unreachable")])
-        self.assertEqual(spec["nodeSelector"]["airaware.training/pool"], "training-cpu")
+        self.assertEqual(spec["nodeSelector"], {"airaware.training/pool": "training-cpu"})
         mounts = {m["mountPath"]: m for m in stage["volumeMounts"]}
         self.assertEqual(set(mounts), {"/base", "/output", "/source", "/program"})
         self.assertEqual(mounts["/base"]["subPath"], "airaware/cache/weights/" + render["WEIGHTS"])
@@ -79,6 +80,38 @@ class PublicStageRenderTests(unittest.TestCase):
         self.assertEqual(objects, [dict(self.rows[0], name="weights/config.json")])
         for item in ("configmap", "job"):
             self.assertEqual(packet[item + "_sha256"], sha256(canonical(packet[item])).hexdigest())
+
+    def test_successor_selects_signed_target_and_refuses_substituted_objects(self):
+        digest = "8" * 64
+        run = "fsw-" + digest[:32]
+        objects = render["public_objects"](self.promotion)
+        window = SimpleNamespace(sha256=digest, run=run, deployment_commit="e" * 40,
+                                 deployment_sha256=self.deploy, cluster_id=render["CLUSTER"],
+                                 project_id="project-test", cpu_node="computeinstance-next",
+                                 cpu_provider_id="nebius://computeinstance-next", cpu_node_uid="next-uid",
+                                 preflight_image="signed-preflight", preflight_platform_image="platform-image",
+                                 scope_sha256="9" * 64, binding_sha256=sha256(self.binding.read_bytes()).hexdigest(),
+                                 promotion_sha256=sha256(self.promotion.read_bytes()).hexdigest(),
+                                 objects_sha256=sha256(objects).hexdigest(), weights_manifest_sha256=render["WEIGHTS"])
+        def packet(w):
+            return build(self.promotion, self.binding, self.deploy, run, "stage-" + run + "-inventory", w)
+
+        result = packet(window)
+        self.assertEqual(result["window_sha256"], digest)
+        self.assertEqual(result["scope_sha256"], window.scope_sha256)
+        self.assertEqual(result["preflight_linux_amd64"], window.preflight_platform_image)
+        self.assertEqual(result["placement"]["provider_id"], window.cpu_provider_id)
+        self.assertIn(window.cpu_node, json.dumps(result["job"]["spec"]["template"]["spec"]["affinity"]))
+        self.assertEqual(result["job"]["spec"]["template"]["spec"]["nodeSelector"],
+                         {"airaware.training/pool": "training-cpu",
+                          "airaware.training.node-restriction.kubernetes.io/" + run: window.cpu_node_uid})
+        self.assertEqual(result["job"]["metadata"]["annotations"], result["configmap"]["metadata"]["annotations"])
+        self.assertIn(digest, result["job"]["metadata"]["annotations"].values())
+        with self.assertRaises(ValueError):
+            packet(None)
+        for field in ("preflight_image", "project_id", "objects_sha256", "promotion_sha256", "weights_manifest_sha256"):
+            with self.subTest(field=field), patch.object(window, field, "different"), self.assertRaises(ValueError):
+                packet(window)
 
     def test_fails_closed_for_drifted_files_deployment_run_or_secret(self):
         for target in (self.promotion, self.binding):

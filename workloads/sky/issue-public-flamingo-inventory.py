@@ -21,6 +21,7 @@ from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
 from public_flamingo_stage_guard import verify_guard
+import public_flamingo_window as windows
 from public_flamingo_stage_worker import HOST, NoRedirect, validate_query
 
 
@@ -51,7 +52,9 @@ def timestamp(value):
     return dt
 
 
-def check_grant(grant, credential, packet, approval):
+def check_grant(grant, credential, packet, approval, window=None):
+    windows.validate_window_pin(window, approval)
+    windows.validate_window_pin(window, grant)
     # Sign directly with these bytes. Never resolve a boto profile, role or instance credential.
     ambient = {"AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
                "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
@@ -64,8 +67,11 @@ def check_grant(grant, credential, packet, approval):
         isinstance(value, str) and value.strip() for value in credential.values()
     ):
         raise ValueError("Expected explicit reader credentials")
-    if (set(grant) != {"schema", "principal", "access_key_id_sha256", "project_id", "objects_sha256",
-                       "permissions", "exact_versions_only", "expires_at"}
+    grant_fields = {"schema", "principal", "access_key_id_sha256", "project_id", "objects_sha256",
+                    "permissions", "exact_versions_only", "expires_at"}
+    if window:
+        grant_fields.add("window_sha256")
+    if (set(grant) != grant_fields
             or grant["schema"] != "public-flamingo-version-reader-grant-v1"
             or not re.fullmatch(r"serviceaccount-[a-z0-9]+", grant["principal"])
             or grant["access_key_id_sha256"] != sha256(credential["access_key_id"].encode()).hexdigest()
@@ -140,10 +146,12 @@ print(json.dumps(kubectl_client_for_identity("training", sys.argv[2], direct=Tru
     return [KUBECTL, *argv[1:]]
 
 
-def create_secret(kube, name, inventory):
+def create_secret(kube, name, inventory, window=None):
     secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "immutable": True,
               "metadata": {"namespace": "training", "name": name},
               "stringData": {"inventory.json": json.dumps({"base": inventory}, separators=(",", ":"))}}
+    if window:
+        secret["metadata"]["annotations"] = {"airaware.training/stage-window-sha256": window.sha256}
     try:
         result = subprocess.run([*kube, "--request-timeout=30s", "create", "-f", "-", "-o",
                                  'jsonpath={.metadata.uid}{" "}{.metadata.resourceVersion}'],
@@ -151,7 +159,10 @@ def create_secret(kube, name, inventory):
         if result.returncode == 0:
             uid, version = result.stdout.strip().split()
             if str(UUID(uid)) == uid and version:
-                return {"namespace": "training", "name": name, "uid": uid, "resourceVersion": version}
+                receipt = {"namespace": "training", "name": name, "uid": uid, "resourceVersion": version}
+                if window:
+                    receipt["window_sha256"] = window.sha256
+                return receipt
     except (ValueError, subprocess.TimeoutExpired, OSError):
         pass
     raise RuntimeError(f"Secret creation unconfirmed; inspect training/{name} by identity before any retry")
@@ -162,23 +173,27 @@ def main():
     for key in ("packet", "promotion", "binding", "scope", "approval", "reader-grant", "reader-credentials", "consumer-check"):
         p.add_argument("--" + key, type=Path, required=True)
     p.add_argument("--approved-sha256", required=True)
+    windows.add_window_args(p)
     args = p.parse_args()
     approval = read_private(args.approval, args.approved_sha256)
+    window = windows.load_window(args, approval["run"], live=True)
+    windows.validate_window_pin(window, approval)
     if approval["purpose"] != "issue-public-flamingo-inventory":
         raise ValueError("Expected independent source-owner approval")
     packet = RENDER(args.promotion, args.binding, approval["deployment_sha256"], approval["run"],
-                    approval["inventory_secret"])
+                    approval["inventory_secret"], window)
     if packet != read_private(args.packet, approval["packet_file_sha256"]):
         raise ValueError("Source-owner approval differs from the reproduced packet")
-    scope = read_private(args.scope, SCOPE_SHA)
+    scope = read_private(args.scope, window.scope_sha256 if window else SCOPE_SHA)
     if (scope["cluster_id"], scope["project_id"]) != (packet["cluster_id"], packet["project_id"]):
         raise ValueError("Original allocation differs from the reviewed target")
     grant = read_private(args.reader_grant, approval["reader_grant_sha256"])
     credentials = read_private(args.reader_credentials)
-    check_grant(grant, credentials, packet, approval)
+    check_grant(grant, credentials, packet, approval, window)
     ends = min(timestamp(date) for date in (scope["cutoff"], approval["expires_at"], grant["expires_at"]))
     kube = source_client(approval, packet["cluster_id"])
     observation = read_private(args.consumer_check, approval["consumer_check_sha256"])
+    windows.validate_window_pin(window, observation)
     observed_at = timestamp(observation["observed_at"])
     if (observation["schema"] != "public-flamingo-consumer-check-v1"
             or observation["cluster_id"] != packet["cluster_id"] or observation["run"] != packet["run"]
@@ -186,6 +201,7 @@ def main():
             or observation["inventory_secret"] != packet["inventory_secret"]
             or observation["closed_guard"] != approval["closed_guard"]
             or observation["no_live_consumers"] is not True or observation["secret_absent"] is not True
+            or (window and observed_at < timestamp(window.start))
             or observed_at > datetime.now(timezone.utc) or observed_at >= ends):
         raise ValueError("Expected the storage owner's clean pre-issuance inventory in this closed generation")
 
@@ -193,7 +209,7 @@ def main():
         def get(kind, name):
             return json.loads(subprocess.check_output([*kube, "--request-timeout=10s", "get", kind, name, "-o", "json"],
                                                        stderr=subprocess.DEVNULL, timeout=15))
-        verify_guard(get, packet["run"], "closed", approval["closed_guard"])
+        verify_guard(get, packet["run"], "closed", approval["closed_guard"], window=window)
 
     check_consumer_fence()
     objects = json.loads(packet["configmap"]["data"]["objects.json"])
@@ -203,7 +219,7 @@ def main():
         query = {k: v[0] for k, v in parse_qs(urlsplit(row["url"]).query).items()}
         validate_query(query, row["version_id"])
     check_consumer_fence()
-    print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory), sort_keys=True))
+    print(json.dumps(create_secret(kube, packet["inventory_secret"], inventory, window), sort_keys=True))
 
 
 if __name__ == "__main__":

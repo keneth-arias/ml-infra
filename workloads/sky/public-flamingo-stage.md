@@ -212,3 +212,5 @@ test -z "$remaining"
 ```
 
 After retirement, verify the installed native hold and its Deny binding against `native-activation.py` (`held_policy_and_binding` and `check_active`), recheck both attachment layers with `training-storage-handoff.py`, and retain readbacks under the successor handoff. Use server dry-runs for the successor operator's exact baseline render and the denied ordinary submitter request. The accepted stage receipt records the completed, fenced writer. The retirement record identifies which owner now prevents another writer. A later baseline launch must recheck current writer custody, funding, placement, disk identity and its own admission grant.
+
+For a separately approved allocation on the retained disk, use the [successor window procedure](public-flamingo-successor.md).

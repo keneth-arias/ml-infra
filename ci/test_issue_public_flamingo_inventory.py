@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit, parse_qs
 
@@ -53,6 +54,18 @@ class PublicInventoryTests(unittest.TestCase):
             os.environ["AWS_PROFILE"] = "admin"
             with self.assertRaises(ValueError):
                 check(self.grant, self.key, self.packet, self.approval)
+
+    def test_source_custodian_and_approval_must_bind_same_successor(self):
+        sha = "3"*64
+        w = SimpleNamespace(sha256=sha)
+        grant, approval = dict(self.grant, window_sha256=sha), dict(self.approval, window_sha256=sha)
+        with patch.dict(os.environ, {}, clear=True):
+            check = issuer["check_grant"]
+            check(grant, self.key, self.packet, approval, w)
+            for g, a, window in [(self.grant, approval, w), (grant, self.approval, w),
+                                 (dict(grant, window_sha256="x"), approval, w), (grant, approval, None)]:
+                with self.assertRaises(ValueError):
+                    check(g, self.key, self.packet, a, window)
 
     def test_versioned_gets_match_worker_and_expiry(self):
         row = {"bucket": "airaware-artifacts-test", "key": "model/base/a.json", "name": "a.json",

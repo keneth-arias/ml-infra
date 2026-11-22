@@ -26,7 +26,8 @@ PLATFORM_IMAGE = ("ghcr.io/keneth-arias/ml-infra-qwen@"
 
 
 def expected_image_id(image_id, packet):
-    return image_id.removeprefix("docker-pullable://") in (packet["image"], PLATFORM_IMAGE)
+    platform_image = packet["preflight_linux_amd64"] if "window_sha256" in packet else PLATFORM_IMAGE
+    return image_id.removeprefix("docker-pullable://") in (packet["image"], platform_image)
 
 
 
@@ -105,7 +106,8 @@ def verify_job(packet, job, suspended=False):
     for key, value in generated.items():
         if job_labels.get(key) == value:
             del job_labels[key]
-    if job_labels != packet["job"]["metadata"]["labels"] or job["metadata"].get("annotations"):
+    if (job_labels != packet["job"]["metadata"]["labels"]
+            or job["metadata"].get("annotations", {}) != packet["job"]["metadata"].get("annotations", {})):
         raise ValueError("Admitted Job labels or annotations differ from review")
     if suspended and spec.pop("suspend", None) is not True:
         raise ValueError("Expected a suspended enrollment")
@@ -128,7 +130,8 @@ def verify_specs(packet, job, pod):
     pod_labels = dict(pod["metadata"]["labels"])
     if pod_labels.get("topology.kubernetes.io/region") == "eu-south1":
         del pod_labels["topology.kubernetes.io/region"]
-    if pod_labels != labels or pod["metadata"].get("annotations"):
+    template_meta = packet["job"]["spec"]["template"]["metadata"]
+    if pod_labels != labels or pod["metadata"].get("annotations", {}) != template_meta.get("annotations", {}):
         raise ValueError("Executed Pod labels or annotations differ from review")
     wanted = packet["job"]["spec"]["template"]["spec"]
     observed = deepcopy(pod["spec"])
@@ -170,6 +173,9 @@ def timestamp(value):
 
 
 def check_closure(closure, approval, stage_sha, packet_sha, capture_sha, scope, identity):
+    if (("window_sha256" in approval) != ("window_sha256" in closure)
+            or closure.get("window_sha256") != approval.get("window_sha256")):
+        raise ValueError("Fence approval and activation reference different windows")
     if (closure["purpose"] != "public-flamingo-stage-fence" or closure["stage_approval_sha256"] != stage_sha
             or closure["capture_sha256"] != capture_sha or closure["packet_sha256"] != packet_sha
             or closure["storage_operator"] != identity or approval["storage_operator"] != identity
@@ -183,6 +189,10 @@ def check_closure(closure, approval, stage_sha, packet_sha, capture_sha, scope, 
     original = approval["stage_guard"]
     closed = closure["closed_guard"]
     expected = {key: original[key] for key in ("policy_uid", "binding_uid", "binding_generation")}
+    if "window_sha256" in approval:
+        if original.get("window_sha256") != approval["window_sha256"]:
+            raise ValueError("Captured stage guard differs from its approved window")
+        expected["window_sha256"] = approval["window_sha256"]
     if (type(original["policy_generation"]) is not int or type(closed["policy_generation"]) is not int
             or type(closed["binding_generation"]) is not int
             or closed != {**expected, "policy_generation": original["policy_generation"] + 1}):
@@ -206,11 +216,13 @@ def capture(packet, ids, get, logs, secret_meta, stage_guard, approval_sha):
     cm_name = packet["configmap"]["metadata"]["name"]
     cm = get("configmap", cm_name, "-n", NS)
     checked_meta(cm, cm_name, ids["configmap"])
-    if cm.get("immutable") is not True or cm.get("binaryData") or cm["data"] != packet["configmap"]["data"]:
+    if (cm.get("immutable") is not True or cm.get("binaryData") or cm["data"] != packet["configmap"]["data"]
+            or ("window_sha256" in packet and cm["metadata"].get("annotations") != packet["configmap"]["metadata"]["annotations"])):
         raise ValueError("Immutable stage program differs from review")
     secret = secret_meta(job_name + "-inventory")
     checked_meta(secret, job_name + "-inventory", ids["inventory"])
-    if secret.get("immutable") is not True or secret.get("type") != "Opaque" or secret["keys"] != ["inventory.json"]:
+    if (secret.get("immutable") is not True or secret.get("type") != "Opaque" or secret["keys"] != ["inventory.json"]
+            or ("window_sha256" in packet and secret.get("window_sha256") != packet["window_sha256"])):
         raise ValueError("Expected the enrolled immutable source inventory")
     children = []
     for pod in inventory(get("pods", "-n", NS)):
@@ -253,7 +265,8 @@ def capture(packet, ids, get, logs, secret_meta, stage_guard, approval_sha):
     checked_meta(get("pod", pm["name"], "-n", NS), pm["name"], pm["uid"])
     checked_meta(get("job", job_name, "-n", NS), job_name, ids["job"])
     exclude_other_writers(get, ids["job"])
-    return {"schema": "public-flamingo-stage-capture-v1", "cluster_id": packet["cluster_id"],
+    window_ref = {"window_sha256": packet["window_sha256"]} if "window_sha256" in packet else {}
+    return {**window_ref, "schema": "public-flamingo-stage-capture-v1", "cluster_id": packet["cluster_id"],
             "packet_sha256": digest(packet), "run": packet["run"], "uids": {**ids, "pod": pm["uid"]},
             "stage_approval_sha256": approval_sha, "guard_before": initial_guard, "guard_after": stage_guard(),
             "pod_name": pm["name"], "job_name": job_name, "configmap_name": cm_name,
@@ -264,6 +277,11 @@ def capture(packet, ids, get, logs, secret_meta, stage_guard, approval_sha):
 
 def fence(packet, ids, observation, get, absent, detached, closed_guard, evidence):
     initial_guard = closed_guard()
+    window_ref = {"window_sha256": packet["window_sha256"]} if "window_sha256" in packet else {}
+    for record in (observation, evidence):
+        if (("window_sha256" in record) != bool(window_ref)
+                or record.get("window_sha256") != window_ref.get("window_sha256")):
+            raise ValueError("Fencing evidence differs from the packet's authorized window")
     if (observation["stage_approval_sha256"] != evidence["stage_approval_sha256"]
             or digest(observation["guard_before"]) != digest(evidence["stage_guard"])
             or digest(observation["guard_after"]) != digest(evidence["stage_guard"])):
@@ -286,14 +304,16 @@ def fence(packet, ids, observation, get, absent, detached, closed_guard, evidenc
     exclude_other_writers(get)
     if not detached():
         raise ValueError("Training disk attachment or consumer remains")
-    return {"cluster_id": packet["cluster_id"], "run": packet["run"], "disk_id": packet["binding"]["provider_disk_id"],
+    return {**window_ref, "cluster_id": packet["cluster_id"], "run": packet["run"], "disk_id": packet["binding"]["provider_disk_id"],
             "output_subpath": "flamingo-baselines/" + packet["run"], **worker_facts(packet), "writer_fenced": True,
             "fence_evidence": {**evidence, "guard_before": initial_guard, "guard_after": closed_guard(),
                                "observed_at": datetime.now(timezone.utc).isoformat()}}
 
 
 def main():
+    from public_flamingo_window import add_window_args, load_window, validate_window_pin
     parser = argparse.ArgumentParser(description=__doc__)
+    add_window_args(parser)
     parser.add_argument("action", choices=("capture", "fence"))
     for opt in ("promotion", "binding", "scope", "packet", "approval"):
         parser.add_argument("--" + opt, type=Path, required=True)
@@ -308,13 +328,16 @@ def main():
     if any(bool(arg) != (a.action == "fence") for arg in (a.capture, a.capture_sha256, a.closure, a.closure_sha256)):
         parser.error("Pass the capture and closure files and their approved byte hashes for fence")
     render = runpy.run_path(str(HERE / "render-public-flamingo-stage.py"))
-    packet = render["build_packet"](a.promotion, a.binding, a.expected_deployment, a.run, "stage-" + a.run + "-inventory")
+    window = load_window(a, a.run, live=True)
+    packet = render["build_packet"](a.promotion, a.binding, a.expected_deployment, a.run,
+                                    "stage-" + a.run + "-inventory", window=window)
     cluster = os.environ["NEBIUS_TRAINING_CLUSTER_ID"]
     if digest(packet) != a.packet_sha256 or packet["cluster_id"] != cluster:
         raise ValueError("Packet or enrolled cluster differs from approval")
     submit = runpy.run_path(str(HERE / "submit-public-flamingo-stage.py"))
     approval = pinned_file(a.approval, a.approved_sha256)
-    scope = pinned_file(a.scope, submit["SCOPE_SHA256"])
+    submit["check_window_approval"](window, approval)
+    scope = submit["stage_scope"](a.scope, window, private=True)
     submit["approved_packet"](a.packet, approval["packet_file_sha256"], packet)
     if (approval["purpose"] != "public-flamingo-stage" or approval["action"] != "activate"
             or approval["exclusive_storage_handoff"] is not True
@@ -332,6 +355,7 @@ def main():
     phase, pins = "stage", approval["stage_guard"]
     if a.action == "fence":
         closure = pinned_file(a.closure, a.closure_sha256)
+        validate_window_pin(window, closure)
         deadline = check_closure(closure, approval, a.approved_sha256, a.packet_sha256, a.capture_sha256,
                                  scope, approval["storage_operator"])
         phase, pins = "closed", closure["closed_guard"]
@@ -360,7 +384,7 @@ def main():
 
     def live_guard():
         check_deadline(deadline)
-        result = verify_guard(get, a.run, phase, pins, job=packet["job"] if phase == "stage" else None)
+        result = verify_guard(get, a.run, phase, pins, job=packet["job"] if phase == "stage" else None, window=window)
         if digest(result) != digest(pins):
             raise ValueError("Observed writer guard differs from the approved identities and generations")
         check_deadline(deadline)
@@ -386,10 +410,14 @@ def main():
         def secret_meta(name):
             # Only return UID, lifecycle, type and key names across the process boundary.
             template = ('{{.metadata.name}} {{.metadata.namespace}} {{.metadata.uid}} {{if .metadata.deletionTimestamp}}'
-                        'deleting{{else}}active{{end}} {{.immutable}} {{.type}}{{range $k,$v := .data}} {{$k}}{{end}}')
+                        'deleting{{else}}active{{end}} {{.immutable}} {{.type}}')
+            if window:
+                template += ' {{index .metadata.annotations "airaware.training/stage-window-sha256"}}'
+            template += '{{range $k,$v := .data}} {{$k}}{{end}}'
             nm, ns, ident, lifecycle, immutable, typ, *keys = read(
                 "get", "secret", name, "-n", NS, "-o", "go-template=" + template).decode().split()
-            return {"metadata": {"name": nm, "namespace": ns, "uid": ident, "deletionTimestamp": lifecycle != "active"},
+            signed_window = {"window_sha256": keys.pop(0)} if window and keys else {}
+            return {**signed_window, "metadata": {"name": nm, "namespace": ns, "uid": ident, "deletionTimestamp": lifecycle != "active"},
                     "immutable": immutable == "true", "type": typ, "keys": keys}
         result = capture(packet, ids, get, lambda pod, name: read("logs", pod, "-c", name, "-n", NS, "--limit-bytes=8192"),
                          secret_meta, live_guard, a.approved_sha256)
@@ -402,7 +430,16 @@ def main():
                     "stage_guard": approval["stage_guard"], "capture_sha256": a.capture_sha256,
                     "packet_sha256": a.packet_sha256, "storage_operator": identity,
                     "cutoff": scope["cutoff"], "valid_until": closure["valid_until"]}
+        if window:
+            evidence["window_sha256"] = window.sha256
         result = fence(packet, ids, observation, get, absent, detached, live_guard, evidence)
+    if window:
+        # Recheck the signed document, scope, release and binding bytes before attesting.
+        current_window = load_window(a, a.run, live=True)
+        current = render["build_packet"](a.promotion, a.binding, a.expected_deployment, a.run,
+                                         packet["inventory_secret"], window=current_window)
+        if digest(current) != a.packet_sha256:
+            raise ValueError("Staging evidence changed before closeout")
     print(json.dumps(result, sort_keys=True))
 
 

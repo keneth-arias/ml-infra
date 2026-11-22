@@ -63,6 +63,9 @@ def read_approval(path, expected):
 
 
 def check_transition(enrolled, active):
+    if (("window_sha256" in active) != ("window_sha256" in enrolled)
+            or active.get("window_sha256") != enrolled.get("window_sha256")):
+        raise ValueError("Enrollment and activation reference different windows")
     if (enrolled["action"] != "enroll" or active["action"] != "activate" or any(
             active[k] != enrolled[k] for k in ("purpose", "run", "packet_file_sha256", "deployment_sha256",
                                                "inventory_secret", "inventory_uid", "staging_operator",
@@ -76,8 +79,28 @@ def check_transition(enrolled, active):
         raise ValueError("Activation must bind the direct successor of the closed PVC guard")
 
 
+def stage_scope(path, window, *, private=False):
+    expected = window.scope_sha256 if window else SCOPE_SHA256
+    if private:
+        return read_approval(path, expected)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("Allocation scope differs from the approved window")
+    return json.loads(raw)
+
+
+def check_window_approval(window, approval):
+    from public_flamingo_window import validate_window_pin
+    validate_window_pin(window, approval)
+    for key in ("closed_guard", "stage_guard", "owner_guard"):
+        if key in approval:
+            validate_window_pin(window, approval[key])
+
+
 def main():
+    from public_flamingo_window import add_window_args, load_window
     cli = argparse.ArgumentParser(description=__doc__)
+    add_window_args(cli)
     cli.add_argument("action", choices=["enroll", "activate"])
     cli.add_argument("--enrollment-approval", type=Path)
     for key in ("packet", "approval", "promotion", "binding", "scope"):
@@ -85,26 +108,26 @@ def main():
     cli.add_argument("--approved-sha256", required=True, help="Independent owner's approval file SHA-256")
     a = cli.parse_args()
     approval = read_approval(a.approval, a.approved_sha256)
+    window = load_window(a, approval["run"], live=True)
+    check_window_approval(window, approval)
     if a.action != approval["action"] or (a.enrollment_approval is not None) != (a.action == "activate"):
         raise ValueError("Expected approval for this action and a predecessor only on activation")
     if a.action == "activate":
         enrolled = read_approval(a.enrollment_approval, approval["enrollment_approval_sha256"])
+        check_window_approval(window, enrolled)
         check_transition(enrolled, approval)
     if (approval["purpose"] != "public-flamingo-stage" or approval["exclusive_storage_handoff"] is not True
             or approval["inventory_secret_immutable"] is not True):
         raise ValueError("Owner must grant the exclusive handoff and approve the immutable inventory")
-    raw_scope = a.scope.read_bytes()
-    if hashlib.sha256(raw_scope).hexdigest() != SCOPE_SHA256:
-        raise ValueError("Expected the original allocation scope")
-    scope = json.loads(raw_scope)
+    scope = stage_scope(a.scope, window)
     inventory_uid = str(uuid.UUID(approval["inventory_uid"]))
-    render = [sys.executable, str(HERE / "render-public-flamingo-stage.py"), "--promotion", str(a.promotion),
-              "--binding", str(a.binding), "--run", approval["run"], "--expected-deployment",
-              approval["deployment_sha256"], "--inventory-secret", approval["inventory_secret"]]
+    renderer = runpy.run_path(str(HERE / "render-public-flamingo-stage.py"))
 
     def reproduce():
-        return approved_packet(a.packet, approval["packet_file_sha256"],
-                               json.loads(subprocess.check_output(render, timeout=30)))
+        current_window = load_window(a, approval["run"], live=True)
+        packet = renderer["build_packet"](a.promotion, a.binding, approval["deployment_sha256"], approval["run"],
+                                          approval["inventory_secret"], window=current_window)
+        return approved_packet(a.packet, approval["packet_file_sha256"], packet)
 
     packet = reproduce()
     operator = approval["staging_operator"]
@@ -148,7 +171,7 @@ def main():
     pins = approval["closed_guard" if phase == "closed" else "stage_guard"]
 
     def check_guard():
-        return verify_guard(get, packet["run"], phase, pins, job=job if phase == "stage" else None)
+        return verify_guard(get, packet["run"], phase, pins, job=job if phase == "stage" else None, window=window)
 
     def gates(own_job=None):
         check_guard()
@@ -156,14 +179,19 @@ def main():
         native["check_active"](*native["held_policy_and_binding"](),
                                {"items": [get(native["POLICY"]), get(native["GUARD"])]})
         closeout["exclude_other_writers"](get, own_job)
-        node = get("node", packet["placement"]["name"])
-        check_placement(packet["placement"], node)
+        # The successor guard already verified the signed Node and Namespace UIDs.
+        if not window:
+            check_placement(packet["placement"], get("node", packet["placement"]["name"]))
         # Print only identity and immutability; never fetch Secret data into a file or transcript.
+        fields = 'jsonpath={.metadata.uid}{" "}{.immutable}{" "}'
+        expected = inventory_uid + " true"
+        if window:
+            fields += r'{.metadata.annotations.airaware\.training/stage-window-sha256}{" "}'
+            expected += " " + window.sha256
         actual = subprocess.check_output([*kube, "--request-timeout=10s", "get", "secret", approval["inventory_secret"],
-                                          "-o", 'jsonpath={.metadata.uid}{" "}{.immutable}{" "}{.metadata.deletionTimestamp}'],
-                                         text=True, timeout=15)
-        if actual.strip() != inventory_uid + " true":
-            raise ValueError("Expected the approved immutable inventory Secret UID")
+                                          "-o", fields + "{.metadata.deletionTimestamp}"], text=True, timeout=15)
+        if actual.strip() != expected:
+            raise ValueError("Expected the approved immutable inventory Secret UID and window")
         env = dict(os.environ, NEBIUS_STORAGE_BINDING_RECEIPT=str(a.binding),
                    NEBIUS_STORAGE_BINDING_SHA256=packet["binding_sha256"])
         subprocess.run([sys.executable, str(HERE / "training-storage-handoff.py")], env=env, check=True, timeout=140)
@@ -185,6 +213,7 @@ def main():
         gates(job_uid)
     program = get("configmap", packet["configmap"]["metadata"]["name"], "-n", "training")
     if (program["metadata"]["uid"] != program_uid or program["metadata"].get("deletionTimestamp")
+            or (window and program["metadata"].get("annotations") != packet["configmap"]["metadata"]["annotations"])
             or program.get("immutable") is not True or program["data"] != packet["configmap"]["data"]
             or program.get("binaryData")):
         raise ValueError("Approved stage program changed after creation")
@@ -209,6 +238,7 @@ def main():
         closeout["verify_job"](packet, active)
     canonical = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode()
     print(json.dumps({"job_uid": job_uid, "configmap_uid": program_uid, "inventory_uid": inventory_uid,
+                      **({"window_sha256": window.sha256} if window else {}),
                       "packet_file_sha256": approval["packet_file_sha256"],
                       "packet_sha256": hashlib.sha256(canonical).hexdigest()}, sort_keys=True))
 
