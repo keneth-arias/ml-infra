@@ -124,3 +124,11 @@ La validación existente de manifiestos y el dry run del servidor aprobaron.
 La identidad Git se comprobó desde un Pod restringido con `git ls-remote`.
 Los recibos de la ejecución local están en
 `/home/kymai/.local/state/ml-infra/airaware-web-refresh-20261123/`.
+
+La integración de Vercel devolvió `Deployment was blocked` para el commit
+publicado en `main` y para el commit anterior incorporado durante la entrega.
+GitHub aceptó la publicación. El panel redirige al inicio de sesión, por lo que
+el motivo específico requiere acceso del propietario a Vercel. El CronJob
+actualiza Git; este bloqueo externo debe resolverse para que esos commits
+actualicen el dominio de producción. No se cambió la identidad del autor
+para eludir las reglas de despliegue.
