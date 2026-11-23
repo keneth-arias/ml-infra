@@ -1,0 +1,11 @@
+[Unit]
+Description=Abrir PR de pronósticos horarios para revisión de qriqs
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=GH_PROMPT_DISABLED=1
+EnvironmentFile=%h/.config/airaware-web-review.env
+ExecStart=/usr/bin/python3 %h/.local/lib/airaware-web-review/open-review.py ${AIRAWARE_RUNS}
+UMask=0077
+NoNewPrivileges=yes

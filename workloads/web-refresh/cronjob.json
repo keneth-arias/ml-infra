@@ -1,0 +1,498 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "airaware-web-refresh",
+        "labels": {
+          "pod-security.kubernetes.io/enforce": "restricted",
+          "pod-security.kubernetes.io/enforce-version": "v1.36"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "receipts",
+        "namespace": "airaware-web-refresh"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "storageClassName": "airaware-hostpath-retain",
+        "resources": {
+          "requests": {
+            "storage": "2Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "gemma-1b-release",
+        "namespace": "airaware-web-refresh"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "storageClassName": "airaware-hostpath-retain",
+        "resources": {
+          "requests": {
+            "storage": "6Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "metadata": {
+        "name": "airaware-hourly-forecast",
+        "namespace": "airaware-web-refresh"
+      },
+      "spec": {
+        "schedule": "0 * * * *",
+        "timeZone": "America/Lima",
+        "suspend": false,
+        "concurrencyPolicy": "Forbid",
+        "startingDeadlineSeconds": 600,
+        "successfulJobsHistoryLimit": 3,
+        "failedJobsHistoryLimit": 3,
+        "jobTemplate": {
+          "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 900,
+            "ttlSecondsAfterFinished": 172800,
+            "template": {
+              "metadata": {
+                "labels": {
+                  "app": "airaware-web-refresh"
+                }
+              },
+              "spec": {
+                "nodeSelector": {
+                  "kubernetes.io/hostname": "bm"
+                },
+                "restartPolicy": "Never",
+                "automountServiceAccountToken": false,
+                "enableServiceLinks": false,
+                "securityContext": {
+                  "runAsNonRoot": true,
+                  "runAsUser": 1000,
+                  "runAsGroup": 1000,
+                  "fsGroup": 1000,
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                },
+                "initContainers": [
+                  {
+                    "name": "capture",
+                    "image": "docker.io/local/airaware-fresh-peak-collector@sha256:e8e3caa7645d74297af205c45aeb3af865cd24864fa9b2e96e95e7ae07a0ea64",
+                    "imagePullPolicy": "Never",
+                    "command": [
+                      "/bin/sh",
+                      "/config/run.sh",
+                      "capture"
+                    ],
+                    "env": [
+                      {
+                        "name": "JOB_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+                          }
+                        }
+                      },
+                      {
+                        "name": "HOME",
+                        "value": "/tmp"
+                      },
+                      {
+                        "name": "PYTHONDONTWRITEBYTECODE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "PYTHONPATH",
+                        "value": "/config:/opt/fresh-peak:/opt/vendor:/opt/source/tools/timenet-smoke:/opt/forecast/src"
+                      },
+                      {
+                        "name": "OMP_NUM_THREADS",
+                        "value": "2"
+                      },
+                      {
+                        "name": "OPENBLAS_NUM_THREADS",
+                        "value": "1"
+                      },
+                      {
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "AIRAWARE_REVISION",
+                        "value": "bf86651d7fa28670a774b10fe042ed903198b9d9"
+                      }
+                    ],
+                    "resources": {
+                      "requests": {
+                        "cpu": "300m",
+                        "memory": "256Mi",
+                        "ephemeral-storage": "100Mi"
+                      },
+                      "limits": {
+                        "cpu": "2",
+                        "memory": "2Gi",
+                        "ephemeral-storage": "1Gi"
+                      }
+                    },
+                    "securityContext": {
+                      "allowPrivilegeEscalation": false,
+                      "readOnlyRootFilesystem": true,
+                      "capabilities": {
+                        "drop": [
+                          "ALL"
+                        ]
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "config",
+                        "mountPath": "/config",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "state",
+                        "mountPath": "/state"
+                      },
+                      {
+                        "name": "tmp",
+                        "mountPath": "/tmp"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "forecast",
+                    "image": "localhost/ml-infra/gemma-trainer@sha256:1ede4194d1d0a10b3aa551fc6971f169284d30bb17a2376858b77d72575cda9b",
+                    "imagePullPolicy": "Never",
+                    "command": [
+                      "/bin/sh",
+                      "/config/run.sh",
+                      "predict"
+                    ],
+                    "env": [
+                      {
+                        "name": "JOB_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+                          }
+                        }
+                      },
+                      {
+                        "name": "HOME",
+                        "value": "/tmp"
+                      },
+                      {
+                        "name": "PYTHONDONTWRITEBYTECODE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "PYTHONPATH",
+                        "value": "/config:/opt/fresh-peak:/opt/vendor:/opt/source/tools/timenet-smoke:/opt/forecast/src"
+                      },
+                      {
+                        "name": "OMP_NUM_THREADS",
+                        "value": "2"
+                      },
+                      {
+                        "name": "OPENBLAS_NUM_THREADS",
+                        "value": "1"
+                      },
+                      {
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
+                      }
+                    ],
+                    "resources": {
+                      "requests": {
+                        "cpu": "2",
+                        "memory": "12Gi",
+                        "ephemeral-storage": "100Mi",
+                        "nvidia.com/gpu": "1"
+                      },
+                      "limits": {
+                        "cpu": "2",
+                        "memory": "12Gi",
+                        "ephemeral-storage": "1Gi",
+                        "nvidia.com/gpu": "1"
+                      }
+                    },
+                    "securityContext": {
+                      "allowPrivilegeEscalation": false,
+                      "readOnlyRootFilesystem": true,
+                      "capabilities": {
+                        "drop": [
+                          "ALL"
+                        ]
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "config",
+                        "mountPath": "/config",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "state",
+                        "mountPath": "/state"
+                      },
+                      {
+                        "name": "tmp",
+                        "mountPath": "/tmp"
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/SHA256SUMS",
+                        "subPath": "SHA256SUMS",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/weights",
+                        "subPath": "weights",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/step-00004500",
+                        "subPath": "step-00004500",
+                        "readOnly": true
+                      }
+                    ]
+                  },
+                  {
+                    "name": "correction",
+                    "image": "docker.io/local/airaware-scorer@sha256:95ed7b9099f980dec1c3fdd1c1760e17f5b38e4d2540f62adb50e7821663c14e",
+                    "imagePullPolicy": "Never",
+                    "command": [
+                      "/bin/sh",
+                      "/config/run.sh",
+                      "correct"
+                    ],
+                    "env": [
+                      {
+                        "name": "JOB_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+                          }
+                        }
+                      },
+                      {
+                        "name": "HOME",
+                        "value": "/tmp"
+                      },
+                      {
+                        "name": "PYTHONDONTWRITEBYTECODE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "OMP_NUM_THREADS",
+                        "value": "2"
+                      },
+                      {
+                        "name": "OPENBLAS_NUM_THREADS",
+                        "value": "1"
+                      },
+                      {
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
+                      }
+                    ],
+                    "resources": {
+                      "requests": {
+                        "cpu": "300m",
+                        "memory": "256Mi",
+                        "ephemeral-storage": "100Mi"
+                      },
+                      "limits": {
+                        "cpu": "2",
+                        "memory": "2Gi",
+                        "ephemeral-storage": "1Gi"
+                      }
+                    },
+                    "securityContext": {
+                      "allowPrivilegeEscalation": false,
+                      "readOnlyRootFilesystem": true,
+                      "capabilities": {
+                        "drop": [
+                          "ALL"
+                        ]
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "config",
+                        "mountPath": "/config",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "state",
+                        "mountPath": "/state"
+                      },
+                      {
+                        "name": "tmp",
+                        "mountPath": "/tmp"
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/correction.json",
+                        "subPath": "calibration/correction.json",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/release/tools/timenet-smoke",
+                        "subPath": "calibration/tools/timenet-smoke",
+                        "readOnly": true
+                      }
+                    ]
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "publish",
+                    "image": "docker.io/local/airaware-web-publisher@sha256:84257a1221804f8351be35e687fa1a90d9106ebeea8b4191ffe7ea99ca65ce33",
+                    "imagePullPolicy": "Never",
+                    "command": [
+                      "/bin/sh",
+                      "/config/run.sh",
+                      "publish"
+                    ],
+                    "env": [
+                      {
+                        "name": "JOB_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+                          }
+                        }
+                      },
+                      {
+                        "name": "HOME",
+                        "value": "/tmp"
+                      },
+                      {
+                        "name": "PYTHONDONTWRITEBYTECODE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "PYTHONPATH",
+                        "value": "/config:/opt/fresh-peak:/opt/vendor:/opt/source/tools/timenet-smoke:/opt/forecast/src"
+                      },
+                      {
+                        "name": "OMP_NUM_THREADS",
+                        "value": "2"
+                      },
+                      {
+                        "name": "OPENBLAS_NUM_THREADS",
+                        "value": "1"
+                      },
+                      {
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
+                      }
+                    ],
+                    "resources": {
+                      "requests": {
+                        "cpu": "300m",
+                        "memory": "256Mi",
+                        "ephemeral-storage": "100Mi"
+                      },
+                      "limits": {
+                        "cpu": "2",
+                        "memory": "2Gi",
+                        "ephemeral-storage": "1Gi"
+                      }
+                    },
+                    "securityContext": {
+                      "allowPrivilegeEscalation": false,
+                      "readOnlyRootFilesystem": true,
+                      "capabilities": {
+                        "drop": [
+                          "ALL"
+                        ]
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "config",
+                        "mountPath": "/config",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "state",
+                        "mountPath": "/state"
+                      },
+                      {
+                        "name": "tmp",
+                        "mountPath": "/tmp"
+                      },
+                      {
+                        "name": "credentials",
+                        "mountPath": "/credentials",
+                        "readOnly": true
+                      }
+                    ]
+                  }
+                ],
+                "volumes": [
+                  {
+                    "name": "config",
+                    "configMap": {
+                      "name": "web-refresh-gemma-code"
+                    }
+                  },
+                  {
+                    "name": "model",
+                    "persistentVolumeClaim": {
+                      "claimName": "gemma-1b-release",
+                      "readOnly": true
+                    }
+                  },
+                  {
+                    "name": "credentials",
+                    "secret": {
+                      "secretName": "web-refresh-git",
+                      "defaultMode": 288
+                    }
+                  },
+                  {
+                    "name": "state",
+                    "persistentVolumeClaim": {
+                      "claimName": "receipts"
+                    }
+                  },
+                  {
+                    "name": "tmp",
+                    "emptyDir": {
+                      "sizeLimit": "1Gi"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
