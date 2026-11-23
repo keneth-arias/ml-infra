@@ -21,7 +21,7 @@ case "$1" in
     cp /credentials/id_ed25519 /tmp/ssh/key
     chmod 600 /tmp/ssh/key
     export GIT_SSH_COMMAND='ssh -i /tmp/ssh/key -o IdentitiesOnly=yes -o UserKnownHostsFile=/credentials/known_hosts -o StrictHostKeyChecking=yes'
-    git clone --depth 1 --single-branch --branch main git@github.com:qriqs/airaware-web.git /tmp/web
+    git clone --depth 1 --single-branch --branch main git@github.com:qriqs/neblima-web.git /tmp/web
     cd /tmp/web
     /opt/python/bin/python3.13 - "$run/actual.json" <<'PY'
 import json

@@ -38,10 +38,7 @@ def container(name, image, phase):
 
 
 capture = container("capture", collector, "capture")
-capture["env"] += [
-    {"name": "NOT_BEFORE", "value": "2026-11-23T14:00:00Z"},
-    {"name": "AIRAWARE_REVISION", "value": args.airaware_revision},
-]
+capture["env"].append({"name": "AIRAWARE_REVISION", "value": args.airaware_revision})
 predict = container("forecast", predictor, "predict")
 predict["volumeMounts"].extend([
     {"name": "model", "mountPath": "/model/SHA256SUMS", "subPath": "SHA256SUMS", "readOnly": True},

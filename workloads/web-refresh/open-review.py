@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
-REPO = "qriqs/airaware-web"
+REPO = "qriqs/neblima-web"
 OWNER = "qriqs"
 
 

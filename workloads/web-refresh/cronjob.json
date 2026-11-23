@@ -137,10 +137,6 @@
                         "value": "1"
                       },
                       {
-                        "name": "NOT_BEFORE",
-                        "value": "2026-11-23T14:00:00Z"
-                      },
-                      {
                         "name": "AIRAWARE_REVISION",
                         "value": "bf86651d7fa28670a774b10fe042ed903198b9d9"
                       }
