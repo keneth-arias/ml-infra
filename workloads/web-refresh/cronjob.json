@@ -33,6 +33,25 @@
       }
     },
     {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "gemma-1b-release",
+        "namespace": "airaware-web-refresh"
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "storageClassName": "airaware-hostpath-retain",
+        "resources": {
+          "requests": {
+            "storage": "6Gi"
+          }
+        }
+      }
+    },
+    {
       "apiVersion": "batch/v1",
       "kind": "CronJob",
       "metadata": {
@@ -114,8 +133,8 @@
                         "value": "1"
                       },
                       {
-                        "name": "CUDA_VISIBLE_DEVICES",
-                        "value": ""
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
                       },
                       {
                         "name": "NOT_BEFORE",
@@ -123,7 +142,7 @@
                       },
                       {
                         "name": "AIRAWARE_REVISION",
-                        "value": "83dd496b1c0d64b9da5928dffd682337808c2da8"
+                        "value": "bf86651d7fa28670a774b10fe042ed903198b9d9"
                       }
                     ],
                     "resources": {
@@ -165,7 +184,7 @@
                   },
                   {
                     "name": "forecast",
-                    "image": "ghcr.io/keneth-arias/ml-infra-qwen@sha256:3378851e06efb96c8c975fc4cf2d2121e3a8efeb0ff03b392f5683e76258096b",
+                    "image": "localhost/ml-infra/gemma-trainer@sha256:1ede4194d1d0a10b3aa551fc6971f169284d30bb17a2376858b77d72575cda9b",
                     "imagePullPolicy": "Never",
                     "command": [
                       "/bin/sh",
@@ -202,8 +221,104 @@
                         "value": "1"
                       },
                       {
-                        "name": "CUDA_VISIBLE_DEVICES",
-                        "value": ""
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
+                      }
+                    ],
+                    "resources": {
+                      "requests": {
+                        "cpu": "2",
+                        "memory": "12Gi",
+                        "ephemeral-storage": "100Mi",
+                        "nvidia.com/gpu": "1"
+                      },
+                      "limits": {
+                        "cpu": "2",
+                        "memory": "12Gi",
+                        "ephemeral-storage": "1Gi",
+                        "nvidia.com/gpu": "1"
+                      }
+                    },
+                    "securityContext": {
+                      "allowPrivilegeEscalation": false,
+                      "readOnlyRootFilesystem": true,
+                      "capabilities": {
+                        "drop": [
+                          "ALL"
+                        ]
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "config",
+                        "mountPath": "/config",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "state",
+                        "mountPath": "/state"
+                      },
+                      {
+                        "name": "tmp",
+                        "mountPath": "/tmp"
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/SHA256SUMS",
+                        "subPath": "SHA256SUMS",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/weights",
+                        "subPath": "weights",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/model/step-00004500",
+                        "subPath": "step-00004500",
+                        "readOnly": true
+                      }
+                    ]
+                  },
+                  {
+                    "name": "correction",
+                    "image": "docker.io/local/airaware-scorer@sha256:95ed7b9099f980dec1c3fdd1c1760e17f5b38e4d2540f62adb50e7821663c14e",
+                    "imagePullPolicy": "Never",
+                    "command": [
+                      "/bin/sh",
+                      "/config/run.sh",
+                      "correct"
+                    ],
+                    "env": [
+                      {
+                        "name": "JOB_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+                          }
+                        }
+                      },
+                      {
+                        "name": "HOME",
+                        "value": "/tmp"
+                      },
+                      {
+                        "name": "PYTHONDONTWRITEBYTECODE",
+                        "value": "1"
+                      },
+                      {
+                        "name": "OMP_NUM_THREADS",
+                        "value": "2"
+                      },
+                      {
+                        "name": "OPENBLAS_NUM_THREADS",
+                        "value": "1"
+                      },
+                      {
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
                       }
                     ],
                     "resources": {
@@ -243,7 +358,14 @@
                       },
                       {
                         "name": "model",
-                        "mountPath": "/model",
+                        "mountPath": "/model/correction.json",
+                        "subPath": "calibration/correction.json",
+                        "readOnly": true
+                      },
+                      {
+                        "name": "model",
+                        "mountPath": "/release/tools/timenet-smoke",
+                        "subPath": "calibration/tools/timenet-smoke",
                         "readOnly": true
                       }
                     ]
@@ -289,8 +411,8 @@
                         "value": "1"
                       },
                       {
-                        "name": "CUDA_VISIBLE_DEVICES",
-                        "value": ""
+                        "name": "HF_HUB_OFFLINE",
+                        "value": "1"
                       }
                     ],
                     "resources": {
@@ -340,13 +462,14 @@
                   {
                     "name": "config",
                     "configMap": {
-                      "name": "web-refresh-code"
+                      "name": "web-refresh-gemma-code"
                     }
                   },
                   {
                     "name": "model",
-                    "configMap": {
-                      "name": "web-refresh-cnn"
+                    "persistentVolumeClaim": {
+                      "claimName": "gemma-1b-release",
+                      "readOnly": true
                     }
                   },
                   {
