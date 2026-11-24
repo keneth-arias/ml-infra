@@ -1,0 +1,27 @@
+{
+  "name": "qwen-portable-openvino",
+  "uid": "bda3ccbe-50f8-4bc6-aae2-a247b88465db",
+  "node_selector": {
+    "kubernetes.io/hostname": "bm"
+  },
+  "image": "docker.io/ml-infra/airaware-joint@sha256:14eb3ed9b9ca00c75acbc56991d0f1882dc8efc5306ccf5fa90366673f40b3be",
+  "condition": [
+    {
+      "lastProbeTime": "2026-11-24T00:03:28Z",
+      "lastTransitionTime": "2026-11-24T00:03:28Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "SuccessCriteriaMet"
+    },
+    {
+      "lastProbeTime": "2026-11-24T00:03:28Z",
+      "lastTransitionTime": "2026-11-24T00:03:28Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "Complete"
+    }
+  ],
+  "completed": "2026-11-24T00:03:28Z"
+}

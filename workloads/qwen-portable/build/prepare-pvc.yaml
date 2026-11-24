@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qwen-portable-build
+  namespace: airaware-web-refresh
+spec:
+  storageClassName: microk8s-hostpath
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 24Gi

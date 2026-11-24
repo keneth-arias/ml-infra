@@ -1,0 +1,27 @@
+{
+  "name": "qwen-portable-mlx-r2",
+  "uid": "82795a9c-7e85-4fab-b94d-83d390bf6292",
+  "node_selector": {
+    "kubernetes.io/hostname": "bm"
+  },
+  "image": "docker.io/ml-infra/airaware-joint@sha256:14eb3ed9b9ca00c75acbc56991d0f1882dc8efc5306ccf5fa90366673f40b3be",
+  "condition": [
+    {
+      "lastProbeTime": "2026-11-24T00:04:55Z",
+      "lastTransitionTime": "2026-11-24T00:04:55Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "SuccessCriteriaMet"
+    },
+    {
+      "lastProbeTime": "2026-11-24T00:04:55Z",
+      "lastTransitionTime": "2026-11-24T00:04:55Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "Complete"
+    }
+  ],
+  "completed": "2026-11-24T00:04:55Z"
+}

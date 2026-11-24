@@ -1,0 +1,106 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "qwen-portable-verify",
+    "namespace": "airaware-web-refresh"
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "template": {
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/opt/conda/bin/python",
+              "-u",
+              "/export/source/verify_exports.py",
+              "/export/exports"
+            ],
+            "env": [
+              {
+                "name": "HOME",
+                "value": "/tmp"
+              },
+              {
+                "name": "HF_HUB_OFFLINE",
+                "value": "1"
+              },
+              {
+                "name": "PYTHONDONTWRITEBYTECODE",
+                "value": "1"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/export/source:/export/deps"
+              }
+            ],
+            "image": "docker.io/ml-infra/airaware-joint@sha256:14eb3ed9b9ca00c75acbc56991d0f1882dc8efc5306ccf5fa90366673f40b3be",
+            "imagePullPolicy": "Never",
+            "name": "build",
+            "resources": {
+              "requests": {
+                "cpu": "4",
+                "memory": "7Gi"
+              },
+              "limits": {
+                "cpu": "6",
+                "memory": "12Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/export",
+                "name": "export"
+              },
+              {
+                "mountPath": "/tmp",
+                "name": "tmp"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "bm"
+        },
+        "restartPolicy": "Never",
+        "securityContext": {
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "volumes": [
+          {
+            "name": "export",
+            "persistentVolumeClaim": {
+              "claimName": "qwen-portable-build"
+            }
+          },
+          {
+            "emptyDir": {},
+            "name": "tmp"
+          }
+        ]
+      },
+      "metadata": {
+        "labels": {
+          "neblima.orbitly.lat/qwen-portable-offline": "verify"
+        }
+      }
+    },
+    "ttlSecondsAfterFinished": 86400
+  }
+}

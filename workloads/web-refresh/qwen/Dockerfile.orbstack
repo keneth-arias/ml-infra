@@ -1,0 +1,20 @@
+FROM python:3.13-slim-trixie@sha256:7e9b0661d175b176a592d3969ccaf702c11b6769a485fa8b0d3769dd07bf1720
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --only-binary=:all: \
+    numpy==2.5.5 duckdb==1.5.6 pyarrow==26.0.1
+
+RUN mkdir -p /opt/python/bin /opt/fresh-peak \
+    && ln -s /usr/local/bin/python3.13 /opt/python/bin/python3.13
+
+RUN python3 -c 'from urllib.request import urlretrieve; urlretrieve("https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-aarch64-linux", "/opt/fresh-peak/lightpanda")' \
+    && echo 'a7ad7c290e745b8e37bd1b3e1ac6431caca1482cc30b3c0e485587e10489632a  /opt/fresh-peak/lightpanda' | sha256sum -c - \
+    && chmod 0555 /opt/fresh-peak/lightpanda
+
+ENV HOME=/tmp PYTHONDONTWRITEBYTECODE=1 LIGHTPANDA_DISABLE_TELEMETRY=true
+RUN useradd --uid 1000 --user-group --no-create-home --home-dir /tmp airaware
+USER 1000:1000
+ENTRYPOINT ["/bin/sh"]

@@ -1,0 +1,11 @@
+{
+  "source_job": "airaware-hourly-forecast-29924640",
+  "checkpoint_sha256": "ca2ee75b0702a7893bc76a196351a45900fd54b68347f724157a532062d5c0cf",
+  "mlx_weights_sha256": "9a29ea6d5608d1ce9bc47b0bbaaaf316319988fe3091cab30b40148cb105be43",
+  "history_sha256": "7208180fe5cc9fc1c3c020d375994390f27b9081ddeacf1299072f4cbe652186",
+  "windows": 40,
+  "horizons": 6,
+  "max_abs_ug_m3": 4.100799560546875e-05,
+  "tolerance_ug_m3": 0.001,
+  "unauthenticated_http": 401
+}
