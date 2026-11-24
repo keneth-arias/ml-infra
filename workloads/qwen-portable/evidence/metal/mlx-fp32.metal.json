@@ -1,0 +1,57 @@
+{
+  "schema": "neblima-portable-metal-check-v1",
+  "bundle": "mlx-fp32",
+  "checkpoint_sha256": "ca2ee75b0702a7893bc76a196351a45900fd54b68347f724157a532062d5c0cf",
+  "weights_sha256": "9a29ea6d5608d1ce9bc47b0bbaaaf316319988fe3091cab30b40148cb105be43",
+  "reference_sha256": "fea4f9a1305c6bfc2a43d003af71901498d70ead6d883054f3dec38cec37f74b",
+  "runner_sha256": "cb6e51f08f1f0a2508c0fbbfc68780ff418f163c74f0a3bb0c4e0a5c379e9b8a",
+  "storage_dtype": "float32",
+  "compute_dtype": "float32",
+  "runtime": {
+    "os": "26.7.3",
+    "machine": "arm64",
+    "python": "3.13.18",
+    "mlx": "0.32.4",
+    "device": "Apple M4"
+  },
+  "histories": 9,
+  "horizon": 6,
+  "absolute_tolerance_ug_m3": 0.001,
+  "max_abs_ug_m3": 0.0001678466796875,
+  "per_horizon_max_abs_ug_m3": {
+    "single": [
+      6.866455078125e-05,
+      3.24249267578125e-05,
+      3.0517578125e-05,
+      4.9591064453125e-05,
+      5.53131103515625e-05,
+      5.7220458984375e-05
+    ],
+    "batch_9": [
+      0.00012969970703125,
+      0.0001220703125,
+      0.0001678466796875,
+      0.000152587890625,
+      9.918212890625e-05,
+      9.918212890625e-05
+    ]
+  },
+  "load_seconds": 0.004109000001335517,
+  "first_forward_seconds": 0.700056500005303,
+  "warm": {
+    "single": {
+      "median_seconds": 0.050332958009676076,
+      "max_seconds": 0.05051108400220983
+    },
+    "batch_9": {
+      "median_seconds": 0.2006056670070393,
+      "max_seconds": 0.20754899999883492
+    },
+    "batch_16": {
+      "median_seconds": 0.3440280420036288,
+      "max_seconds": 0.3787112080026418
+    }
+  },
+  "mlx_peak_bytes": 2489705801,
+  "process_peak_rss_bytes": 2042068992
+}

@@ -1,0 +1,12 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qwen-portable-offline-verify
+  namespace: airaware-web-refresh
+spec:
+  podSelector:
+    matchLabels:
+      neblima.orbitly.lat/qwen-portable-offline: verify
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []

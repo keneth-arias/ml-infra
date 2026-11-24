@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen-portable-master-r2
+  namespace: airaware-web-refresh
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: bm
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: build
+        image: docker.io/ml-infra/airaware-joint@sha256:14eb3ed9b9ca00c75acbc56991d0f1882dc8efc5306ccf5fa90366673f40b3be
+        imagePullPolicy: Never
+        command: ["/opt/conda/bin/python", "-u", "/export/source/merge_forecast.py"]
+        args: ["--model-root", "/model", "--assets", "/export/assets", "--source", "/export/source", "--output", "/export/exports"]
+        env:
+        - name: HOME
+          value: /tmp
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONPATH
+          value: /export/source
+        resources:
+          requests: {cpu: "4", memory: 16Gi}
+          limits: {cpu: "6", memory: 24Gi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: release
+          mountPath: /model
+          readOnly: true
+        - name: export
+          mountPath: /export
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: release
+        persistentVolumeClaim:
+          claimName: qwen-08b-release
+          readOnly: true
+      - name: export
+        persistentVolumeClaim:
+          claimName: qwen-portable-build
+      - name: tmp
+        emptyDir: {}

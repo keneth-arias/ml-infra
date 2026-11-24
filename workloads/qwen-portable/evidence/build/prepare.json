@@ -1,0 +1,27 @@
+{
+  "name": "qwen-portable-prepare",
+  "uid": "86656247-0b36-45fb-8a05-7a11924e7b29",
+  "node_selector": {
+    "kubernetes.io/hostname": "bm"
+  },
+  "image": "docker.io/ml-infra/airaware-joint@sha256:14eb3ed9b9ca00c75acbc56991d0f1882dc8efc5306ccf5fa90366673f40b3be",
+  "condition": [
+    {
+      "lastProbeTime": "2026-11-23T23:58:58Z",
+      "lastTransitionTime": "2026-11-23T23:58:58Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "SuccessCriteriaMet"
+    },
+    {
+      "lastProbeTime": "2026-11-23T23:58:58Z",
+      "lastTransitionTime": "2026-11-23T23:58:58Z",
+      "message": "Reached expected number of succeeded pods",
+      "reason": "CompletionsReached",
+      "status": "True",
+      "type": "Complete"
+    }
+  ],
+  "completed": "2026-11-23T23:58:58Z"
+}
