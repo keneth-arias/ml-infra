@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +66,31 @@ class PublishTests(unittest.TestCase):
         self.candidate.write_text(json.dumps(self.old))
         head = git(self.remote, "rev-parse", "main")
         self.assertIsNone(self.publish())
+        self.assertEqual(git(self.remote, "rev-parse", "main"), head)
+
+    def test_newer_snapshot_landing_during_push_leaves_head_untouched(self):
+        newer = snapshot("2026-11-24T01:30:00+00:00", "2026-11-23T20:00:00")
+
+        def publish_newer(repo, *args):
+            if args[0] == "push" and not (self.other / "published.txt").exists():
+                (self.other / TARGET).write_text(json.dumps(newer))
+                (self.other / "published.txt").touch()
+                self.advance(self.other)
+            return git(repo, *args)
+
+        with patch("publish.git", side_effect=publish_newer):
+            self.assertIsNone(self.publish())
+        self.assertEqual(git(self.remote, "rev-parse", "main"), git(self.other, "rev-parse", "HEAD"))
+        self.assertEqual(json.loads(git(self.remote, "show", f"main:{TARGET}")), newer)
+
+    def test_push_rejection_without_head_change_is_an_error(self):
+        hook = self.remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head = git(self.remote, "rev-parse", "main")
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
         self.assertEqual(git(self.remote, "rev-parse", "main"), head)
 
     def test_fresh_capture_cannot_regress_observation_hour(self):

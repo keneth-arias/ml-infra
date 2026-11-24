@@ -58,7 +58,7 @@ Primero genera la variante sin credenciales de publicación:
 k() { kubectl --context microk8s -n airaware-web-refresh "$@"; }
 k get nodes -o wide
 k describe node bm
-python3 workloads/web-refresh/render.py \
+python3 workloads/web-refresh/qwen/render.py \
   --publisher-image docker.io/local/airaware-web-publisher@sha256:84257a1221804f8351be35e687fa1a90d9106ebeea8b4191ffe7ea99ca65ce33 \
   --airaware-revision 83dd496b1c0d64b9da5928dffd682337808c2da8 \
   --capture-config web-refresh-capture-83dd496b --suspend > qwen-preview.json

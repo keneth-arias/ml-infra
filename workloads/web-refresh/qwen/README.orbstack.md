@@ -43,6 +43,21 @@ ventanas. El modelo y la clave privada TLS se quedan en macOS.
   `published-commit.txt`. Compara la huella del archivo publicado con
   el archivo que entrega la web.
 
+### Actualizar la configuración del publicador activo
+
+Usa este directorio de `ml-infra` como fuente de `run.sh`, `qwen.py`,
+`gpu_worker.py` y `publish.py`. `render.py` crea un ConfigMap inmutable cuyo
+nombre incluye el hash de los cuatro archivos. Compara la plantilla generada
+con el CronJob activo mediante un dry run del servidor. Para un cambio solo
+de estos archivos, aplica el ConfigMap generado y actualiza la referencia
+del volumen `config` del CronJob. La plantilla completa de OrbStack sale
+suspendida y corresponde a la instalación inicial o a cambios del despliegue.
+
+Verifica que el siguiente Job programado use el ConfigMap nuevo, termine y
+publique un archivo que coincida con el de la web. Conserva el ConfigMap
+anterior hasta verificar el Job. Retira las versiones obsoletas cuando
+ningún CronJob, Job ni Pod del namespace las referencie.
+
 ### Instalación del LaunchAgent
 
 En m4, usa un Python arm64 con MLX 0.32.4 y una copia verificada del bundle
