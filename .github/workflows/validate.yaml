@@ -9,6 +9,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: uv run --python 3.13 --with numpy==2.5.5 python -m unittest discover -s runtime -p 'test_*.py'
+      - name: Test the Qwen web refresh
+        run: uv run --python 3.13 --with numpy==2.5.5 python -m unittest discover -s workloads/web-refresh/qwen -p 'test_*.py'
       - name: Fetch the pinned Nebius GPU Operator chart for its render test
         run: |
           helm pull oci://cr.eu-north1.nebius.cloud/marketplace/nebius/nvidia-gpu-operator/chart/gpu-operator --version v26.3.3 --destination "$RUNNER_TEMP"
