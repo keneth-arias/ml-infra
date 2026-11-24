@@ -1,0 +1,13 @@
+[req]
+distinguished_name=dn
+x509_extensions=extensions
+prompt=no
+
+[dn]
+CN=host.docker.internal
+
+[extensions]
+subjectAltName=DNS:host.docker.internal,DNS:localhost,IP:127.0.0.1
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth

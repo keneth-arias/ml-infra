@@ -1,5 +1,10 @@
 # Pronóstico horario con Gemma 3 1B en bm
 
+La publicación actual de Neblima usa Qwen con MLX en OrbStack. Consulta el
+[runbook de OrbStack](qwen/README.orbstack.md) y el
+[registro del cambio de publicador](qwen/HANDOFF.md) antes de modificar el
+CronJob que publica a la web.
+
 El CronJob de MicroK8s usa la hora de Lima para la programación y conserva la hora publicada por SENAMHI para cada origen. Produce seis valores puntuales en µg/m³. El benchmark de OpenAQ mantiene su reloj UTC. La autorización de la demostración pública cubre pronósticos puntuales. Los intervalos y las alertas tienen una evaluación separada.
 
 ## Flujo

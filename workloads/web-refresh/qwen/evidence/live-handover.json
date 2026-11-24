@@ -1,0 +1,31 @@
+{
+  "bm_fallback": {
+    "active": 0,
+    "suspend": true
+  },
+  "configmap": "web-refresh-qwen-publish-79c205468a8d",
+  "cronjob": "airaware-hourly-forecast",
+  "last_successful_at_utc": "2026-11-24T12:15:24Z",
+  "latest_successful_job": "airaware-hourly-forecast-29925375",
+  "namespace": "airaware-web-refresh",
+  "orb_context": "orbstack",
+  "publisher_files_sha256": {
+    "gpu_worker.py": "894bba3e140e6162c566eb0b868ffe0d68d0208ff74df521b1822157cdae69db",
+    "publish.py": "18067d4d6bf0c8849ff5f9da6b86c98f843598f04ebc8637c140852073722d47",
+    "qwen.py": "f74e28d65cdf89d8eaeed0e7e160e9252fc0b43097bebfd96b4b1e772e66778e",
+    "run.sh": "d259db4644fb158fa060ce80733ce137cde02ef06c9415fd9028cc3cc55202dc"
+  },
+  "schedule": "15 * * * *",
+  "suspended": false,
+  "time_zone": "America/Lima",
+  "verified_at_utc": "2026-11-24T12:30:18+00:00",
+  "website": {
+    "checkpoint_sha256": "ca2ee75b0702a7893bc76a196351a45900fd54b68347f724157a532062d5c0cf",
+    "commit": "2b120c2d8cc0aac412ff2943b9da70d6c9e85edc",
+    "forecast_count": 40,
+    "generated_at_utc": "2026-11-24T12:15:00.863460+00:00",
+    "last_provider_hour": "2026-11-24T07:00:00",
+    "payload_sha256": "9fd3551aef8c788d80928c2c4cb29da19400d5a7de2e8e9fe13c77d72fa27ff5",
+    "station_count": 7
+  }
+}
